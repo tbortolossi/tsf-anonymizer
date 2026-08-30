@@ -162,22 +162,13 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
 
 ## After every TSF analysis: feed the skill
 
-Analyzing a real TSF (with the `read-tsf` skill, or by hand) is the only
-source of truth about what these archives actually contain. **Every such
-analysis ends with an update to `.claude/skills/read-tsf/SKILL.md`** —
-this is not optional and does not need to be asked for:
-
-- A file that was not in the map, or a path that differs by PAN-OS version
-  or platform → add it to the file map.
-- A symptom whose answer took more than one grep → record the working
-  symptom→file→grep line, so the next run is one command.
-- A grep that returned nothing, a command whose output has moved, an alias
-  that no longer holds → fix or delete it; a wrong pointer costs more than
-  a missing one.
-- Something the anonymizer mangled or missed in that TSF → an invariant or
-  a known limitation above, plus a test in `tests/`.
-
-Keep `docs/TSF-GUIDE.md` and the skill saying the same thing when either
-changes. **Genericize before writing**: no customer hostname, IP, serial,
-user or company name ever enters the skill, the docs or a commit — the
-pattern is what is worth keeping, the value never is.
+Analyzing a real TSF is the only source of truth about what these archives
+actually contain, so **every analysis ends with an update to
+`.claude/skills/read-tsf/SKILL.md`** — not optional, not something to ask
+about first. The checklist of what to write lives at the end of that file
+("Before you finish — feed this file"), where it is loaded exactly when a TSF
+is being read; keep it there rather than duplicating it here, and keep
+`docs/TSF-GUIDE.md` in step with it. What the *anonymizer* got wrong on that
+TSF belongs here instead — an invariant or a known limitation above, plus a
+test in `tests/`. Genericize everything: no customer hostname, IP, serial,
+user or company name enters the skill, the docs, or a commit.

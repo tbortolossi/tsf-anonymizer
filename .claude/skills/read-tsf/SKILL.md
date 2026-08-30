@@ -290,3 +290,28 @@ a hostname, `userNNN` a user, `ZONE-0012`/`RULE-0045`/`GW-0002`… named objects
 still works — "peer `203.0.113.7` on `GW-0002`" is the same peer everywhere.
 The `*.mapping.json` sidecar reverses it and must never travel with the
 anonymized archive.
+
+## Before you finish — feed this file
+
+This file is the distillate of every TSF read before yours, and the only
+reason the next read is faster. **Analyzing a TSF ends by updating it**, in
+the same turn, without being asked:
+
+| what happened during the analysis | what to write here |
+| --- | --- |
+| a file you needed was not in the map, or lives elsewhere on this PAN-OS version / platform | add the path, with the version or platform that moves it |
+| the answer to a symptom took more than one grep | add the working `symptom → file → grep` line to Step 3 |
+| a pointer here was wrong: empty grep, renamed command, output that moved | fix it or delete it — a wrong pointer costs more than a missing one |
+| a phrasing in a log differs from what Step 2b describes | correct the example line |
+| the anonymizer mangled or missed something in this TSF | that belongs in the repo's CLAUDE.md (invariant or known limitation) **and** a test, not here |
+
+Two rules on how to write it:
+
+- **Genericize.** No customer hostname, IP, serial, user, company or case
+  number ever enters this file. The pattern is what is worth keeping, the
+  value never is. Use the same placeholders the rest of the file uses.
+- **Keep `docs/TSF-GUIDE.md` in step.** It is the human-facing version of the
+  same knowledge; when one gains a section the other needs a look.
+
+Say in one line what you added, so the person reading your analysis knows the
+skill moved.
