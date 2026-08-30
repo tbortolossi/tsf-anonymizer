@@ -311,3 +311,8 @@ class TestBoundaryParity:
         idx = MappingIndex({"named_objects": {"connect-method": "OBJ-0001", "default-browser": "OBJ-0002"}})
         assert idx.find_leaks("<connect-method> x default-browser=0 </connect-method>") == {}
         assert idx.find_leaks("value connect-method here") == {"connect-method": 1}
+
+
+def test_fqdn_after_a_dot_is_explained():
+    idx = MappingIndex({"fqdns": {"home-lab.example": "host001.anon.internal"}})
+    assert idx.apply("*.home-lab.example sub.home-lab.example") == "*.host001.anon.internal sub.host001.anon.internal"

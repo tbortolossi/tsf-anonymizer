@@ -358,7 +358,16 @@ class Anonymizer:
         return fake
 
     def register_fqdn(self, fqdn: str) -> None:
+        """Register a FQDN and every parent domain down to the registrable
+        one: igw.home-lab.example also yields home-lab.example, otherwise the apex
+        survives in https://home-lab.example/… and *.home-lab.example (real TSF)."""
         self.anon_fqdn(fqdn)
+        parts = fqdn.lower().rstrip(".").split(".")
+        for i in range(1, len(parts) - 1):
+            parent = ".".join(parts[i:])
+            if parent.split(".")[0] in _DC_STOPWORDS or len(parts[i]) < 2:
+                continue
+            self.anon_fqdn(parent)
 
     # -- Email anonymization ------------------------------------------------
 
@@ -435,8 +444,12 @@ class Anonymizer:
             # "/" before is allowed on purpose: https://vpn.acme.fr/ and
             # /path/to/vpn.acme.fr.csr must be rewritten; only </tag> is not.
             # "." after is allowed too — a sentence ends, a file has a suffix.
+            # "." before is allowed: *.home-lab.example and sub.home-lab.example
+            # must be rewritten when only the apex is known. A longer key
+            # still wins — the scan is leftmost, so igw.home-lab.example is
+            # matched at "igw" before the apex is ever tried.
             self._fqdn_re = re.compile(
-                r"(?<![.\w<])(?<!<\/)" + trie_regex(self.fqdn_map) + r"(?![\w\-=])(?!:\/\/)",
+                r"(?<![\w<])(?<!<\/)" + trie_regex(self.fqdn_map) + r"(?![\w\-=])(?!:\/\/)",
                 re.IGNORECASE,
             )
         else:
@@ -983,6 +996,14 @@ def prescan_tree(tree: Path, anon: Anonymizer, progress: ProgressFn = _noop_prog
     return len(files)
 
 
+# "hostname Tab-S6-Lite-de-Thomas, interface ethernet1/8.100" (pan_dhcpd.log),
+# "hostname: fw01", 'hostname="x"'. A device named after its owner is PII
+# that no config declares. `hostname=?` (audit.log) does not match.
+_HOSTNAME_PHRASE_RE = re.compile(
+    r"\bhostname[:=]?\s*[\"']?([A-Za-z][A-Za-z0-9._-]{1,62})(?=[\"',;\s]|$)"
+)
+
+
 def prescan_text_identities(tree: Path, anon: Anonymizer,
                             progress: ProgressFn = _noop_progress) -> int:
     """Discover usernames (log phrasings) and e-mails in every text file before
@@ -1010,6 +1031,8 @@ def prescan_text_identities(tree: Path, anon: Anonymizer,
                 found += 1
         for m in anon._email_re.finditer(text):
             anon.anon_email(m.group(1), m.group(2))
+        for m in _HOSTNAME_PHRASE_RE.finditer(text):
+            anon.register_fqdn(m.group(1))
         if i % 25 == 0 or i == len(paths):
             progress("prescan-text", i, len(paths), f"{len(anon.user_map)} users, {len(anon.email_map)} e-mails")
     return found

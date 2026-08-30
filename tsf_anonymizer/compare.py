@@ -114,7 +114,8 @@ class MappingIndex:
                         if num_keys else None)
         self._cs_re = (re.compile(self._BEFORE + trie_regex(cs_keys) + self._AFTER)
                        if cs_keys else None)
-        self._ci_re = (re.compile(self._BEFORE + trie_regex(self.forward_ci) + self._AFTER,
+        # FQDN keys may follow a dot (*.apex, sub.apex) — mirrors the core.
+        self._ci_re = (re.compile(r"(?<![\w<])(?<!<\/)" + trie_regex(self.forward_ci) + self._AFTER,
                                   re.IGNORECASE)
                        if self.forward_ci else None)
         # Minimum key length that the leak scan will bother with. Below 3 the

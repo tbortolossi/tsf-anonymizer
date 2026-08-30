@@ -367,7 +367,7 @@ class TestRealTsfLessons:
         p.write_text("<c><certificate><entry name='x'><subject>C = US, O = GeoTrust Inc., "
                      "OU = Network Solutions L.L.C., CN = vpn.acme.fr</subject></entry></certificate></c>")
         anon = Anonymizer(); prescan_config_xml(p, anon)
-        assert set(anon.fqdn_map) == {"vpn.acme.fr"}
+        assert set(anon.fqdn_map) == {"vpn.acme.fr", "acme.fr"}  # CN + its apex
 
     def test_admin_contact_is_anonymized(self, tmp_path):
         p = tmp_path / "c.xml"
@@ -508,3 +508,28 @@ class TestRealTsfLessonsRound4:
     def test_busybox_datetime_is_not_a_serial(self, anon):
         assert anon.anonymize_text("datetime-busybox: 040509422026.34") == "datetime-busybox: 040509422026.34"
         assert "001901000123" not in anon.anonymize_text("serial 001901000123")
+
+
+class TestRealTsfLessonsRound5:
+    def test_parent_domains_are_registered_and_wildcards_rewritten(self, anon):
+        anon.register_fqdn("igw.home-lab.example")
+        assert "home-lab.example" in anon.fqdn_map and "com" not in anon.fqdn_map
+        anon.build_patterns()
+        out = anon.anonymize_text("https://home-lab.example/x <member>*.home-lab.example</member> igw.home-lab.example sub.home-lab.example")
+        assert "home-lab" not in out
+        assert out.count(anon.fqdn_map["home-lab.example"]) == 3   # apex, *.apex, sub.apex
+        assert anon.fqdn_map["igw.home-lab.example"] in out
+
+    def test_dn_stopword_parent_is_not_registered(self, anon):
+        anon.register_fqdn("dc01.acme-corp.local")
+        assert "acme-corp.local" in anon.fqdn_map and "local" not in anon.fqdn_map
+
+    def test_dhcp_hostname_phrase_is_discovered(self, tmp_path):
+        from tsf_anonymizer.core import prescan_text_identities
+        (tmp_path / "pan_dhcpd.log").write_text(
+            "mac 9a:5d:df:33:13:29 - hostname Tab-S6-Lite-de-Thomas, interface ethernet1/8.100\n"
+            'audit hostname=? addr=? terminal=?\n')
+        anon = Anonymizer(); prescan_text_identities(tmp_path, anon); anon.build_patterns()
+        assert "tab-s6-lite-de-thomas" in anon.fqdn_map
+        out = anon.anonymize_text((tmp_path / "pan_dhcpd.log").read_text())
+        assert "Thomas" not in out and "hostname=? addr=?" in out and "ethernet1/8.100" in out
