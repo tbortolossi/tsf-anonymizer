@@ -56,7 +56,7 @@ the replaced spans highlighted (red outline = change the mapping does not explai
 ```bash
 export TSF_UID=$(id -u) TSF_GID=$(id -g)
 docker compose up -d --build
-open http://127.0.0.1:8090
+open http://127.0.0.1:8096
 ```
 
 Uploads, extracted trees and outputs live in `./data/jobs/<id>/`. A 300 MB TSF

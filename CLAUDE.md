@@ -29,7 +29,7 @@ Dockerfile, docker-compose.yml
 ```
 
 Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
-`docker compose up -d --build` (UI on http://127.0.0.1:8090).
+`docker compose up -d --build` (UI on http://127.0.0.1:8096).
 
 ## Invariants — what must stay true
 
