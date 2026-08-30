@@ -242,6 +242,8 @@ class Anonymizer:
         self._obj_re: Optional[re.Pattern] = None
         self._fqdn_re: Optional[re.Pattern] = None
         self._known_serial_re: Optional[re.Pattern] = None
+        self._user_trie_re: Optional[re.Pattern] = None
+        self._built_for: tuple = ()
         # Every fake value ever produced. A later pass must never treat one as
         # an original (user 'Zone-A' → user 'OBJ-0002' → user001 chained two
         # pseudonyms and broke config↔log correlation on a real TSF).
@@ -320,7 +322,8 @@ class Anonymizer:
     # -- Username anonymization ---------------------------------------------
 
     def anon_user(self, username: str) -> str:
-        if username.lower() in BUILTIN_OBJECTS or username in self._fakes:
+        if (username.lower() in BUILTIN_OBJECTS or username in self._fakes
+                or username.startswith(_VOCAB_PREFIXES)):
             return username
         if username not in self.user_map:
             self._user_counter += 1
@@ -374,7 +377,7 @@ class Anonymizer:
             return name
         if _is_panos_interface(name):
             return name
-        if name.isdigit():
+        if name.isdigit() or _IP_LIKE_RE.match(name):
             return name
         if name in self.named_obj_map:
             return self.named_obj_map[name]
@@ -433,12 +436,24 @@ class Anonymizer:
             )
         else:
             self._fqdn_re = None
+        # Usernames (from the config's <users>/<admin> entries they are named
+        # objects; from log phrasings they land here) are replaced wherever they
+        # appear — UID="x", (x), x@host — not only in the phrasing that found them.
+        self._user_trie_re = (
+            re.compile(r"(?<![\w.\-<@])(?<!<\/)" + trie_regex(self.user_map) + r"(?![\w\-=])(?!:\/\/)")
+            if self.user_map else None
+        )
+        self._built_for = self._map_sizes()
         # Serials discovered in the config are replaced wherever they appear,
         # whatever their shape; the regex fallback below is stricter.
         self._known_serial_re = (
             re.compile(r"(?<!\d)" + trie_regex(self.serial_map) + r"(?!\d)")
             if self.serial_map else None
         )
+
+    def _map_sizes(self) -> tuple:
+        return (len(self.named_obj_map), len(self.fqdn_map), len(self.user_map),
+                len(self.serial_map))
 
     # -- Full text replacement ----------------------------------------------
 
@@ -459,6 +474,14 @@ class Anonymizer:
         return self._ip_re.sub(replace_match, text)
 
     def _replace_users(self, text: str) -> str:
+        if self._user_trie_re is not None:
+            table = self.user_map
+
+            def sub_known(m: re.Match) -> str:
+                self._count("usernames")
+                return table[m.group(0)]
+            text = self._user_trie_re.sub(sub_known, text)
+
         def replace_match(m: re.Match) -> str:
             full = m.group(0)
             user = m.group(1)
@@ -517,6 +540,12 @@ class Anonymizer:
     def anonymize_text(self, text: str) -> str:
         """Order matters: emails before FQDNs, FQDNs before named objects, IPs last."""
         self.last_counts = {}
+        # A domain discovered through an e-mail, or a user through a log
+        # phrasing, is added after build_patterns(); the compiled tries would
+        # keep missing its bare occurrences (mail.ru, 19 survivals on a real
+        # TSF). Recompile when a table grew — once per file at most.
+        if self._built_for != self._map_sizes():
+            self.build_patterns()
         text = self._replace_emails(text)
         text = self._replace_fqdns(text)
         text = self._replace_named_objects(text)
@@ -635,11 +664,28 @@ _VOCAB_PARENTS = {
 }
 _VOCAB_NAME_RE = re.compile(r"^[a-z][a-z0-9]{0,11}$")
 _VOCAB_PREFIXES = ("pan_", "panw-", "pan-")
+# Parents whose entries are identities whatever their spelling: a lowercase
+# admin "jmartin" is not vocabulary. Everything in NAMED_OBJ_PATHS plus
+# the containers PAN-OS uses for accounts, servers and interfaces.
+_IDENTITY_PARENTS = {t for t, _ in NAMED_OBJ_PATHS} | {
+    "users", "certificate", "server", "ldap", "radius", "kerberos", "tacplus", "saml-idp",
+    "local-user-database", "email", "syslog", "http", "snmptrap", "layer3", "units",
+    "ethernet", "vlan", "aggregate-ethernet", "loopback", "ike-crypto-profiles",
+    "ipsec-crypto-profiles", "ipsec", "vsys", "dynamic-user-group", "custom-url-category",
+    "tag", "static-route", "bgp-peer", "peer", "peer-group", "dhcp", "reserved",
+}
+_IP_LIKE_RE = re.compile(
+    r"^\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?(?:-\d{1,3}(?:\.\d{1,3}){3})?$"
+)
+_FQDN_LIKE_RE = re.compile(r"^(?=.*[A-Za-z])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
 
 
 def _is_vocabulary(name: str, parent_tag: str) -> bool:
-    return (parent_tag in _VOCAB_PARENTS or _VOCAB_NAME_RE.match(name) is not None
-            or name.startswith(_VOCAB_PREFIXES))
+    if name.startswith(_VOCAB_PREFIXES) or parent_tag in _VOCAB_PARENTS:
+        return True
+    if parent_tag in _IDENTITY_PARENTS:
+        return False
+    return _VOCAB_NAME_RE.match(name) is not None
 
 
 # Subtrees that hold Palo Alto's own content, not the customer's: the
@@ -664,12 +710,18 @@ def _walk_xml(elem: ET.Element, anon: Anonymizer, parent_tag: str = "") -> None:
         name_attr = elem.get("name")
         if (name_attr and len(name_attr) >= 2 and name_attr.lower() not in BUILTIN_OBJECTS
                 and not _is_vocabulary(name_attr, parent_tag)):
-            category = "obj"
-            for obj_tag, cat in NAMED_OBJ_PATHS:
-                if parent_tag == obj_tag:
-                    category = cat
-                    break
-            anon.register_named_object(name_attr.strip(), category)
+            name_attr = name_attr.strip()
+            if _IP_LIKE_RE.match(name_attr):
+                pass  # an address object named by its IP: the IP pass owns it
+            elif _FQDN_LIKE_RE.match(name_attr) and not name_attr.lower().endswith((".log", ".xml")):
+                anon.register_fqdn(name_attr)  # one identity, one pseudonym
+            else:
+                category = "obj"
+                for obj_tag, cat in NAMED_OBJ_PATHS:
+                    if parent_tag == obj_tag:
+                        category = cat
+                        break
+                anon.register_named_object(name_attr, category)
 
     field_type = SENSITIVE_XML_FIELDS.get(tag)
     if field_type and elem.text and elem.text.strip():
@@ -925,6 +977,38 @@ def prescan_tree(tree: Path, anon: Anonymizer, progress: ProgressFn = _noop_prog
     return len(files)
 
 
+def prescan_text_identities(tree: Path, anon: Anonymizer,
+                            progress: ProgressFn = _noop_progress) -> int:
+    """Discover usernames (log phrasings) and e-mails in every text file before
+    anything is rewritten, so the first file sees the same tables as the last
+    and every occurrence — not only the phrasing that revealed it — is replaced.
+    One extra read of the corpus; the regexes run in C."""
+    paths = [p for p in sorted(tree.rglob("*")) if p.is_file()]
+    found = 0
+    for i, p in enumerate(paths, 1):
+        try:
+            if p.suffix == ".gz":
+                with gzip.open(p, "rb") as f:
+                    raw = f.read()
+                if is_binary_bytes(raw[:4096]):
+                    continue
+            elif is_binary_file(p):
+                continue
+            else:
+                raw = p.read_bytes()
+        except Exception:
+            continue
+        text = _decode(raw)
+        for m in anon._user_re.finditer(text):
+            if anon.anon_user(m.group(1)) != m.group(1):
+                found += 1
+        for m in anon._email_re.finditer(text):
+            anon.anon_email(m.group(1), m.group(2))
+        if i % 25 == 0 or i == len(paths):
+            progress("prescan-text", i, len(paths), f"{len(anon.user_map)} users, {len(anon.email_map)} e-mails")
+    return found
+
+
 def anonymize_tree(tree: Path, anon: Anonymizer, report: AnonymizeReport,
                    progress: ProgressFn = _noop_progress) -> None:
     paths = [p for p in sorted(tree.rglob("*")) if p.is_file()]
@@ -989,6 +1073,7 @@ def anonymize_tsf(
         progress("copy", 1, 1, "")
 
         report.config_files_scanned = prescan_tree(anon_dir, anon, progress)
+        prescan_text_identities(anon_dir, anon, progress)
         anon.build_patterns()
 
         if mapping_only:

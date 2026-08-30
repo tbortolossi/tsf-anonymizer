@@ -92,9 +92,9 @@ class TestNamedObjects:
         out = anon.anonymize_text("hit web server prod today")
         assert "web server prod" not in out and "ADDR-0001" in out
 
-    def test_anonymize_text_without_build_patterns_does_not_crash(self, anon):
+    def test_anonymize_text_without_build_patterns_builds_them(self, anon):
         anon.register_named_object("X-Y", "zone")
-        assert anon.anonymize_text("X-Y") == "X-Y"  # not built yet → untouched, no crash
+        assert anon.anonymize_text("X-Y") == "ZONE-0001"  # patterns compiled lazily
 
 
 class TestFromMapping:
@@ -434,7 +434,8 @@ class TestRealTsfLessonsRound2:
                      "<external-list><entry name='panw-known-ip-list'/><entry name='EDL-Blocklist'/></external-list>"
                      "</vsys></devices></c>")
         anon = Anonymizer(); prescan_config_xml(p, anon)
-        assert set(anon.named_obj_map) == {"LAN", "AV-Prod", "SP", "Cert-GP", "EDL-Blocklist"}
+        # "lan2" is a zone: an identity container keeps lowercase names.
+        assert set(anon.named_obj_map) == {"LAN", "lan2", "AV-Prod", "SP", "Cert-GP", "EDL-Blocklist"}
 
     def test_object_named_like_a_known_fqdn_gets_the_fqdn_pseudonym(self, anon):
         anon.register_fqdn("igw.acme.fr")
@@ -443,3 +444,50 @@ class TestRealTsfLessonsRound2:
         out = anon.anonymize_text("cert igw.acme.fr file igw.acme.fr.csr")
         assert out == "cert host001.anon.internal file host001.anon.internal.csr"
         assert "igw.acme.fr" not in anon.named_obj_map
+
+
+class TestRealTsfLessonsRound3:
+    def test_ip_named_entry_is_owned_by_the_ip_pass(self, tmp_path, anon):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><devices><vsys><address><entry name='10.0.0.254/24'/><entry name='10.0.0.102'/>"
+                     "<entry name='SRV-1'/></address></vsys></devices></c>")
+        prescan_config_xml(p, anon); anon.build_patterns()
+        assert set(anon.named_obj_map) == {"SRV-1"}
+        out = anon.anonymize_text("<entry name='10.0.0.254/24'/> if 10.0.0.254/24 file 10.0.0.102-32823.pcap")
+        assert "10.0.0.254" not in out and "10.0.0.102" not in out
+        assert out.count(anon.ip_map["10.0.0.254"]) == 2 and "/24" in out and "-32823.pcap" in out
+
+    def test_fqdn_named_entry_is_a_fqdn(self, tmp_path, anon):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><devices><vsys><address><entry name='web.acme.fr'/></address></vsys></devices></c>")
+        prescan_config_xml(p, anon)
+        assert "web.acme.fr" in anon.fqdn_map and not anon.named_obj_map
+
+    def test_lowercase_admin_and_user_entries_are_identities(self, tmp_path, anon):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><mgt-config><users><entry name='jmartin'/></users></mgt-config>"
+                     "<devices><vsys><profiles><virus><entry name='av'><decoder><entry name='http'/></decoder>"
+                     "</entry></virus></profiles></vsys></devices></c>")
+        prescan_config_xml(p, anon)
+        assert "jmartin" in anon.named_obj_map and "http" not in anon.named_obj_map
+
+    def test_usernames_found_in_logs_are_replaced_everywhere(self, tmp_path):
+        from tsf_anonymizer.core import prescan_text_identities
+        (tmp_path / "a.log").write_text('audit UID="jdupont" (jdupont) exe=/usr/bin/su\n')
+        (tmp_path / "b.log").write_text("authenticated for user 'jdupont' ok; mail j@acme.fr\n")
+        anon = Anonymizer()
+        prescan_text_identities(tmp_path, anon)
+        anon.build_patterns()
+        assert anon.user_map == {"jdupont": "user001"}
+        out = anon.anonymize_text((tmp_path / "a.log").read_text())
+        assert out == 'audit UID="user001" (user001) exe=/usr/bin/su\n'
+        assert "acme.fr" in anon.fqdn_map   # the e-mail domain was discovered too
+
+    def test_system_accounts_are_not_usernames(self, anon):
+        assert anon.anonymize_text("for user 'pan_devicetelem'") == "for user 'pan_devicetelem'"
+
+    def test_patterns_rebuild_when_a_table_grows_mid_run(self, anon):
+        anon.build_patterns()
+        anon.anonymize_text("mail from bob@mail-corp.ru")       # registers the domain
+        out = anon.anonymize_text("bare mail-corp.ru here")      # next file: bare occurrence
+        assert "mail-corp.ru" not in out
