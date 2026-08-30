@@ -65,10 +65,43 @@ log to read for which problem, and how to read an anonymized one.
 ## Run it
 
 ```bash
-export TSF_UID=$(id -u) TSF_GID=$(id -g)
+cat > .env <<EOF          # gitignored; compose reads it automatically
+TSF_UID=$(id -u)
+TSF_GID=$(id -g)
+TSF_PASSWORD=$(python3 -c "import secrets;print(secrets.token_urlsafe(18))")
+EOF
+scripts/make-tls-cert.sh              # TLS material in ./certs (gitignored)
 docker compose up -d --build
-open http://127.0.0.1:8096
+open https://127.0.0.1:8096           # user: admin, password: the one in .env
 ```
+
+Two things are required, both by design, because this UI serves the
+*un*-anonymized archive and the mapping that reverses every pseudonym:
+
+- **`TSF_PASSWORD`** — HTTP Basic auth on every route, `/api/health` and
+  `/static` included. Compose refuses to start without it. `TSF_USERNAME`
+  defaults to `admin`.
+- **A certificate** — `scripts/make-tls-cert.sh` creates a local CA and a
+  server certificate for the addresses the UI answers on. A *missing*
+  certificate stops the container rather than quietly downgrading to plain
+  HTTP; `TSF_TLS_CERT=` (empty) is the explicit opt-out.
+
+Import `certs/ca.crt` into the browser or OS trust store, once per machine,
+and the padlock is green. Re-running the script reissues the server
+certificate and keeps the CA, so the import holds. With a certificate from a
+real CA, point `TSF_TLS_CERT` / `TSF_TLS_KEY` at it instead.
+
+To reach the UI from another machine on a trusted LAN, add its address to
+`.env`, reissue the certificate for that name, and recreate:
+
+```bash
+echo "TSF_BIND_ADDR=10.0.0.246" >> .env    # or 0.0.0.0 for every interface
+scripts/make-tls-cert.sh
+docker compose up -d --force-recreate
+```
+
+Note that publishing on a LAN address means the port is *only* on that
+address: use `https://<that address>:8096` from the host too.
 
 Uploads, extracted trees and outputs live in `./data/jobs/<id>/`. A 300 MB TSF
 extracts to ~1.5 GB, kept twice (original + anonymized) so the diff viewer can
@@ -132,8 +165,13 @@ as invariants in [CLAUDE.md](CLAUDE.md).
   string it never mapped is the customer's name. A raw `grep` of the
   anonymized tree for the customer name, domain and site names is the check
   to run on top — it is how the apex-domain gap was found.
-- No authentication on the web UI — bind to loopback (the default) or put a
-  proxy in front.
+- The web UI's auth is a single shared account: no per-user audit trail, no
+  rate limiting on failed attempts, no session revocation. TLS protects the
+  password on the wire and the archives in transit, but anyone who has that
+  one password can download the un-anonymized archive and the mapping that
+  reverses every pseudonym. The default self-signed CA is trusted only on the
+  machines where you imported it — a browser warning you click through
+  proves nothing about who answered.
 
 ## Tests
 

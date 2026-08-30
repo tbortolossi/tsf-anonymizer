@@ -16,8 +16,12 @@ ENV TSF_DATA_DIR=/data
 VOLUME ["/data"]
 
 EXPOSE 8090
+# The probe is a normal client: it authenticates, and speaks TLS when the
+# server does (see `tsf-anonymizer healthcheck`).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8090/api/health', timeout=3).status==200 else 1)"
+  CMD ["tsf-anonymizer", "healthcheck", "--port", "8090"]
 
-CMD ["python", "-m", "uvicorn", "--factory", "tsf_anonymizer.web.app:create_app", \
-     "--host", "0.0.0.0", "--port", "8090", "--timeout-keep-alive", "120"]
+# Serving policy (TLS wiring, warnings when a port is exposed unprotected)
+# lives in the CLI, so the container and a bare `tsf-anonymizer serve` behave
+# the same way.
+CMD ["tsf-anonymizer", "serve", "--host", "0.0.0.0", "--port", "8090", "--data-dir", "/data"]

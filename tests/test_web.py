@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 
@@ -14,7 +15,17 @@ from conftest import build_tsf, IDENTIFIERS
 
 @pytest.fixture
 def client(tmp_path):
-    app = create_app(tmp_path / "data")
+    # password="" explicitly: the rest of the suite tests the app open, whatever
+    # TSF_PASSWORD happens to be exported in the shell running pytest.
+    app = create_app(tmp_path / "data", password="")
+    with TestClient(app) as c:
+        yield c
+    app.state.store.shutdown()
+
+
+@pytest.fixture
+def auth_client(tmp_path):
+    app = create_app(tmp_path / "data", username="ops", password="s3cret")
     with TestClient(app) as c:
         yield c
     app.state.store.shutdown()
@@ -177,3 +188,45 @@ def test_delete_original_defaults(client, tmp_path):
                     data={"delete_original": "false"})
     job = _wait(client, r.json()["id"])
     assert job["delete_original"] is False and not job["original_deleted"] and job["trees_kept"]
+
+
+# -- authentication ---------------------------------------------------------
+
+
+def test_no_password_configured_leaves_the_app_open(client):
+    assert client.get("/api/health").status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/", "/api/health", "/api/jobs", "/static/app.js"])
+def test_every_route_is_behind_basic_auth(auth_client, path):
+    # The health probe leaks the data directory and the job count, and /static
+    # is served by a mount, not a route: neither may be exempt.
+    r = auth_client.get(path)
+    assert r.status_code == 401
+    assert r.headers["www-authenticate"].startswith("Basic ")
+
+
+def test_correct_credentials_pass(auth_client):
+    assert auth_client.get("/api/health", auth=("ops", "s3cret")).json()["ok"]
+    assert "TSF Anonymizer" in auth_client.get("/", auth=("ops", "s3cret")).text
+
+
+@pytest.mark.parametrize("creds", [("ops", "wrong"), ("admin", "s3cret"), ("", "")])
+def test_wrong_credentials_are_rejected(auth_client, creds):
+    assert auth_client.get("/api/health", auth=creds).status_code == 401
+
+
+@pytest.mark.parametrize("header", ["", "Basic", "Bearer s3cret", "Basic !!not-base64!!",
+                                    "Basic " + base64.b64encode(b"no-colon").decode()])
+def test_malformed_authorization_headers_are_rejected(auth_client, header):
+    r = auth_client.get("/api/health", headers={"authorization": header} if header else {})
+    assert r.status_code == 401
+
+
+def test_an_upload_needs_the_password_too(auth_client, tmp_path):
+    tsf = build_tsf(tmp_path)
+    files = {"file": ("in.tgz", tsf.read_bytes())}
+    assert auth_client.post("/api/jobs/anonymize", files=files).status_code == 401
+    r = auth_client.post("/api/jobs/anonymize", files=files,
+                         data={"delete_original": "false"}, auth=("ops", "s3cret"))
+    assert r.status_code == 200

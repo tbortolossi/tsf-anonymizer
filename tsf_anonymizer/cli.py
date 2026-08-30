@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -69,11 +70,74 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 0 if rep.ok else 2
 
 
+_LOOPBACK = ("127.0.0.1", "::1", "localhost")
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
+    import os
     import uvicorn
     from .web.app import create_app
-    uvicorn.run(create_app(Path(args.data_dir)), host=args.host, port=args.port)
+
+    log = logging.getLogger(__name__)
+    cert, key = args.ssl_certfile, args.ssl_keyfile
+    if bool(cert) != bool(key):
+        print("serve: --ssl-certfile and --ssl-keyfile go together", file=sys.stderr)
+        return 2
+    for label, path in (("certificate", cert), ("key", key)):
+        if path and not Path(path).is_file():
+            # Refusing to start beats silently downgrading an exposed port to
+            # plain HTTP because a file moved.
+            print(f"serve: TLS {label} not found: {path}\n"
+                  f"       run scripts/make-tls-cert.sh, or set TSF_TLS_CERT= to serve "
+                  f"plain HTTP", file=sys.stderr)
+            return 2
+
+    app = create_app(Path(args.data_dir))
+    exposed = args.host not in _LOOPBACK
+    if app.state.auth_enabled:
+        log.info("HTTP Basic auth enabled for user %r", os.getenv("TSF_USERNAME", "admin"))
+    elif exposed:
+        log.warning(
+            "serving on %s with no TSF_PASSWORD set: the un-anonymized archives and "
+            "the mapping are readable by anyone who can reach this port", args.host)
+    if cert:
+        log.info("TLS enabled (%s)", cert)
+    elif exposed:
+        # Basic auth without TLS puts the password on the wire in base64.
+        log.warning("serving on %s without TLS: set TSF_TLS_CERT/TSF_TLS_KEY", args.host)
+
+    uvicorn.run(app, host=args.host, port=args.port,
+                ssl_certfile=cert or None, ssl_keyfile=key or None)
     return 0
+
+
+def cmd_healthcheck(args: argparse.Namespace) -> int:
+    """Container liveness probe: same client as any other, credentials included."""
+    import base64
+    import os
+    import ssl
+    import urllib.request
+
+    scheme = "https" if os.getenv("TSF_TLS_CERT") else "http"
+    req = urllib.request.Request(f"{scheme}://127.0.0.1:{args.port}/api/health")
+    password = os.getenv("TSF_PASSWORD", "")
+    if password:
+        # No route is exempt from auth, the probe included.
+        raw = f"{os.getenv('TSF_USERNAME', 'admin')}:{password}".encode()
+        req.add_header("Authorization", "Basic " + base64.b64encode(raw).decode())
+    ctx = None
+    if scheme == "https":
+        # Liveness, not identity: this connection never leaves the container,
+        # and the certificate asserts the LAN name, which 127.0.0.1 is not.
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, timeout=args.timeout, context=ctx) as r:
+            return 0 if r.status == 200 else 1
+    except Exception as exc:  # any failure is an unhealthy container
+        print(f"healthcheck: {exc}", file=sys.stderr)
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -103,7 +167,16 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--host", default="0.0.0.0")
     s.add_argument("--port", type=int, default=8090)
     s.add_argument("--data-dir", default="/data")
+    s.add_argument("--ssl-certfile", default=os.getenv("TSF_TLS_CERT", ""),
+                   help="serve HTTPS with this certificate (env TSF_TLS_CERT)")
+    s.add_argument("--ssl-keyfile", default=os.getenv("TSF_TLS_KEY", ""),
+                   help="private key for --ssl-certfile (env TSF_TLS_KEY)")
     s.set_defaults(fn=cmd_serve)
+
+    h = sub.add_parser("healthcheck", help="probe a local instance (container HEALTHCHECK)")
+    h.add_argument("--port", type=int, default=8090)
+    h.add_argument("--timeout", type=float, default=3.0)
+    h.set_defaults(fn=cmd_healthcheck)
 
     args = p.parse_args(argv)
     return args.fn(args)

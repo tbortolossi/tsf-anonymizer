@@ -8,3 +8,5 @@ data/
 *.mapping.json
 .pytest_cache/
 .ruff_cache/
+.env
+certs/

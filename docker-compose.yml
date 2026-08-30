@@ -3,16 +3,28 @@ services:
     build: .
     image: tsf-anonymizer:latest
     container_name: tsf-anonymizer
-    # Loopback only by default: the UI has no authentication and handles the
-    # un-anonymized archive. Set TSF_BIND_ADDR=0.0.0.0 to expose it on the LAN
-    # (behind an authenticating proxy).
+    # Loopback by default; set TSF_BIND_ADDR (a LAN address, or 0.0.0.0) to
+    # expose it. Whatever the bind, TSF_PASSWORD below is mandatory -- the UI
+    # serves the un-anonymized archive and the mapping that reverses it.
+    # The scheme is https:// as soon as ./certs holds a certificate.
     ports:
       - "${TSF_BIND_ADDR:-127.0.0.1}:${TSF_PORT:-8096}:8090"
     volumes:
       - ./data:/data
+      # TLS material, read-only. Run scripts/make-tls-cert.sh once to create
+      # it: a missing certificate stops the container rather than silently
+      # downgrading the LAN to plain HTTP. TSF_TLS_CERT="" opts out.
+      - ./certs:/certs:ro
     # Run as the host user so ./data stays owned by you, not root.
     # export TSF_UID=$(id -u) TSF_GID=$(id -g) before `docker compose up`.
     user: "${TSF_UID:-1000}:${TSF_GID:-1000}"
     environment:
       TSF_DATA_DIR: /data
+      # HTTP Basic auth on every route. Compose refuses to start without it;
+      # put it in .env (gitignored) or export it. Basic auth over plain HTTP
+      # is LAN-grade: for anything wider, terminate TLS in front.
+      TSF_USERNAME: "${TSF_USERNAME:-admin}"
+      TSF_TLS_CERT: "${TSF_TLS_CERT:-/certs/server.crt}"
+      TSF_TLS_KEY: "${TSF_TLS_KEY:-/certs/server.key}"
+      TSF_PASSWORD: "${TSF_PASSWORD:?set TSF_PASSWORD (put it in .env) - the UI serves un-anonymized archives}"
     restart: unless-stopped

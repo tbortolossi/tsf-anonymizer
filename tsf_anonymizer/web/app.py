@@ -1,17 +1,25 @@
 """FastAPI web UI.
 
-No authentication: this tool is meant to run on the operator's own machine
-(the compose file binds 127.0.0.1) and it handles the *un*-anonymized archive.
-Do not expose it on a network without putting an authenticating proxy in
-front of it.
+This app handles the *un*-anonymized archive and the mapping that reverses
+the pseudonyms, so every route is behind HTTP Basic auth as soon as
+``TSF_PASSWORD`` is set -- including ``/api/health`` and ``/static``, since a
+health probe leaks the data directory and the job count. Without a password
+the app runs open, which is only acceptable on loopback; the compose file
+therefore *requires* ``TSF_PASSWORD`` and refuses to start without it.
+
+Basic auth over plain HTTP sends the password in (base64) clear text: it is
+meant for a trusted LAN. Anything wider belongs behind a TLS proxy.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 from contextlib import asynccontextmanager
 import re
+import secrets
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -35,8 +43,31 @@ def _safe_filename(name: str, fallback: str) -> str:
     return base[:200]
 
 
-def create_app(data_dir: Optional[Path] = None) -> FastAPI:
+def _credentials_ok(header: str, username: str, password: str) -> bool:
+    """Constant-time check of an ``Authorization: Basic ...`` header."""
+    scheme, _, encoded = header.partition(" ")
+    if scheme.lower() != "basic":
+        return False
+    try:
+        decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return False
+    got_user, sep, got_password = decoded.partition(":")
+    if not sep:
+        return False
+    # Both compared, and always both, so the answer does not time-leak which
+    # half was wrong.
+    ok_user = secrets.compare_digest(got_user, username)
+    ok_password = secrets.compare_digest(got_password, password)
+    return ok_user and ok_password
+
+
+def create_app(data_dir: Optional[Path] = None, *,
+               username: Optional[str] = None,
+               password: Optional[str] = None) -> FastAPI:
     data_dir = Path(data_dir or os.getenv("TSF_DATA_DIR", "/data"))
+    username = username if username is not None else os.getenv("TSF_USERNAME", "admin")
+    password = password if password is not None else os.getenv("TSF_PASSWORD", "")
     store = JobStore(data_dir)
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -45,6 +76,18 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
 
     app = FastAPI(title="TSF Anonymizer", version=__version__, lifespan=lifespan)
     app.state.store = store
+    app.state.auth_enabled = bool(password)
+    if password:
+        @app.middleware("http")
+        async def basic_auth(request: Request, call_next):
+            if not _credentials_ok(request.headers.get("authorization", ""), username, password):
+                # 401 + WWW-Authenticate, so a browser shows its own prompt and
+                # curl -u works; no route is exempt, the health probe included.
+                return JSONResponse(
+                    {"detail": "authentication required"}, status_code=401,
+                    headers={"WWW-Authenticate": 'Basic realm="tsf-anonymizer"'})
+            return await call_next(request)
+
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     templates = Jinja2Templates(directory=HERE / "templates")
 

@@ -107,8 +107,24 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
 - **Never anonymize** PAN-OS interface names, `BUILTIN_OBJECTS`,
   `VENDOR_DOMAINS`, netmasks, loopback/multicast/link-local. Downstream tools
   match counters and interfaces by name.
-- **The web UI has no auth and handles the un-anonymized archive.** Compose
-  binds `127.0.0.1` by default; keep that default.
+- **The web UI handles the un-anonymized archive and the mapping that
+  reverses it**, so HTTP Basic auth (`TSF_PASSWORD`) covers *every* route —
+  `/api/health` leaks the data dir and job count, `/static` is a mount, not a
+  route; no exemption, the container healthcheck authenticates like any other
+  client. `create_app(password="")` runs open, for tests and loopback use;
+  compose makes the variable mandatory (`${TSF_PASSWORD:?}`) so nothing is
+  ever exposed by omission. Compose binds `127.0.0.1` by default; keep that
+  default, `TSF_BIND_ADDR` is the deliberate opt-out.
+- **TLS fails closed.** `serve` refuses to start when `TSF_TLS_CERT` points
+  at a file that is not there, instead of falling back to plain HTTP — a
+  silent downgrade of an exposed port is the failure mode worth designing
+  against. Serving policy (TLS, credential warnings) lives in `cmd_serve`,
+  not in the Dockerfile `CMD`, so a container and a bare
+  `tsf-anonymizer serve` behave identically; the container probe is
+  `tsf-anonymizer healthcheck`, a normal client that authenticates and
+  speaks TLS when the server does. `scripts/make-tls-cert.sh` keeps the CA
+  across runs and reissues only the leaf, so an imported trust anchor
+  survives a re-issue.
 - **The container runs as the host user** (`user:` in compose) so `./data`
   stays deletable without `sudo`.
 - **A capped list says it is capped** (`truncated` in diff hunks, `total` in
@@ -136,3 +152,25 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   are gitignored. Real TSFs are customer material.
 - Tests assert on **output**, not on the mapping: "identifier X does not
   survive in the anonymized text" is the property that matters.
+
+## After every TSF analysis: feed the skill
+
+Analyzing a real TSF (with the `read-tsf` skill, or by hand) is the only
+source of truth about what these archives actually contain. **Every such
+analysis ends with an update to `.claude/skills/read-tsf/SKILL.md`** —
+this is not optional and does not need to be asked for:
+
+- A file that was not in the map, or a path that differs by PAN-OS version
+  or platform → add it to the file map.
+- A symptom whose answer took more than one grep → record the working
+  symptom→file→grep line, so the next run is one command.
+- A grep that returned nothing, a command whose output has moved, an alias
+  that no longer holds → fix or delete it; a wrong pointer costs more than
+  a missing one.
+- Something the anonymizer mangled or missed in that TSF → an invariant or
+  a known limitation above, plus a test in `tests/`.
+
+Keep `docs/TSF-GUIDE.md` and the skill saying the same thing when either
+changes. **Genericize before writing**: no customer hostname, IP, serial,
+user or company name ever enters the skill, the docs or a commit — the
+pattern is what is worth keeping, the value never is.
