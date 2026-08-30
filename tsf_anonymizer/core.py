@@ -241,6 +241,11 @@ class Anonymizer:
 
         self._obj_re: Optional[re.Pattern] = None
         self._fqdn_re: Optional[re.Pattern] = None
+        self._known_serial_re: Optional[re.Pattern] = None
+        # Every fake value ever produced. A later pass must never treat one as
+        # an original (user 'Zone-A' → user 'OBJ-0002' → user001 chained two
+        # pseudonyms and broke config↔log correlation on a real TSF).
+        self._fakes: set[str] = set()
 
         # Per-call replacement tally, reset by anonymize_text().
         self.last_counts: dict[str, int] = {}
@@ -255,10 +260,13 @@ class Anonymizer:
             r"|user\s+thru\s+\S+\s+['\"]"
             r")([a-zA-Z][a-zA-Z0-9._@-]{1,})['\"]?"
         )
-        # 12 or 15 digits (PAN-OS hardware / VM serial shapes). 13- and
-        # 14-digit runs are deliberately NOT matched: 13 digits is an epoch in
-        # milliseconds, which PAN-OS logs carry everywhere.
-        self._serial_re = re.compile(r"(?<!\d)(\d{12}|\d{15})(?!\d)")
+        # Fallback for serials the config did not declare: 12 digits (PAN-OS
+        # hardware) or 15 starting with 007 (VM-Series). 13- and 14-digit runs
+        # are deliberately NOT matched — 13 digits is an epoch in milliseconds —
+        # and neither is a 12-digit run starting 0000: those are zero-padded
+        # counters in `show counter` output, not serials (real TSF: 3 434 of
+        # them were "anonymized").
+        self._serial_re = re.compile(r"(?<!\d)((?!0000)\d{12}|007\d{12})(?!\d)")
         self._email_re = re.compile(
             r"\b([a-zA-Z0-9._%+\-]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b"
         )
@@ -289,20 +297,29 @@ class Anonymizer:
                 return ip_str
             if addr.is_link_local:
                 return ip_str
-            fake = self._fake_private_ip() if addr.is_private else self._fake_public_ip()
+            gen = self._fake_private_ip if addr.is_private else self._fake_public_ip
+            fake = gen()
+            # A customer may use our fake ranges (100.64/10 is a common GP
+            # pool). Never hand out a fake that is also an original we know.
+            while fake in self.ip_map:
+                fake = gen()
         except ValueError:
             return ip_str
+        if ip_str in self._fakes:
+            return ip_str
         self.ip_map[ip_str] = fake
+        self._fakes.add(fake)
         return fake
 
     # -- Username anonymization ---------------------------------------------
 
     def anon_user(self, username: str) -> str:
-        if username.lower() in BUILTIN_OBJECTS:
+        if username.lower() in BUILTIN_OBJECTS or username in self._fakes:
             return username
         if username not in self.user_map:
             self._user_counter += 1
             self.user_map[username] = f"user{self._user_counter:03d}"
+            self._fakes.add(self.user_map[username])
         return self.user_map[username]
 
     # -- FQDN anonymization -------------------------------------------------
@@ -323,6 +340,7 @@ class Anonymizer:
             else f"host{self._fqdn_counter:03d}"
         )
         self.fqdn_map[low] = fake
+        self._fakes.add(fake)
         return fake
 
     def register_fqdn(self, fqdn: str) -> None:
@@ -338,6 +356,7 @@ class Anonymizer:
         fake_domain = self.anon_fqdn(domain)
         fake = f"user{self._email_counter:03d}@{fake_domain}"
         self.email_map[original] = fake
+        self._fakes.add(fake)
         return fake
 
     # -- Named object anonymization -----------------------------------------
@@ -354,8 +373,11 @@ class Anonymizer:
         if name in self.named_obj_map:
             return self.named_obj_map[name]
         self._obj_counter += 1
+        if name in self._fakes:
+            return name
         prefix = CATEGORY_PREFIX.get(category, "OBJ")
         self.named_obj_map[name] = f"{prefix}-{self._obj_counter:04d}"
+        self._fakes.add(self.named_obj_map[name])
         return self.named_obj_map[name]
 
     # -- Serial number ------------------------------------------------------
@@ -363,9 +385,15 @@ class Anonymizer:
     def anon_serial(self, serial: str) -> str:
         if serial in self.serial_map:
             return self.serial_map[serial]
+        if serial in self._fakes:
+            return serial
         self._serial_counter += 1
-        self.serial_map[serial] = f"{self._serial_counter:0{len(serial)}d}"
-        return self.serial_map[serial]
+        # Same length, leading 9: no PAN-OS serial starts with 9, so a fake
+        # cannot collide with a real one.
+        fake = "9" + f"{self._serial_counter:0{len(serial) - 1}d}"
+        self.serial_map[serial] = fake
+        self._fakes.add(fake)
+        return fake
 
     # -- Build compiled patterns (call once after all prescan) --------------
 
@@ -377,18 +405,27 @@ class Anonymizer:
             # word, not as one segment of a hyphenated compound ("web" in
             # "web-server-1"), not as a label of a dotted name on the left
             # ("x.Zone-A"). A dot *after* is fine — sentence ends.
+            # "<" and "/" excluded before, "=" after: an object named like an
+            # XML tag or attribute ("enabled", "bgp", "name") must not rewrite
+            # <enabled> or name="…". Verified on a real TSF: it did.
             self._obj_re = re.compile(
-                r"(?<![\w.\-])" + trie_regex(self.named_obj_map) + r"(?![\w\-])"
+                r"(?<![\w.\-<\/])" + trie_regex(self.named_obj_map) + r"(?![\w\-=])"
             )
         else:
             self._obj_re = None
         if self.fqdn_map:
             self._fqdn_re = re.compile(
-                r"(?<![.\w])" + trie_regex(self.fqdn_map) + r"(?![.\w])",
+                r"(?<![.\w<\/])" + trie_regex(self.fqdn_map) + r"(?![.\w=])",
                 re.IGNORECASE,
             )
         else:
             self._fqdn_re = None
+        # Serials discovered in the config are replaced wherever they appear,
+        # whatever their shape; the regex fallback below is stricter.
+        self._known_serial_re = (
+            re.compile(r"(?<!\d)" + trie_regex(self.serial_map) + r"(?!\d)")
+            if self.serial_map else None
+        )
 
     # -- Full text replacement ----------------------------------------------
 
@@ -451,8 +488,17 @@ class Anonymizer:
 
     def _replace_serials(self, text: str) -> str:
         def replace_match(m: re.Match) -> str:
+            fake = self.anon_serial(m.group(1))
+            if fake != m.group(1):
+                self._count("serial_numbers")
+            return fake
+
+        def replace_known(m: re.Match) -> str:
             self._count("serial_numbers")
-            return self.anon_serial(m.group(1))
+            return self.serial_map[m.group(0)]
+
+        if self._known_serial_re is not None:
+            text = self._known_serial_re.sub(replace_known, text)
         return self._serial_re.sub(replace_match, text)
 
     def anonymize_text(self, text: str) -> str:
@@ -496,6 +542,9 @@ class Anonymizer:
         anon._obj_counter = len(anon.named_obj_map)
         anon._fqdn_counter = len(anon.fqdn_map)
         anon._email_counter = len(anon.email_map)
+        for table in (anon.ip_map, anon.user_map, anon.fqdn_map, anon.email_map,
+                      anon.named_obj_map, anon.serial_map):
+            anon._fakes.update(table.values())
         anon.build_patterns()
         return anon
 
@@ -517,22 +566,28 @@ SENSITIVE_XML_FIELDS = {
     "recipient-emails": "email",
     "hostname":         "host",
     "devicename":       "host",
+    "contact":          "person",   # admin contact (free text, a real name)
+    "full-name":        "person",
     "serial":           "serial",
     "panorama-server":  "fqdn",
     "ntp-server-address": "fqdn",
     "primary-ntp-server": None,
 }
 
-_CERT_FIELD_RE = re.compile(r"(?:O|OU|CN|L|ST)\s*=\s*([^,/\n]+)")
+_CERT_CN_RE = re.compile(r"(?<![A-Za-z])CN\s*=\s*([^,/\n]+)")
 _DC_COMPONENT_RE = re.compile(r"DC=([^,]+)", re.IGNORECASE)
 _EMAIL_IN_TEXT_RE = re.compile(r"\b([a-zA-Z0-9._%+\-]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b")
 _IPV4_ONLY_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
 def _extract_cert_identifiers(text: str, anon: Anonymizer) -> None:
-    for m in _CERT_FIELD_RE.finditer(text):
-        val = m.group(1).strip()
-        if "." in val and not val.startswith("C ="):
+    """Only the CN, and only when it is a hostname. O/OU/L/ST are prose
+    ("GeoTrust Inc.", "Network Solutions L.L.C.") — the trusted root store in
+    every config carries hundreds of public CA names, none of them customer
+    identifiers, and registering them as FQDNs produced nothing but noise."""
+    for m in _CERT_CN_RE.finditer(text):
+        val = m.group(1).strip().strip('"')
+        if "." in val and " " not in val and not _IPV4_ONLY_RE.match(val):
             anon.register_fqdn(val)
 
 
@@ -555,8 +610,17 @@ def _extract_dn_identifiers(text: str, anon: Anonymizer) -> None:
                 anon.register_fqdn(part)
 
 
+# Subtrees that hold Palo Alto's own content, not the customer's: the
+# App-ID / threat / URL-category catalog. A candidate config that embeds it
+# registered 41 973 "objects" named Apple, Linux, bgp, enabled, … and the
+# replacement then rewrote every <enabled> and <bgp> tag in every XML.
+_SKIP_SUBTREES = {"predefined", "threats", "application-type"}
+
+
 def _walk_xml(elem: ET.Element, anon: Anonymizer, parent_tag: str = "") -> None:
     tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+    if tag in _SKIP_SUBTREES:
+        return
 
     if tag == "entry":
         name_attr = elem.get("name")
@@ -590,6 +654,9 @@ def _walk_xml(elem: ET.Element, anon: Anonymizer, parent_tag: str = "") -> None:
         elif field_type == "serial":
             if val.isdigit() and 8 <= len(val) <= 16:
                 anon.anon_serial(val)
+        elif field_type == "person":
+            if len(val) > 1 and val.lower() not in BUILTIN_OBJECTS:
+                anon.register_named_object(val, "user")
 
     for child in elem:
         _walk_xml(child, anon, parent_tag=tag)
@@ -788,12 +855,27 @@ class AnonymizeReport:
         return asdict(self)
 
 
+# Whole files that are vendor content, never customer configuration.
+_PRESCAN_SKIP_NAMES = {"predefined.xml", "global.xml", "reg_ips.xml", "sysd_objects_meta.xml"}
+_PRESCAN_SKIP_PARTS = {"updates", "regip", "healthchecks"}
+
+
+def _is_prescan_candidate(p: Path) -> bool:
+    if not p.is_file() or p.name in _PRESCAN_SKIP_NAMES:
+        return False
+    if "reportconfig" in p.name or "info" in p.name and p.name.startswith((".", "av", "content")):
+        return False
+    return not (set(p.parts) & _PRESCAN_SKIP_PARTS)
+
+
 def prescan_tree(tree: Path, anon: Anonymizer, progress: ProgressFn = _noop_progress) -> int:
-    """Prescan every XML config in the tree. Running/candidate configs first so
-    they own the categories; other XMLs then only add what they introduce."""
+    """Prescan every customer-config XML in the tree. Running/candidate configs
+    first so they own the categories; other XMLs then only add what they
+    introduce. Vendor content (App-ID catalog, URL DB, report templates) is
+    skipped — see _is_prescan_candidate / _SKIP_SUBTREES."""
     primary = sorted(tree.rglob("running-config.xml")) + sorted(tree.rglob("candidate-config.xml"))
     seen = set(primary)
-    others = [p for p in sorted(tree.rglob("*.xml")) if p not in seen and p.is_file()]
+    others = [p for p in sorted(tree.rglob("*.xml")) if p not in seen and _is_prescan_candidate(p)]
     files = primary + others
     for i, cfg in enumerate(files, 1):
         if cfg.stat().st_size > 200 * 1024 * 1024:

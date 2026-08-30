@@ -92,6 +92,15 @@ class MappingIndex:
                 self.category_of[orig] = cat
                 if cat in ("fqdns", "emails"):
                     self.forward_ci[orig.lower()] = fake
+        # A key that is also a fake value somewhere in the mapping (the customer
+        # used 100.64.0.3, which is also what we hand out) cannot be told apart
+        # from that fake in the output: it is a collision, not a leak, and is
+        # reported as such rather than scanned for.
+        values = set(self.forward.values())
+        self.collisions = sorted(k for k in self.forward if k in values)
+        for k in self.collisions:
+            self.forward_ci.pop(k.lower(), None)
+        self.forward = {k: v for k, v in self.forward.items() if k not in values}
         cs_keys = [k for k in self.forward if k.lower() not in self.forward_ci]
         self._cs_re = (re.compile(self._BEFORE + trie_regex(cs_keys) + self._AFTER)
                        if cs_keys else None)
@@ -190,9 +199,30 @@ def _split_lines(text: str) -> list[str]:
     return text.split("\n")
 
 
+_LONG_LINE = 2000
+_MAX_TOKENS = 4000
+
+
 def _changed_spans(a: str, b: str) -> list[tuple[int, int, int, int]]:
-    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
-    return [(i1, i2, j1, j2) for tag, i1, i2, j1, j2 in sm.get_opcodes() if tag != "equal"]
+    """Character-level for normal lines. difflib is quadratic, and a real TSF
+    has 24 000-character XML lines: those are diffed token by token, and past
+    _MAX_TOKENS the whole line is one span (it is then simply unexplained)."""
+    if len(a) + len(b) <= _LONG_LINE:
+        sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+        return [(i1, i2, j1, j2) for tag, i1, i2, j1, j2 in sm.get_opcodes() if tag != "equal"]
+    ta = [(m.start(), m.end()) for m in re.finditer(r"\S+", a)]
+    tb = [(m.start(), m.end()) for m in re.finditer(r"\S+", b)]
+    if len(ta) > _MAX_TOKENS or len(tb) > _MAX_TOKENS or not ta or not tb:
+        return [(0, len(a), 0, len(b))]
+    sm = difflib.SequenceMatcher(None, [a[s:e] for s, e in ta], [b[s:e] for s, e in tb])
+    out = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        oa = (ta[i1][0], ta[i2 - 1][1]) if i2 > i1 else (ta[i1][0] if i1 < len(ta) else len(a),) * 2
+        ob = (tb[j1][0], tb[j2 - 1][1]) if j2 > j1 else (tb[j1][0] if j1 < len(tb) else len(b),) * 2
+        out.append((oa[0], oa[1], ob[0], ob[1]))
+    return out
 
 
 def _expand_to_token(s: str, start: int, end: int) -> tuple[int, int]:
@@ -382,6 +412,8 @@ def compare_trees(orig_dir: Path, anon_dir: Path, mapping: dict,
             progress("compare", i, total, rel)
 
     report.summary = summarize(report.files)
+    report.summary["mapping_collisions"] = len(index.collisions)
+    report.summary["mapping_collision_sample"] = index.collisions[:20]
     return report
 
 

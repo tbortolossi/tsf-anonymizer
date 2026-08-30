@@ -161,8 +161,12 @@
         ${kpi("line-count mismatches", s.line_count_mismatches, s.line_count_mismatches ? "err" : "ok")}
         ${kpi("timestamp mismatches", s.timestamp_mismatches, s.timestamp_mismatches ? "warn" : "ok")}
         ${kpi("numeric-token mismatches", s.numeric_mismatches, s.numeric_mismatches ? "warn" : "ok")}
+        ${kpi("mapping collisions", s.mapping_collisions || 0, s.mapping_collisions ? "warn" : "ok")}
         ${kpi("XML structure preserved", `${s.xml_checked - s.xml_structure_changed}/${s.xml_checked}`, s.xml_structure_changed ? "err" : "ok")}
       </div>`;
+      if (s.mapping_collisions) {
+        html += `<p class="notes">collisions — original values that are also pseudonyms handed out elsewhere (e.g. the customer uses 100.64.0.0/10): <span class="mono">${(s.mapping_collision_sample || []).map(esc).join(", ")}</span>. They are ambiguous in the output, not leaked.</p>`;
+      }
       if (arc.members_orig !== undefined) {
         html += `<p class="notes">archive: ${arc.members_orig} → ${arc.members_anon} members, order ${arc.order_preserved ? "preserved" : "<b>changed</b>"}, ${arc.metadata_differences} metadata difference(s)${(arc.mismatches || []).length ? " — " + arc.mismatches.map(esc).join("; ") : ""}</p>`;
       }

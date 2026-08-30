@@ -253,3 +253,32 @@ class TestDottedTokens:
     def test_fqdn_key_is_tried_whole_before_splitting(self):
         idx = MappingIndex(MAPPING)
         assert idx.apply("dc01.acme.local") == "host001.anon.internal"
+
+
+class TestCollisionsAndLongLines:
+    def test_key_that_is_also_a_fake_is_a_collision_not_a_leak(self):
+        m = {"ip_addresses": {"100.64.0.3": "192.0.2.1", "10.0.0.1": "100.64.0.3"}}
+        idx = MappingIndex(m)
+        assert idx.collisions == ["100.64.0.3"]
+        assert idx.find_leaks("peer 100.64.0.3") == {}
+        assert idx.apply("peer 10.0.0.1") == "peer 100.64.0.3"
+
+    def test_collisions_reach_the_summary(self, anonymized):
+        _, _, mapping, work = anonymized
+        rep = compare_trees(work / "orig", work / "anon", mapping)
+        assert rep.summary["mapping_collisions"] == 0
+
+    def test_long_line_is_diffed_by_token_quickly(self):
+        import time
+        from tsf_anonymizer.compare import _changed_spans
+        a = " ".join(f"<entry name='obj{i}'><ip>10.0.0.{i%250}</ip></entry>" for i in range(1500))
+        b = a.replace("10.0.0.7<", "100.64.0.1<")
+        t0 = time.monotonic()
+        spans = _changed_spans(a, b)
+        assert time.monotonic() - t0 < 2.0
+        assert spans and all(a[i1:i2] != b[j1:j2] for i1, i2, j1, j2 in spans)
+
+    def test_huge_line_is_one_span(self):
+        from tsf_anonymizer.compare import _changed_spans
+        a = " ".join(f"t{i}" for i in range(5000)); b = a.replace("t7 ", "x ")
+        assert _changed_spans(a, b) == [(0, len(a), 0, len(b))]

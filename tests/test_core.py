@@ -329,3 +329,65 @@ class TestTrieRegex:
         out = anon.anonymize_text(text)
         assert time.monotonic() - t0 < 5.0
         assert "Object-Name-" not in out
+
+
+class TestRealTsfLessons:
+    """Each of these was found by the compare mode on a real 155 MB TSF."""
+
+    def test_object_named_like_an_xml_tag_does_not_rewrite_tags(self, anon):
+        for name in ("enabled", "bgp", "Apple", "name"):
+            anon.register_named_object(name, "obj")
+        anon.build_patterns()
+        xml = '<bgp><enabled>yes</enabled><entry name="Apple"><member>bgp</member></entry></bgp>'
+        out = anon.anonymize_text(xml)
+        assert out.startswith("<bgp><enabled>yes</enabled>") and out.endswith("</entry></bgp>")
+        assert 'name="OBJ-' in out and "<member>OBJ-" in out
+
+    def test_predefined_subtree_and_content_files_are_not_prescanned(self, tmp_path):
+        (tmp_path / "running-config.xml").write_text(
+            "<config><predefined><application><entry name='Apple'/></application></predefined>"
+            "<vsys><entry name='vsys1'><zone><entry name='Zone-X'/></zone></entry></vsys></config>")
+        (tmp_path / "updates").mkdir()
+        (tmp_path / "updates/global.xml").write_text("<c><application><entry name='Linux'/></application></c>")
+        (tmp_path / "predefined.xml").write_text("<c><application><entry name='bgp'/></application></c>")
+        anon = Anonymizer()
+        from tsf_anonymizer.core import prescan_tree
+        prescan_tree(tmp_path, anon)
+        assert set(anon.named_obj_map) == {"Zone-X"}
+
+    def test_a_fake_is_never_re_anonymized(self, anon):
+        anon.register_named_object("jdupont", "user")
+        anon.build_patterns()
+        out = anon.anonymize_text("login for user 'jdupont' ok")
+        assert out == "login for user 'USR-0001' ok"
+        assert anon.user_map == {}
+
+    def test_ca_org_names_in_certificates_are_not_fqdns(self, tmp_path):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><certificate><entry name='x'><subject>C = US, O = GeoTrust Inc., "
+                     "OU = Network Solutions L.L.C., CN = vpn.acme.fr</subject></entry></certificate></c>")
+        anon = Anonymizer(); prescan_config_xml(p, anon)
+        assert set(anon.fqdn_map) == {"vpn.acme.fr"}
+
+    def test_admin_contact_is_anonymized(self, tmp_path):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><system><contact>Thomas</contact></system></c>")
+        anon = Anonymizer(); prescan_config_xml(p, anon); anon.build_patterns()
+        assert "Thomas" not in anon.anonymize_text("<contact>Thomas</contact> by Thomas")
+
+    def test_zero_padded_counters_are_not_serials(self, anon):
+        assert anon.anonymize_text("pkts 000000024894 000000000000") == "pkts 000000024894 000000000000"
+
+    def test_declared_serial_is_replaced_whatever_its_shape(self, anon):
+        anon.anon_serial("000000000021"); anon.build_patterns()
+        out = anon.anonymize_text("device 000000000021 ok")
+        assert "000000000021" not in out and out.startswith("device 9")
+
+    def test_fake_serial_cannot_collide_with_a_real_one(self, anon):
+        assert anon.anon_serial("001901000123").startswith("9")
+        assert len(anon.anon_serial("007051000012345")) == 15
+
+    def test_fake_ip_skips_an_original_we_already_know(self, anon):
+        anon.anon_ip("100.64.0.1")            # the customer uses our fake range
+        fake = anon.anon_ip("10.0.0.9")        # first private fake would be 100.64.0.1
+        assert fake != "100.64.0.1"
