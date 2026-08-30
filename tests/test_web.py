@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
+import tarfile
 import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 from tsf_anonymizer.web.app import create_app
-from conftest import build_tsf, IDENTIFIERS
+from conftest import CONFIG_XML, LOG_SAMPLE, build_tsf, IDENTIFIERS
 
 
 @pytest.fixture
@@ -230,3 +232,93 @@ def test_an_upload_needs_the_password_too(auth_client, tmp_path):
     r = auth_client.post("/api/jobs/anonymize", files=files,
                          data={"delete_original": "false"}, auth=("ops", "s3cret"))
     assert r.status_code == 200
+
+
+# -- batches ----------------------------------------------------------------
+
+
+def _variant_tsf(path):
+    """The same customer, plus one object declared before the shared ones.
+
+    On a fresh mapping that extra entry takes a counter and shifts everything
+    after it, which is what makes the seeded/unseeded difference visible.
+    """
+    xml = CONFIG_XML.replace(
+        '<entry name="SRV-Compta-Paris">',
+        '<entry name="AAA-Extra-Net"><ip-netmask>10.9.9.9/32</ip-netmask></entry>\n'
+        '          <entry name="SRV-Compta-Paris">', 1)
+    members = {"./opt/pancfg/mgmt/saved-configs/running-config.xml": xml.encode(),
+               "./var/log/pan/system.log": LOG_SAMPLE.encode("latin-1")}
+    with tarfile.open(path, "w:gz") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size, info.mtime = len(data), 1700000000
+            tar.addfile(info, io.BytesIO(data))
+    return path
+
+
+def _anonymized_log(client, job_id):
+    raw = client.get(f"/api/jobs/{job_id}/download/tgz").content
+    with tarfile.open(fileobj=io.BytesIO(raw)) as tar:
+        member = next(m for m in tar.getmembers() if m.name.endswith("var/log/pan/system.log"))
+        return tar.extractfile(member).read()
+
+
+def _run(client, tsf, **form):
+    r = client.post("/api/jobs/anonymize", files={"file": (tsf.name, tsf.read_bytes())},
+                    data={"delete_original": "false", **form})
+    assert r.status_code == 200, r.text
+    job = _wait(client, r.json()["id"])
+    assert job["status"] == "done", job["error"]
+    return job
+
+
+def test_a_batch_seeded_from_the_previous_job_shares_its_pseudonyms(client, tmp_path):
+    first = _run(client, build_tsf(tmp_path), batch="b1")
+    variant = _variant_tsf(tmp_path / "second.tgz")
+    seeded = _run(client, variant, batch="b1", seed_from_job=first["id"])
+    alone = _run(client, variant)
+
+    # Both archives carry the same log, so with a shared mapping the anonymized
+    # log is byte-identical. The unseeded control proves the assertion has
+    # teeth: there, the extra object shifts the counters.
+    assert _anonymized_log(client, seeded["id"]) == _anonymized_log(client, first["id"])
+    assert _anonymized_log(client, alone["id"]) != _anonymized_log(client, first["id"])
+    assert seeded["seed_source"].startswith(f"job {first['id']}")
+    assert alone["seed_source"] == ""
+    assert seeded["batch"] == "b1"
+
+
+def test_seeding_from_an_unknown_job_is_refused(client, tmp_path):
+    tsf = build_tsf(tmp_path)
+    r = client.post("/api/jobs/anonymize", files={"file": ("in.tgz", tsf.read_bytes())},
+                    data={"seed_from_job": "deadbeef"})
+    assert r.status_code == 404
+
+
+def test_the_chain_walks_back_over_a_job_that_produced_no_mapping(client, tmp_path):
+    # A failed job in the middle of a batch must not cost the archives after it
+    # their shared pseudonyms, and must not cascade its failure either.
+    store = client.app.state.store
+    good = _run(client, build_tsf(tmp_path), batch="b2")
+    failed = store.new("anonymize")
+    failed.status, failed.batch, failed.seed_from = "failed", "b2", good["id"]
+    store._save(failed)
+
+    variant = _variant_tsf(tmp_path / "third.tgz")
+    third = _run(client, variant, batch="b2", seed_from_job=failed.id)
+    assert third["seed_source"].startswith(f"job {good['id']}")
+    assert _anonymized_log(client, third["id"]) == _anonymized_log(client, good["id"])
+
+
+def test_an_uploaded_seed_wins_over_the_chain(client, tmp_path):
+    first = _run(client, build_tsf(tmp_path))
+    mapping = client.get(f"/api/jobs/{first['id']}/mapping").json()
+    variant = _variant_tsf(tmp_path / "fourth.tgz")
+    r = client.post("/api/jobs/anonymize",
+                    files={"file": (variant.name, variant.read_bytes()),
+                           "seed_mapping": ("m.json", json.dumps(mapping).encode())},
+                    data={"delete_original": "false", "seed_from_job": first["id"]})
+    job = _wait(client, r.json()["id"])
+    assert job["seed_source"] == "uploaded mapping"
+    assert _anonymized_log(client, job["id"]) == _anonymized_log(client, first["id"])

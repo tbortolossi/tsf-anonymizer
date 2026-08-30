@@ -56,6 +56,12 @@ class Job:
     outputs: dict = field(default_factory=dict)   # name → relative path under output/
     trees_kept: bool = False
     seed_mapping: bool = False
+    # A batch is several TSFs dropped together. `seed_from` chains a job to the
+    # previous one of its batch, so the whole batch shares one growing mapping
+    # and the same customer keeps the same pseudonyms across archives.
+    batch: Optional[str] = None
+    seed_from: Optional[str] = None
+    seed_source: str = ""
     # Delete the un-anonymized upload once the integrity check is clean. When
     # the check finds problems the original is kept so a human can review the
     # diff, and `original_kept_reason` says so.
@@ -209,11 +215,16 @@ class JobStore:
     def _run_anonymize(self, job: Job) -> None:
         d = self.job_dir(job.id)
         input_tgz = d / "input" / job.input_name
-        seed = None
+        seed, job.seed_source = None, ""
         seed_path = d / "input" / "seed.mapping.json"
         if seed_path.is_file():
             seed = json.loads(seed_path.read_text(encoding="utf-8"))
-            job.seed_mapping = True
+            job.seed_source = "uploaded mapping"
+        elif job.seed_from:
+            prev, seed = self._seed_ancestor(job)
+            if prev is not None:
+                job.seed_source = f"job {prev.id} ({prev.input_name})"
+        job.seed_mapping = bool(seed)
         output_tgz = d / "output" / default_output_path(input_tgz).name
         progress = self._progress_fn(job)
 
@@ -242,6 +253,25 @@ class JobStore:
         job.compare_summary = cmp.summary
         job.archive_check = cmp.archive
         self._maybe_delete_original(job, cmp.summary, cmp.archive)
+
+    def _seed_ancestor(self, job: Job) -> tuple[Optional[Job], Optional[dict]]:
+        """Nearest ancestor in the batch chain that produced a mapping.
+
+        Walking back matters: a job that failed produced nothing to be
+        consistent with, and cascading its failure through the rest of the
+        batch would lose the shared pseudonyms for the archives that are fine.
+        """
+        seen, prev_id = {job.id}, job.seed_from
+        while prev_id and prev_id not in seen:
+            seen.add(prev_id)
+            prev = self.get(prev_id)
+            if prev is None:
+                return None, None
+            mapping = self.mapping_for(prev) if prev.status == "done" else {}
+            if mapping:
+                return prev, mapping
+            prev_id = prev.seed_from
+        return None, None
 
     def _run_compare(self, job: Job) -> None:
         d = self.job_dir(job.id)

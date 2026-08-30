@@ -49,8 +49,107 @@
       xhr.send(fd);
     });
   }
-  uploadForm($("#form-anonymize"), "/api/jobs/anonymize");
   uploadForm($("#form-compare"), "/api/jobs/compare");
+
+  // ---- anonymize: drag & drop, one job per archive ------------------------
+  // Archives are uploaded one after the other: a TSF is hundreds of MB, and the
+  // worker runs them sequentially anyway.
+  const TSF_NAME = /\.(tgz|tar\.gz|tar)$/i;
+  const picked = [];
+  const form = $("#form-anonymize"), dz = $("#drop-zone"), fileInput = $("#tsf-files");
+  const batchLog = $("#batch-log");
+
+  // Without this a file dropped next to the zone replaces the page with it.
+  ["dragover", "drop"].forEach((e) => document.addEventListener(e, (ev) => ev.preventDefault()));
+
+  function addFiles(files) {
+    let ignored = 0;
+    for (const f of files) {
+      if (!TSF_NAME.test(f.name)) { ignored++; continue; }
+      if (picked.some((p) => p.name === f.name && p.size === f.size)) continue;
+      picked.push(f);
+    }
+    batchLog.textContent = ignored ? `${ignored} file(s) ignored — TSFs are .tgz archives` : "";
+    renderPicked();
+  }
+
+  function renderPicked() {
+    const total = picked.reduce((s, f) => s + f.size, 0);
+    $("#file-list").innerHTML = picked.map((f, i) =>
+      `<li><span class="mono">${esc(f.name)}</span> <span class="opt">${fmtBytes(f.size)}</span>
+       <button type="button" class="link" data-drop="${i}" title="remove">✕</button></li>`).join("")
+      + (picked.length > 1 ? `<li class="notes">${picked.length} archives · ${fmtBytes(total)} total</li>` : "");
+    $$("[data-drop]").forEach((b) => b.addEventListener("click", () => {
+      picked.splice(Number(b.dataset.drop), 1); renderPicked();
+    }));
+    $("#batch-seed").hidden = picked.length < 2;
+  }
+
+  dz.addEventListener("dragover", () => dz.classList.add("over"));
+  dz.addEventListener("dragleave", () => dz.classList.remove("over"));
+  dz.addEventListener("drop", (ev) => { dz.classList.remove("over"); addFiles(ev.dataTransfer.files); });
+  $("#pick-files").addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => { addFiles(fileInput.files); fileInput.value = ""; });
+
+  function postJob(fd, label) {
+    const prog = $(".upload-progress", form), bar = $(".bar", prog), lbl = $(".label", prog);
+    prog.hidden = false;
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/jobs/anonymize");
+      xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return;
+        const pct = Math.round((e.loaded / e.total) * 100);
+        bar.style.width = pct + "%";
+        lbl.textContent = `${label} — ${fmtBytes(e.loaded)} / ${fmtBytes(e.total)} (${pct}%)`;
+      };
+      xhr.onload = () => xhr.status >= 200 && xhr.status < 300
+        ? resolve(JSON.parse(xhr.responseText))
+        : reject(new Error(`${xhr.status} ${xhr.responseText.slice(0, 200)}`));
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.send(fd);
+    });
+  }
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    if (!picked.length) { batchLog.textContent = "drop at least one TSF archive"; return; }
+    const btn = $("button[type=submit]", form);
+    const seedFile = $("input[name=seed_mapping]", form).files[0] || null;
+    const del = $("input[name=delete_original]", form).checked;
+    // One shared mapping is only a question when there is more than one archive.
+    const shared = picked.length > 1 && $("input[name=seed_policy]:checked").value === "shared";
+    const batch = picked.length > 1 ? `b${Date.now().toString(36)}` : null;
+    btn.disabled = true;
+    const ids = [];
+    let previous = null;
+    try {
+      for (let i = 0; i < picked.length; i++) {
+        const fd = new FormData();
+        fd.set("file", picked[i]);
+        fd.set("delete_original", del ? "true" : "false");
+        if (batch) fd.set("batch", batch);
+        // An uploaded seed starts the chain; the rest inherit it through the
+        // previous job, so the mapping keeps growing instead of restarting.
+        if (seedFile && (i === 0 || !shared)) fd.set("seed_mapping", seedFile);
+        if (shared && previous) fd.set("seed_from_job", previous);
+        batchLog.textContent = `queuing ${i + 1} of ${picked.length}…`;
+        const job = await postJob(fd, `uploading ${i + 1}/${picked.length}: ${picked[i].name}`);
+        ids.push(job.id); previous = job.id;
+      }
+    } catch (e) {
+      batchLog.textContent = `upload failed on ${picked[ids.length]?.name}: ${e.message}` +
+        (ids.length ? ` — ${ids.length} archive(s) already queued` : "");
+      btn.disabled = false;
+      return;
+    }
+    btn.disabled = false;
+    picked.length = 0; renderPicked();
+    form.reset();
+    $(".upload-progress", form).hidden = true; $(".bar", form).style.width = "0";
+    batchLog.textContent = ids.length > 1 ? `${ids.length} archives queued${shared ? " (shared mapping)" : ""}` : "";
+    if (ids.length === 1) openJob(ids[0]); else showTab("jobs");
+  });
 
   // ---- jobs list ---------------------------------------------------------
   async function loadJobs() {
@@ -117,7 +216,8 @@
       ${job.error ? `<div class="verdict bad">${esc(job.error)}</div>` : ""}
       ${job.status === "done" ? `<div class="actions">${dl}
         ${job.trees_kept ? `<button class="secondary" id="purge-trees">free disk (purge extracted trees)</button>` : `<span class="notes">extracted trees purged — diff viewer unavailable</span>`}</div>` : ""}
-      ${job.seed_mapping ? `<p class="notes">seeded from a previous mapping</p>` : ""}
+      ${job.seed_source ? `<p class="notes">seeded from ${esc(job.seed_source)}${job.batch ? " · batch " + esc(job.batch) : ""}</p>`
+        : job.batch ? `<p class="notes">batch ${esc(job.batch)} · own mapping</p>` : ""}
       ${job.status === "done" && job.original_deleted ? `<p class="notes">✓ original deleted after a clean verification</p>` : ""}
       ${job.status === "done" && !job.original_deleted && job.original_kept_reason ? `<div class="verdict warn">⚠ ${esc(job.original_kept_reason)} <button class="danger" id="delete-original">delete original now</button></div>` : ""}
       ${job.status === "done" && !job.original_deleted && !job.original_kept_reason ? `<p class="notes">original kept (not requested to delete) <button class="danger" id="delete-original">delete original</button></p>` : ""}`;

@@ -19,19 +19,36 @@
 <main>
   <section id="tab-anonymize" class="tab-panel active">
     <form id="form-anonymize" class="card">
-      <h2>Anonymize a tech support file</h2>
-      <p class="hint">Upload a <code>.tgz</code> TSF. The output keeps the same file layout, line
-        counts, timestamps and counters; only identifiers are replaced. The compare check runs
-        automatically after anonymization.</p>
-      <label>TSF archive <input type="file" name="file" accept=".tgz,.tar.gz,.tar" required></label>
+      <h2>Anonymize tech support files</h2>
+      <p class="hint">Drop one or more <code>.tgz</code> TSFs. The output keeps the same file
+        layout, line counts, timestamps and counters; only identifiers are replaced. The compare
+        check runs automatically after each one. Archives are processed one at a time.</p>
+      <div id="drop-zone" class="dropzone">
+        <strong>Drop TSF archives here</strong>
+        <span class="opt">or</span>
+        <button type="button" class="secondary" id="pick-files">choose files…</button>
+        <input type="file" id="tsf-files" accept=".tgz,.tar.gz,.tar" multiple hidden>
+      </div>
+      <ul id="file-list" class="file-list"></ul>
+      <fieldset id="batch-seed" class="seed" hidden>
+        <legend>Pseudonyms across the batch</legend>
+        <label class="check"><input type="radio" name="seed_policy" value="shared" checked>
+          One shared mapping <span class="opt">— same customer: an identifier gets the same
+          pseudonym in every archive of the batch (each job seeds from the previous one)</span></label>
+        <label class="check"><input type="radio" name="seed_policy" value="separate">
+          A separate mapping per TSF <span class="opt">— unrelated customers: nothing links an
+          identifier from one archive to another</span></label>
+      </fieldset>
       <label>Seed mapping <span class="opt">(optional — reuse a previous <code>mapping.json</code>
-        so two TSFs from the same customer get the same pseudonyms)</span>
+        so a new TSF from the same customer gets the same pseudonyms; with a shared batch it seeds
+        the first archive and travels down the chain)</span>
         <input type="file" name="seed_mapping" accept=".json"></label>
       <label class="check"><input type="checkbox" name="delete_original" value="true" checked>
         Delete the original after a clean verification <span class="opt">(the un-anonymized upload and
         its extracted tree are removed; with problems it is kept for review)</span></label>
       <button type="submit">Start</button>
       <div class="upload-progress" hidden><div class="bar"></div><span class="label"></span></div>
+      <p id="batch-log" class="notes"></p>
     </form>
   </section>
 

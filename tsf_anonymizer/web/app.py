@@ -117,10 +117,16 @@ def create_app(data_dir: Optional[Path] = None, *,
     @app.post("/api/jobs/anonymize")
     async def create_anonymize(file: UploadFile = File(...),
                                seed_mapping: Optional[UploadFile] = File(None),
-                               delete_original: bool = Form(True)):
+                               delete_original: bool = Form(True),
+                               batch: Optional[str] = Form(None),
+                               seed_from_job: Optional[str] = Form(None)):
+        if seed_from_job and store.get(seed_from_job) is None:
+            raise HTTPException(404, f"no job {seed_from_job} to seed from")
         job = store.new("anonymize")
         d = store.job_dir(job.id)
         job.delete_original = delete_original
+        job.batch = _safe_filename(batch, "")[:40] or None if batch else None
+        job.seed_from = seed_from_job or None
         job.input_name = _safe_filename(file.filename, "input.tgz")
         size = await _save_upload(file, d / "input" / job.input_name)
         if size == 0:

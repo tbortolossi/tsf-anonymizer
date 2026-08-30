@@ -127,6 +127,13 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   survives a re-issue.
 - **The container runs as the host user** (`user:` in compose) so `./data`
   stays deletable without `sudo`.
+- **A batch chains, it does not fan out.** Several TSFs dropped together are
+  separate jobs; a shared mapping is passed by `seed_from` pointing at the
+  *previous* job, so the mapping accumulates instead of restarting from the
+  first archive. `_seed_ancestor` walks back over a job that produced no
+  mapping: a failure in the middle of a batch must cost neither the shared
+  pseudonyms of the archives after it nor their run. An uploaded seed wins
+  over the chain.
 - **A capped list says it is capped** (`truncated` in diff hunks, `total` in
   the report endpoint, top-50 leaks per file with a total count).
 

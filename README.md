@@ -103,9 +103,40 @@ docker compose up -d --force-recreate
 Note that publishing on a LAN address means the port is *only* on that
 address: use `https://<that address>:8096` from the host too.
 
-Uploads, extracted trees and outputs live in `./data/jobs/<id>/`. A 300 MB TSF
-extracts to ~1.5 GB, kept twice (original + anonymized) so the diff viewer can
-read them — use *free disk* on a job or delete it when done.
+### Where the archives live
+
+Everything a job touches stays under `./data/jobs/<id>/` on the host —
+gitignored, never sent anywhere:
+
+```
+data/jobs/<id>/input/       the TSF you uploaded, un-anonymized
+               work/orig/   its extracted tree      } deleted by "free disk"
+               work/anon/   the anonymized tree     } (the diff viewer needs them)
+               output/      <name>_anon.tgz, <name>_anon.mapping.json,
+                            anonymize-report.json, integrity-report.json
+               job.json     status, summaries, batch and seed of the job
+```
+
+A 300 MB TSF extracts to ~1.5 GB, kept twice so the diff viewer can read both
+sides. *Delete the original after a clean verification* (checked by default)
+removes `input/` and `work/orig/` as soon as the integrity check comes back
+clean; when it does not, the original is kept for review and the job says so.
+
+### Batches
+
+Drop several TSFs at once. They are uploaded and processed one at a time, and
+you choose what the batch shares:
+
+- **One shared mapping** — the same customer across several archives: each job
+  seeds from the previous one, so an identifier keeps the same pseudonym
+  everywhere and the mapping keeps growing. A job that fails is stepped over,
+  not cascaded.
+- **A separate mapping per TSF** — unrelated archives: nothing links an
+  identifier from one to another.
+
+An uploaded `mapping.json` seeds the first archive of the batch and travels
+down the chain, which is how a TSF taken next month keeps last month's
+pseudonyms.
 
 CLI (same code, no container):
 
