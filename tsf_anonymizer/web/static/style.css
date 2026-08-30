@@ -88,3 +88,22 @@ label.check input { margin: 0; }
 button.link { background: none; color: var(--err); padding: 0 4px; font-size: 14px; }
 fieldset.seed { border: 1px solid var(--line); border-radius: 6px; margin: 12px 0; padding: 8px 12px; }
 fieldset.seed legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
+
+.flow { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; padding: 0; }
+.flow li { flex: 1 1 150px; display: flex; align-items: baseline; gap: 6px; padding: 7px 10px;
+  border: 1px solid var(--line); border-radius: 6px; background: #fff; position: relative; }
+.flow li + li::before { content: "→"; position: absolute; left: -13px; color: var(--muted); }
+.flow .n { display: inline-block; min-width: 17px; height: 17px; border-radius: 50%; font-size: 11px;
+  line-height: 17px; text-align: center; background: #e5e7eb; color: var(--muted); }
+.flow .t { font-weight: 600; font-size: 13px; }
+.flow .d { color: var(--muted); font-size: 11px; margin-left: auto; text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow li.todo { opacity: .55; }
+.flow li.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.flow li.active .n { background: var(--accent); color: #fff; }
+.flow li.done .n { background: var(--ok); color: #fff; }
+.flow li.done.ok { border-color: var(--ok); } .flow li.done.ok .t { color: var(--ok); }
+.flow li.done.warn { border-color: var(--warn); } .flow li.done.warn .t { color: var(--warn); }
+.flow li.done.bad, .flow li.failed { border-color: var(--err); }
+.flow li.done.bad .t, .flow li.failed .t { color: var(--err); }
+.flow li.done.bad .n, .flow li.failed .n { background: var(--err); color: #fff; }

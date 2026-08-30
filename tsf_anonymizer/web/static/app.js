@@ -201,6 +201,55 @@
     }
   }
 
+  // The verdict, computed once: the flow step and the banner must never be able
+  // to disagree.
+  function verdict(job) {
+    const s = job.compare_summary, arc = job.archive_check || {};
+    if (!s) return null;
+    if (s.errors > 0 || (arc.mismatches || []).length > 0) {
+      return { cls: "bad", short: "problems found",
+               long: "✗ Integrity problems found — review the errors below before sharing this archive." };
+    }
+    if (s.warnings) {
+      return { cls: "warn", short: `${s.warnings} to review`,
+               long: "⚠ Anonymization consistent, with warnings to review." };
+    }
+    return { cls: "ok", short: "no loss, no leak",
+             long: "✓ Every difference is explained by the mapping, nothing identifying survives, structure intact." };
+  }
+
+  // upload → anonymize → independent check → verdict. The check step is named
+  // after the only thing that makes it worth anything: it re-derives what it
+  // expects from the mapping, it never asks the anonymizer what it did.
+  const ANON_PHASES = ["extract", "prescan", "prescan-text", "anonymize", "copy", "repack"];
+  const CHECK_PHASES = ["compare", "verify"];
+
+  function renderFlow(job) {
+    const v = verdict(job);
+    const steps = [{ label: "Upload", hint: job.input_name, phases: [] }];
+    if (job.kind === "anonymize") {
+      steps.push({ label: "Anonymize", hint: "identifiers → pseudonyms", phases: ANON_PHASES });
+    }
+    steps.push({ label: "Independent check", hint: "re-derived from the mapping alone",
+                 phases: CHECK_PHASES });
+    steps.push({ label: "Verdict", hint: v ? v.short : "problem or not", phases: [], verdict: v });
+
+    const running = job.status === "queued" || job.status === "running";
+    let active = steps.findIndex((s) => s.phases.includes(job.phase));
+    // Queued, or between two phases: the upload is the only thing certainly done.
+    if (active < 0) active = running ? (job.phase ? steps.length - 2 : 0) : steps.length - 1;
+
+    return `<ol class="flow">` + steps.map((s, i) => {
+      let cls = i < active ? "done" : i > active ? "todo" : "active";
+      if (!running && i === steps.length - 1) cls = v ? `done ${v.cls}` : "todo";
+      if (job.error && i === active) cls = "failed";
+      const detail = cls === "active" && job.progress_total
+        ? `${job.progress_done}/${job.progress_total}` : esc(s.hint || "");
+      return `<li class="${cls}"><span class="n">${i + 1}</span>
+        <span class="t">${esc(s.label)}</span><span class="d">${detail}</span></li>`;
+    }).join("") + `</ol>`;
+  }
+
   function renderHeader(job) {
     const pct = job.progress_total ? Math.round((job.progress_done / job.progress_total) * 100) : 0;
     const running = job.status === "queued" || job.status === "running";
@@ -211,6 +260,7 @@
         <span class="status status-${job.status}">${job.status}</span>
         <span style="flex:1"></span>
         <button class="secondary" id="back-jobs">← jobs</button></div>
+      ${renderFlow(job)}
       ${running ? `<div class="upload-progress"><div class="bar" style="width:${pct}%"></div>
         <span class="label">${esc(job.phase)} ${job.progress_done}/${job.progress_total} ${esc(job.message)}</span></div>` : ""}
       ${job.error ? `<div class="verdict bad">${esc(job.error)}</div>` : ""}
@@ -241,11 +291,8 @@
     const s = job.compare_summary, a = job.anonymize_summary, arc = job.archive_check || {};
     let html = "";
     if (s) {
-      const bad = s.errors > 0 || (arc.mismatches || []).length > 0;
-      html += `<div class="verdict ${bad ? "bad" : s.warnings ? "warn" : "ok"}">
-        ${bad ? "✗ Integrity problems found — review the errors below before sharing this archive."
-              : s.warnings ? "⚠ Anonymization consistent, with warnings to review."
-              : "✓ Every difference is explained by the mapping, nothing identifying survives, structure intact."}</div>`;
+      const v = verdict(job);
+      html += `<div class="verdict ${v.cls}">${v.long}</div>`;
       html += `<div class="kpis">
         ${kpi("files compared", s.files_total)}
         ${kpi("identical", s.identical)}
