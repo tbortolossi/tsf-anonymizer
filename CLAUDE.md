@@ -77,6 +77,23 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
 - **Compare never runs difflib on a long line character by character.**
   `_changed_spans` switches to token level past 2 000 chars and gives up
   (one span, unexplained) past 4 000 tokens; XML lines of 24 000 chars exist.
+- **Identities are discovered before anything is rewritten, in two passes.**
+  XML prescan (`prescan_tree`) for objects, hosts, serials, contacts; then
+  `prescan_text_identities` over every text file for usernames (log
+  phrasings), e-mails and `hostname X` phrases. Usernames then go through a
+  trie and are replaced everywhere (`UID="x"`, `(x)`), not only in the
+  phrasing that revealed them. Tables that still grow mid-run (an e-mail
+  domain in file 3) trigger a recompile at the next file — `_built_for`.
+- **A FQDN registers its parent domains** down to the registrable one, and
+  the FQDN regex allows a dot before: `https://apex/` and `*.apex` survived a
+  raw grep of the anonymized real TSF while the compare reported 0 leaks,
+  because the apex was never a mapping key. **The compare only knows the
+  mapping** — a raw grep for the customer's name is the check it cannot do.
+- **Under an identity container, any spelling is an identity.**
+  `_IDENTITY_PARENTS` (users, admin, zone, address, certificate, server…)
+  bypasses the lowercase-word vocabulary heuristic, which had swallowed a
+  real admin named `jmartin`. An entry named by its IP is owned by the IP
+  pass; one named by a FQDN by the FQDN pass — never also an `OBJ-…`.
 - **The output archive is the input archive with payloads swapped.**
   `repack_archive` iterates the original `TarInfo` list; it must not re-walk
   the filesystem (`tar.add(dir)`), which loses order and metadata.
@@ -103,7 +120,10 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   scanned for company names; `<contact>` and `<full-name>` are.
 - Binary files may embed identifiers; the compare report flags them as
   warnings rather than the anonymizer rewriting them.
-- IPv6 untouched; usernames only in known log phrasings.
+- IPv6 untouched; usernames only in the log phrasings `_user_re` knows
+  (then replaced everywhere).
+- Addresses rendered as byte arrays (`[0 0 … 255 255 10 0 0 254]` in Go
+  debug output) are not recognised.
 
 ## Conventions
 

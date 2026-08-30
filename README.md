@@ -86,6 +86,26 @@ tsf-anonymizer serve --data-dir ./data
 
 `--verify` / `compare` exit 2 when the integrity report has errors.
 
+## Measured on a real TSF
+
+PA-440, PAN-OS 12.1, 155 MB archive, 562 members, 1.2 GB extracted, 508 files
+(2026-08-30, one core):
+
+| | |
+|---|---|
+| anonymize + verify | ~10 min |
+| mapping | 54 148 IPs · 202 objects · 54 FQDNs · 65 e-mails · 10 serials · 4 usernames |
+| changed lines | 891 914 — **100 % explained by the mapping** |
+| surviving identifiers (text) | **0** |
+| binary files | 42, all byte-identical; 36 embed identifiers (`rule-hit-count.bin`, `wtmp`, `sa*`, `sslvpn-task.log`) |
+| archive | same 562 members, same order, same metadata |
+
+The compare mode found twelve defects in the anonymizer inherited from
+TAC-MAN before that table read this way — rewritten XML tags, the App-ID
+catalog registered as customer objects, chained pseudonyms, counters taken for
+serials, URLs left untouched, an apex domain never mapped. They are recorded
+as invariants in [CLAUDE.md](CLAUDE.md).
+
 ## Known limitations
 
 - **A hostname that appears only in logs and never in a config is not
@@ -105,7 +125,13 @@ tsf-anonymizer serve --data-dir ./data
 - Usernames are only caught in the log phrasings the regex knows
   (`for user 'x'`, `user: 'x'`, …). Config-declared users are caught as named
   objects.
-- IPv6 is not anonymized.
+- IPv6 is not anonymized; neither are addresses rendered as byte arrays in
+  Go debug output (`[0 0 … 255 255 10 0 0 254]`).
+- **The compare mode only knows the mapping.** It proves every change is
+  mapping-driven and that no mapped value survives; it cannot know that a
+  string it never mapped is the customer's name. A raw `grep` of the
+  anonymized tree for the customer name, domain and site names is the check
+  to run on top — it is how the apex-domain gap was found.
 - No authentication on the web UI — bind to loopback (the default) or put a
   proxy in front.
 
