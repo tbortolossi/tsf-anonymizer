@@ -26,6 +26,9 @@ tsf_anonymizer/
   web/app.py     FastAPI routes; templates/ + static/ are vanilla HTML/JS
 tests/           pytest; test_core.py, test_compare.py, test_web.py
 docs/TSF-GUIDE.md  what a TSF contains and how to read one (user-facing)
+.claude/skills/read-tsf/  agent skill: shell-first method to analyze a TSF
+                 (symptom→file→grep map distilled from TAC-MAN's tsf-agent);
+                 keep it consistent with TSF-GUIDE.md when either changes
 Dockerfile, docker-compose.yml
 ```
 
