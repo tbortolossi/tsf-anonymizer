@@ -97,7 +97,7 @@ priority map):
 | **Crash / reboot** | `crashinfo/`, `reboot.log`, `sysd.log` | `messages`, `mce.log`, `bios.log`, `history.log` | `grep -E "panic|oops|segfault|watchdog|Killed process"`. PID change in `mp-monitor.log` = daemon restart without reboot. **After any upgrade, check for crashes even if the symptom isn't crash-shaped.** |
 | **CPU** | `dp-monitor.log`, `mp-monitor.log`, `> show running resource-monitor` | `var/log/sa/sar*` (31-day history) | DP CPU = traffic-side (sessions, decryption, App-ID); MP CPU = reports/logging/configd. DP > 80 % sustained 3+ snapshots = critical. Correlate spikes with commits/content updates. |
 | **Memory** | `mp-monitor.log`, `> show system resources` | `grep -E "Out of memory|oom-killer"` | Growth across 3+ snapshots is the signal, never one reading. Linux cache ≠ pressure. LEAK (one RSS rising) vs LOAD (tracks sessions/tunnels) vs steady-high (benign). A leaking daemon is a future-crashing daemon. |
-| **Drops / perf** | `> show counter global filter delta yes` | `dp-monitor.log`, `> show session info`, `> debug dataplane pool statistics` | Read `drop`/`error` severities first; the **delta** section says what happens now. `flow_policy_deny`+`tcp_rst_from_self`=policy RST · `flow_fwd_mtu_exceeded`+`ip_df_drop`=MTU in tunnel path (big packets fail, ping works) · `flow_tcp_non_syn` right after failover is EXPECTED. Depleted DP pools drop silently. |
+| **Drops / perf / buffers** | `> show counter global filter delta yes`, `> show running resource-monitor` | `dp-monitor.log`, `> show session info`, `> debug dataplane pool statistics`, `> show zone-protection` | See the buffers/PBP/counters section below. Read `drop`/`error` severities first; the **delta** section says what happens now. `flow_policy_deny`+`tcp_rst_from_self`=policy RST · `flow_fwd_mtu_exceeded`+`ip_df_drop`=MTU in tunnel path (big packets fail, ping works) · `flow_tcp_non_syn` right after failover is EXPECTED. Depleted DP pools drop silently. |
 | **Interfaces** | `> show interface all`, `pan_ifmgr.log` | `brdagent.log` (port/ASIC), `l2ctrld.log` | Physical first — it invalidates every higher-layer diagnosis on the path. CRC/FCS on one port=cable/SFP · late collisions=duplex mismatch · `dot1q_tag_err`=VLAN arriving on a port not carrying it. |
 | **Disk** | `> show system disk-space`, `df` in techsupport | `logpurger.log`, `messages` | WHICH partition decides the cause: /var/log=logrotate stuck (du≠df = deleted-fd) or forgotten debug level · /opt/panrepo=old images (safe cleanup) · /opt/panlogs=at quota by design, only purge *errors* matter · root full=the dangerous one (commits fail). Cores on disk = pivot to crash, don't delete them. |
 | **Routing** | `routed.log` or `frr_export.log`+`etc/frr/` | `> show routing route` / `> show advanced-routing …` | Advanced-routing engine = FRR; legacy = routed. Check which one owns the config. |
@@ -106,6 +106,72 @@ priority map):
 | **Panorama** | `devsrv.log`, `ms.log` | `opt/pancfg/mgmt/tmp/panorama_pushed/` | `running-config.xml` alone is incomplete on managed devices — use `.merged-running-config.xml`. |
 
 \* alias rule of step 2 applies.
+
+## Buffers, packet-buffer protection and counters — the silent-drop toolkit
+
+Several drop causes generate **no traffic-log entry**: zone protection, PBP,
+NAT pool exhaustion (`nat_port_alloc_fail`), a full session table. When policy
+and routing look correct but the customer reports loss, counters and the
+sections below are the only evidence.
+
+**Buffer / descriptor utilization** — in the techsupport txt,
+`> show running resource-monitor` repeats per second / minute / hour / day /
+week, each with a `Resource utilization (%)` block: `session`,
+`packet buffer`, `packet descriptor`, `sw tags descriptor` (larger platforms
+print `packet descriptor (on-chip)` per DP/slot — the hardware ingress
+descriptors). Read **maximum** rows, not averages:
+
+```bash
+grep -A5 "^packet buffer (maximum):" tmp/cli/techsupport_*.txt
+grep -A5 "descriptor (maximum):" tmp/cli/techsupport_*.txt
+```
+
+Interpretation: descriptor near 100 % with modest CPU = ingress congestion —
+packets are dropped at the wire while every core looks idle; packet buffer
+sustained > 80 % = imminent PBP/RED; a **baseline** > 40 % at peak = the
+platform is undersized, not an incident. `> debug dataplane pool statistics`
+gives the instant view: `Packet Buffers : free/total` against
+`Low free buffer limit` (free approaching the limit = exhaustion), and a
+non-zero `Depleted` column in the segment table.
+
+**Packet Buffer Protection (PBP)** — two phases, three counters:
+
+- `pkt_buf_protect_red` — Phase 1 (global): RED applied to the offending
+  session as the buffer crosses the Activate threshold. Any non-zero rate =
+  buffer under sustained pressure; intermittent loss + retransmits that
+  mimics upstream congestion.
+- `pkt_buf_protect_discard` — Phase 2 (per-zone): the offending session is
+  torn down. Long-lived high-bandwidth transfers reset without warning.
+- `pkt_buf_protect_block_ip` — Phase 2: the **source IP is blocked entirely**
+  (default 3600 s), silently. **The classic escalation: the blocked source is
+  a NAT device (site router, proxy) → the whole site loses everything, with
+  zero log evidence.** On "everyone in the office lost internet at once",
+  check this counter before anything else. Live-device follow-ups (usually
+  NOT captured in the TSF): `show session packet-buffer-protection`,
+  `show running resource-monitor ingress-backlogs` (sessions holding ≥ 2 % of
+  on-chip descriptors), `clear session packet-buffer-protection`.
+
+Buffer-exhaustion counters when PBP is off or overwhelmed:
+`pkt_alloc_fail*`, `buf_alloc_fail`, `hw_buf_alloc_fail`, `flow_rcv_err_pkt`,
+`packets_dropped_buffer`, and `pkt_recv_skip_inflight` (processing backlog too
+deep — DP overload even at moderate CPU). Random, flow-unmappable loss is the
+tell.
+
+**Zone protection** — `> show zone-protection` lists, per zone and mechanism,
+`enabled: yes/no` and `packet dropped: N`. Non-zero drops here are silent by
+design. `tcp-reject-non-syn` drops are routine after a failover (unsynced
+sessions) — sustained means asymmetric routing. Flood/recon counters firing:
+decide legitimate burst (internal scanner, backups → raise threshold or use a
+classified rule) vs attack (block the source) before touching thresholds.
+
+**Counter method** — `> show counter global` appears twice: raw (since boot)
+and `filter delta yes` (a few seconds — what happens *now*; rate column ≠ 0
+is the live signal). Sort by severity `drop`/`error` first, then read pairs:
+`flow_tcp_non_syn` ≈ `flow_tcp_non_syn_drop` = 100 % of stateless TCP
+dropped; `tcp_drop_packet` + `tcp_exceed_flow_seg_limit` = out-of-order queue
+overflow (asymmetry/reordering upstream); `flow_dos_*` = zone/DoS protection
+acting (see above). A counter name is not self-explanatory — when unsure,
+grep the same name in the raw section for its description column.
 
 ## Step 4 — the config
 

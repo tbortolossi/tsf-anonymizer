@@ -82,7 +82,7 @@ sections worth reading on every case, in order:
 | `> show system info` | model, serial, **PAN-OS version**, content/AV/threat versions, uptime, HA, mgmt IP |
 | `> show clock` | device time and timezone (see §1) |
 | `> show system resources` | CPU/memory on the management plane, top processes |
-| `> show running resource-monitor` | dataplane CPU per core, packet buffers, session usage over time |
+| `> show running resource-monitor` | dataplane CPU per core, and `Resource utilization (%)`: session, **packet buffer, packet descriptor (on-chip)** — read the *(maximum)* rows; descriptor saturation drops packets while CPU looks idle |
 | `> show session info` | sessions in use vs. the limit, packet rate, throughput, timeouts |
 | `> show counter global filter delta yes` | dataplane drop counters — **read the `drop` and `error` severities first** |
 | `> show interface all` | link state, speed/duplex, errors per interface |
@@ -96,7 +96,8 @@ sections worth reading on every case, in order:
 | `> show global-protect-gateway …` / `-portal …` | GP sessions, auth, statistics |
 | `> show user ip-user-mapping-mp all` / `> show user user-id-agent statistics` | User-ID health |
 | `> request license info` | licences and expiry (an expired licence explains many "it stopped working") |
-| `> debug dataplane pool statistics` | dataplane memory pools — depleted pools drop packets silently |
+| `> debug dataplane pool statistics` | dataplane pools — `Packet Buffers free/total` vs `Low free buffer limit`, `Depleted` segments; depleted pools drop packets silently |
+| `> show zone-protection` | per-zone, per-mechanism `packet dropped:` counts — these drops write **no traffic log** |
 | `> show system setting …` | tuning knobs that differ from defaults |
 
 `> show counter global` appears twice: once raw and once as a delta over a
