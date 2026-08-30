@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TSF Anonymizer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>TSF Anonymizer <small>v{{ version }}</small></h1>
+  <nav>
+    <button class="tab active" data-tab="anonymize">Anonymize</button>
+    <button class="tab" data-tab="compare">Compare</button>
+    <button class="tab" data-tab="jobs">Jobs</button>
+  </nav>
+</header>
+
+<main>
+  <section id="tab-anonymize" class="tab-panel active">
+    <form id="form-anonymize" class="card">
+      <h2>Anonymize a tech support file</h2>
+      <p class="hint">Upload a <code>.tgz</code> TSF. The output keeps the same file layout, line
+        counts, timestamps and counters; only identifiers are replaced. The compare check runs
+        automatically after anonymization.</p>
+      <label>TSF archive <input type="file" name="file" accept=".tgz,.tar.gz,.tar" required></label>
+      <label>Seed mapping <span class="opt">(optional — reuse a previous <code>mapping.json</code>
+        so two TSFs from the same customer get the same pseudonyms)</span>
+        <input type="file" name="seed_mapping" accept=".json"></label>
+      <button type="submit">Start</button>
+      <div class="upload-progress" hidden><div class="bar"></div><span class="label"></span></div>
+    </form>
+  </section>
+
+  <section id="tab-compare" class="tab-panel">
+    <form id="form-compare" class="card">
+      <h2>Compare an original with its anonymized copy</h2>
+      <p class="hint">Verifies that every difference between the two archives is explained by the
+        mapping, that no mapped identifier survives, and that nothing else changed.</p>
+      <label>Original TSF <input type="file" name="original" accept=".tgz,.tar.gz,.tar" required></label>
+      <label>Anonymized TSF <input type="file" name="anonymized" accept=".tgz,.tar.gz,.tar" required></label>
+      <label>Mapping <span class="opt">(<code>mapping.json</code> — without it, only structural
+        checks run and every change reads as unexplained)</span>
+        <input type="file" name="mapping" accept=".json"></label>
+      <button type="submit">Start</button>
+      <div class="upload-progress" hidden><div class="bar"></div><span class="label"></span></div>
+    </form>
+  </section>
+
+  <section id="tab-jobs" class="tab-panel">
+    <div class="card">
+      <h2>Jobs</h2>
+      <table id="jobs-table">
+        <thead><tr><th>Created</th><th>Kind</th><th>Input</th><th>Status</th><th>Integrity</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="job-view" hidden>
+    <div class="card" id="job-header"></div>
+    <div class="card" id="job-summary" hidden></div>
+    <div class="card" id="job-files" hidden>
+      <div class="toolbar">
+        <h3>Files</h3>
+        <select id="file-filter">
+          <option value="">all statuses</option>
+          <option value="error,warning" selected>problems only</option>
+          <option value="error">errors</option>
+          <option value="warning">warnings</option>
+          <option value="anonymized">anonymized</option>
+          <option value="identical">identical</option>
+        </select>
+        <input id="file-search" type="search" placeholder="filter by path… (Enter)">
+        <span id="file-count"></span>
+      </div>
+      <div class="table-wrap">
+        <table id="files-table">
+          <thead><tr><th>Path</th><th>Kind</th><th>Status</th><th>Lines</th><th>Changed</th>
+            <th>Unexplained</th><th>Leaks</th><th>Notes</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card" id="diff-view" hidden>
+      <div class="toolbar">
+        <h3 id="diff-title"></h3>
+        <label>context <input id="diff-context" type="number" min="0" max="20" value="3"></label>
+        <button id="diff-close">close</button>
+      </div>
+      <div id="diff-body"></div>
+    </div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

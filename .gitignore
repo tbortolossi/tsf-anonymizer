@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+data/
+*.tgz
+*.tar.gz
+*.mapping.json
+.pytest_cache/
+.ruff_cache/

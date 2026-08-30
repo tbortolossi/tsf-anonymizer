@@ -1,0 +1,18 @@
+services:
+  tsf-anonymizer:
+    build: .
+    image: tsf-anonymizer:latest
+    container_name: tsf-anonymizer
+    # Loopback only by default: the UI has no authentication and handles the
+    # un-anonymized archive. Set TSF_BIND_ADDR=0.0.0.0 to expose it on the LAN
+    # (behind an authenticating proxy).
+    ports:
+      - "${TSF_BIND_ADDR:-127.0.0.1}:${TSF_PORT:-8090}:8090"
+    volumes:
+      - ./data:/data
+    # Run as the host user so ./data stays owned by you, not root.
+    # export TSF_UID=$(id -u) TSF_GID=$(id -g) before `docker compose up`.
+    user: "${TSF_UID:-1000}:${TSF_GID:-1000}"
+    environment:
+      TSF_DATA_DIR: /data
+    restart: unless-stopped
