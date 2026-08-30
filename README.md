@@ -113,7 +113,8 @@ data/jobs/<id>/input/       the TSF you uploaded, un-anonymized
                work/orig/   its extracted tree      } deleted by "free disk"
                work/anon/   the anonymized tree     } (the diff viewer needs them)
                output/      <name>_anon.tgz, <name>_anon.mapping.json,
-                            anonymize-report.json, integrity-report.json
+                            anonymize-report.json, integrity-report.json,
+                            job.log
                job.json     status, summaries, batch and seed of the job
 ```
 
@@ -121,6 +122,15 @@ A 300 MB TSF extracts to ~1.5 GB, kept twice so the diff viewer can read both
 sides. *Delete the original after a clean verification* (checked by default)
 removes `input/` and `work/orig/` as soon as the integrity check comes back
 clean; when it does not, the original is kept for review and the job says so.
+
+### When a job fails
+
+Every run writes its own `output/job.log`: what it did, every file the
+anonymizer had to skip, and — if it crashed — the traceback. The job page
+shows it (it opens by itself on a failure) and offers it as a download, so a
+bug report is a file, not a `docker compose logs` transcript that the next
+`--force-recreate` throws away. `GET /api/jobs/<id>/log?tail=N` returns the
+last N lines as JSON.
 
 ### Batches
 

@@ -160,7 +160,7 @@
       const integ = s ? (s.errors ? `<span class="status status-error">${s.errors} error(s)</span>` :
         s.warnings ? `<span class="status status-warning">${s.warnings} warning(s)</span>` :
         `<span class="status status-done">OK</span>`) : "—";
-      return `<tr class="clickable" data-id="${j.id}">
+      return `<tr class="clickable" data-id="${j.id}" title="${esc(j.error || "")}">
         <td>${fmtDate(j.created_at)}</td><td>${j.kind}</td>
         <td class="mono">${esc(j.input_name)}${j.anon_input_name ? " ↔ " + esc(j.anon_input_name) : ""}</td>
         <td><span class="status status-${j.status}">${j.status}</span></td><td>${integ}</td>
@@ -253,7 +253,8 @@
   function renderHeader(job) {
     const pct = job.progress_total ? Math.round((job.progress_done / job.progress_total) * 100) : 0;
     const running = job.status === "queued" || job.status === "running";
-    const dl = Object.entries(job.outputs || {}).map(([k, v]) =>
+    // The log has its own panel below; it is not one of the result files.
+    const dl = Object.entries(job.outputs || {}).filter(([k]) => k !== "log").map(([k, v]) =>
       `<a href="/api/jobs/${job.id}/download/${k}" download>${{ tgz: "⬇ anonymized TSF", mapping: "⬇ mapping.json", integrity_report: "⬇ integrity report", anonymize_report: "⬇ anonymize report" }[k] || k}</a>`).join("");
     $("#job-header").innerHTML = `
       <div class="toolbar"><h2>${job.kind} · <span class="mono">${esc(job.input_name)}${job.anon_input_name ? " ↔ " + esc(job.anon_input_name) : ""}</span></h2>
@@ -263,15 +264,29 @@
       ${renderFlow(job)}
       ${running ? `<div class="upload-progress"><div class="bar" style="width:${pct}%"></div>
         <span class="label">${esc(job.phase)} ${job.progress_done}/${job.progress_total} ${esc(job.message)}</span></div>` : ""}
-      ${job.error ? `<div class="verdict bad">${esc(job.error)}</div>` : ""}
-      ${job.status === "done" ? `<div class="actions">${dl}
-        ${job.trees_kept ? `<button class="secondary" id="purge-trees">free disk (purge extracted trees)</button>` : `<span class="notes">extracted trees purged — diff viewer unavailable</span>`}</div>` : ""}
+      ${job.error ? `<div class="verdict bad"><span>${esc(job.error)}</span></div>` : ""}
+      ${running ? "" : `<div class="actions">${job.status === "done" ? dl : ""}
+        ${job.status === "done" && job.trees_kept ? `<button class="secondary" id="purge-trees">free disk (purge extracted trees)</button>` : ""}
+        ${job.status === "done" && !job.trees_kept ? `<span class="notes">extracted trees purged — diff viewer unavailable</span>` : ""}
+        <button class="secondary" id="show-log">${job.error ? "show the run log (traceback)" : "run log"}</button></div>`}
+      <div id="log-box" hidden>
+        <div class="log-head"><span id="log-meta"></span>
+          <a href="/api/jobs/${job.id}/download/log" download>download the full log</a></div>
+        <div class="logbox"><pre id="log-text"></pre></div>
+      </div>
       ${job.seed_source ? `<p class="notes">seeded from ${esc(job.seed_source)}${job.batch ? " · batch " + esc(job.batch) : ""}</p>`
         : job.batch ? `<p class="notes">batch ${esc(job.batch)} · own mapping</p>` : ""}
       ${job.status === "done" && job.original_deleted ? `<p class="notes">✓ original deleted after a clean verification</p>` : ""}
       ${job.status === "done" && !job.original_deleted && job.original_kept_reason ? `<div class="verdict warn">⚠ ${esc(job.original_kept_reason)} <button class="danger" id="delete-original">delete original now</button></div>` : ""}
       ${job.status === "done" && !job.original_deleted && !job.original_kept_reason ? `<p class="notes">original kept (not requested to delete) <button class="danger" id="delete-original">delete original</button></p>` : ""}`;
     $("#back-jobs").addEventListener("click", () => showTab("jobs"));
+    const logBtn = $("#show-log");
+    if (logBtn) logBtn.addEventListener("click", () => {
+      const box = $("#log-box");
+      box.hidden ? loadLog(job.id) : (box.hidden = true);
+    });
+    // A crash is the case where the log is the whole point: show it unasked.
+    if (job.error) loadLog(job.id);
     const delOrig = $("#delete-original");
     if (delOrig) delOrig.addEventListener("click", async () => {
       if (!confirm("Delete the un-anonymized upload and the extracted trees? Outputs stay; the diff viewer will not.")) return;
@@ -284,6 +299,27 @@
       await fetch(`/api/jobs/${job.id}/purge-trees`, { method: "POST" });
       pollJob();
     });
+  }
+
+  // The run's log — the traceback of a failure and every file the anonymizer
+  // had to skip. Without it the only copy is the container's stderr, which is
+  // gone the next time the container is recreated.
+  const LOG_LEVEL = /\s(WARNING|ERROR|CRITICAL)\s/;
+  async function loadLog(id) {
+    const box = $("#log-box"), pre = $("#log-text");
+    if (!box) return;
+    box.hidden = false;
+    pre.textContent = "loading…";
+    const r = await fetch(`/api/jobs/${id}/log?tail=400`);
+    if (!r.ok) { pre.textContent = "no log kept for this job"; return; }
+    const d = await r.json();
+    $("#log-meta").textContent = d.truncated
+      ? `last ${d.lines.length} of ${d.total} lines` : `${d.total} lines`;
+    pre.innerHTML = d.lines.map((l) => {
+      const m = LOG_LEVEL.exec(l);
+      return m ? `<span class="lvl-${m[1]}">${esc(l)}</span>` : esc(l);
+    }).join("\n");
+    box.scrollTop = box.scrollHeight;
   }
 
   function kpi(label, v, cls = "") { return `<div class="kpi ${cls}"><div class="v">${v}</div><div class="k">${label}</div></div>`; }
@@ -317,6 +353,10 @@
       if (arc.members_orig !== undefined) {
         html += `<p class="notes">archive: ${arc.members_orig} → ${arc.members_anon} members, order ${arc.order_preserved ? "preserved" : "<b>changed</b>"}, ${arc.metadata_differences} metadata difference(s)${(arc.mismatches || []).length ? " — " + arc.mismatches.map(esc).join("; ") : ""}</p>`;
       }
+    }
+    if (a && a.errors) {
+      html += `<div class="verdict warn">⚠ ${a.errors} file(s) could not be processed by the
+        anonymizer — the run log says which and why.</div>`;
     }
     if (a) {
       html += `<details><summary>anonymization stats</summary><div class="kpis">

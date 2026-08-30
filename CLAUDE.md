@@ -134,6 +134,15 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   mapping: a failure in the middle of a batch must cost neither the shared
   pseudonyms of the archives after it nor their run. An uploaded seed wins
   over the chain.
+- **Every run keeps its own log.** `_capture_log` tees the package logger into
+  `output/job.log` for the duration of one job (they run one at a time, so one
+  handler captures exactly one job), and a crash also stores its traceback in
+  `job.error_detail`. The container's stderr is not a log: it is gone the next
+  time the container is recreated, and it is the only place that said which
+  file and which pattern broke. `core` logs the files it had to skip as
+  warnings, and those surface nowhere else — the UI opens the panel by itself
+  when a job failed. A failed job also *keeps the phase it died in* so the flow
+  marks the step that broke.
 - **A capped list says it is capped** (`truncated` in diff hunks, `total` in
   the report endpoint, top-50 leaks per file with a total count).
 

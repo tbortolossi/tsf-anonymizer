@@ -24,6 +24,11 @@
         layout, line counts, timestamps and counters; only identifiers are replaced. The compare
         check runs automatically after each one. Archives are processed one at a time.</p>
       <div id="drop-zone" class="dropzone">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <path d="M7 10l5-5 5 5"></path><path d="M12 5v12"></path>
+        </svg>
         <strong>Drop TSF archives here</strong>
         <span class="opt">or</span>
         <button type="button" class="secondary" id="pick-files">choose files…</button>
@@ -108,7 +113,7 @@
       <div class="toolbar">
         <h3 id="diff-title"></h3>
         <label>context <input id="diff-context" type="number" min="0" max="20" value="3"></label>
-        <button id="diff-close">close</button>
+        <button class="secondary" id="diff-close">close</button>
       </div>
       <div id="diff-body"></div>
     </div>

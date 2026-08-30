@@ -3,6 +3,7 @@
 One job = one directory under ``<data_dir>/jobs/<id>/``::
 
     job.json                 status, phase, progress, timings, errors
+    output/job.log           everything the run logged, traceback included
     input/                   uploaded archives (+ mapping for compare jobs)
     work/orig/  work/anon/   extracted trees, kept so the diff viewer can read them
     output/                  <name>_anon.tgz, <name>.mapping.json, integrity-report.json
@@ -21,8 +22,10 @@ import logging
 import shutil
 import threading
 import time
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
@@ -33,6 +36,38 @@ from .compare import compare_archives, compare_trees, compare_members
 logger = logging.getLogger(__name__)
 
 STATUSES = ("queued", "running", "done", "failed", "interrupted")
+LOG_NAME = "job.log"
+
+
+@contextmanager
+def _capture_log(path: Path):
+    """Tee everything the package logs during one job into its own directory.
+
+    A traceback that only reached the container's stderr is gone as soon as the
+    container is recreated, and it is the one thing that says which file and
+    which pattern broke. Warnings matter as much as the crash: `core` logs the
+    files it had to skip, and those never surface anywhere else. Jobs run one
+    at a time on a single worker, so one handler at a time captures exactly one
+    job.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    handler.setLevel(logging.INFO)
+    pkg = logging.getLogger(__name__.split(".")[0])
+    # Under uvicorn the root logger sits at WARNING, which would drop the INFO
+    # trail; NOTSET (0) means "inherit", so it has to be raised, not lowered.
+    previous = pkg.level
+    pkg.setLevel(min(previous or logging.INFO, logging.INFO))
+    pkg.addHandler(handler)
+    try:
+        yield
+    finally:
+        pkg.removeHandler(handler)
+        pkg.setLevel(previous)
+        handler.close()
+
+
 
 
 @dataclass
@@ -50,6 +85,9 @@ class Job:
     progress_total: int = 0
     message: str = ""
     error: Optional[str] = None
+    # The one-line reason is what the UI shows; the traceback is what fixes the
+    # code, so it is kept with the job instead of only in the container's stderr.
+    error_detail: Optional[str] = None
     anonymize_summary: Optional[dict] = None
     compare_summary: Optional[dict] = None
     archive_check: Optional[dict] = None
@@ -196,21 +234,33 @@ class JobStore:
     def _run(self, job: Job) -> None:
         job.status, job.started_at = "running", time.time()
         self._save(job)
-        try:
-            if job.kind == "anonymize":
-                self._run_anonymize(job)
-            elif job.kind == "compare":
-                self._run_compare(job)
-            else:
-                raise ValueError(f"unknown job kind {job.kind}")
-            job.status = "done"
-        except Exception as e:
-            logger.exception("job %s failed", job.id)
-            job.status, job.error = "failed", f"{type(e).__name__}: {e}"
-        finally:
-            job.finished_at = time.time()
-            job.phase, job.message = "finished", ""
-            self._save(job)
+        with _capture_log(self.job_dir(job.id) / "output" / LOG_NAME):
+            logger.info("job %s: %s %s", job.id, job.kind, job.input_name or "?")
+            try:
+                if job.kind == "anonymize":
+                    self._run_anonymize(job)
+                elif job.kind == "compare":
+                    self._run_compare(job)
+                else:
+                    raise ValueError(f"unknown job kind {job.kind}")
+                job.status = "done"
+            except Exception as e:
+                logger.exception("job %s failed", job.id)
+                job.status, job.error = "failed", f"{type(e).__name__}: {e}"
+                job.error_detail = traceback.format_exc()
+            finally:
+                job.finished_at = time.time()
+                # A failure keeps the phase it died in, so the flow in the UI
+                # marks the step that broke instead of showing every step up to
+                # the verdict as done.
+                job.phase = job.phase if job.status == "failed" else "finished"
+                job.message = ""
+                # Set after the run: _run_anonymize / _run_compare assign
+                # `outputs` wholesale, and the log is an output of both.
+                job.outputs["log"] = LOG_NAME
+                logger.info("job %s %s in %.1fs", job.id, job.status,
+                            job.finished_at - (job.started_at or job.finished_at))
+                self._save(job)
 
     def _run_anonymize(self, job: Job) -> None:
         d = self.job_dir(job.id)

@@ -31,7 +31,7 @@ from fastapi.templating import Jinja2Templates
 
 from .. import __version__
 from ..compare import file_diff
-from ..jobs import JobStore
+from ..jobs import JobStore, LOG_NAME
 
 HERE = Path(__file__).parent
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._\-]+")
@@ -225,6 +225,19 @@ def create_app(data_dir: Optional[Path] = None, *,
         return {"summary": report["summary"], "archive": report.get("archive", {}),
                 "total": total, "offset": offset,
                 "files": files[offset: offset + max(1, min(limit, 5000))]}
+
+    @app.get("/api/jobs/{job_id}/log")
+    def job_log(job_id: str, tail: int = 300):
+        """The run's own log — the traceback of a failure and every file the
+        anonymizer had to skip, without shelling into the container."""
+        job = _job(job_id)
+        p = store.job_dir(job.id) / "output" / LOG_NAME
+        if not p.is_file():
+            raise HTTPException(404, "no log for this job")
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        tail = max(1, min(tail, 5000))
+        return {"total": len(lines), "truncated": len(lines) > tail,
+                "error_detail": job.error_detail, "lines": lines[-tail:]}
 
     @app.get("/api/jobs/{job_id}/mapping")
     def mapping(job_id: str):

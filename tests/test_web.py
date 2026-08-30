@@ -57,7 +57,7 @@ def test_anonymize_job_end_to_end(client, tmp_path):
     assert job["status"] == "done", job["error"]
     assert job["compare_summary"]["errors"] == 0
     assert job["archive_check"]["order_preserved"]
-    assert set(job["outputs"]) == {"tgz", "mapping", "anonymize_report", "integrity_report"}
+    assert set(job["outputs"]) == {"tgz", "mapping", "anonymize_report", "integrity_report", "log"}
 
     # downloads
     tgz = client.get(f"/api/jobs/{job['id']}/download/tgz")
@@ -322,3 +322,40 @@ def test_an_uploaded_seed_wins_over_the_chain(client, tmp_path):
     job = _wait(client, r.json()["id"])
     assert job["seed_source"] == "uploaded mapping"
     assert _anonymized_log(client, job["id"]) == _anonymized_log(client, first["id"])
+
+
+def test_a_failed_job_keeps_a_log_with_the_traceback(client):
+    """The reason a job died has to survive the container that ran it."""
+    r = client.post("/api/jobs/anonymize", files={"file": ("bad.tgz", b"not a tar at all")})
+    job = _wait(client, r.json()["id"])
+    assert job["status"] == "failed"
+    assert "Traceback" in job["error_detail"]
+
+    log = client.get(f"/api/jobs/{job['id']}/log").json()
+    text = "\n".join(log["lines"])
+    assert "Traceback" in text and f"job {job['id']} failed" in text
+    assert not log["truncated"] and log["total"] == len(log["lines"])
+    # …and as a file, for a bug report.
+    dl = client.get(f"/api/jobs/{job['id']}/download/log")
+    assert dl.status_code == 200 and "Traceback" in dl.text
+
+
+def test_the_log_of_a_clean_run_is_kept_too(client, tmp_path):
+    tsf = build_tsf(tmp_path)
+    r = client.post("/api/jobs/anonymize", files={"file": ("in.tgz", tsf.read_bytes())},
+                    data={"delete_original": "false"})
+    job = _wait(client, r.json()["id"])
+    assert job["status"] == "done" and job["error_detail"] is None
+    log = client.get(f"/api/jobs/{job['id']}/log?tail=1").json()
+    assert log["truncated"] and len(log["lines"]) == 1
+    assert log["total"] > 1
+
+
+def test_no_log_for_a_job_that_never_ran(tmp_path):
+    from tsf_anonymizer.jobs import JobStore
+    from tsf_anonymizer.web.app import create_app
+    from fastapi.testclient import TestClient
+    store = JobStore(tmp_path / "data")
+    job = store.new("anonymize")
+    with TestClient(create_app(tmp_path / "data", password="")) as c:
+        assert c.get(f"/api/jobs/{job.id}/log").status_code == 404
