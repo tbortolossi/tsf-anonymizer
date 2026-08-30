@@ -152,9 +152,12 @@ is *the* dataplane. PA-5200/PA-7000 (and older 5000) do not:
 
 ## Step 3 — symptom → files → what to grep
 
-`sdb.txt` (the sysd state database) and `techsupport_*.txt` are useful for
-every symptom. Then, per domain (P0 files first — this is tsf-agent's own
-priority map):
+`sdb.txt` (the sysd state database, `tmp/cli/logs/`) and `techsupport_*.txt`
+are useful for every symptom. `sdb.txt` is a flat dump of dotted keys —
+`sys.s1.info.model: PA-440`, `sys.s1.dp0.*`, HA/hardware/version state —
+so `grep '^sys\.' sdb.txt | grep -i <topic>` answers "what does the box think
+its own state is" without parsing anything. Then, per domain (P0 files first
+— this is tsf-agent's own priority map):
 
 | symptom | read first | then | grep for / interpret |
 |---|---|---|---|
@@ -175,6 +178,10 @@ priority map):
 | **Panorama** | `devsrv.log`, `ms.log` | `opt/pancfg/mgmt/tmp/panorama_pushed/` | `running-config.xml` alone is incomplete on managed devices — use `.merged-running-config.xml`. |
 
 \* alias rule of step 2 applies.
+
+Secondary domains not tabled here — WildFire, URL filtering, QoS, SD-WAN,
+DLP, App-ID, DNS/DHCP, licences — follow the same method; their per-problem
+log map is in [docs/TSF-GUIDE.md](../../../docs/TSF-GUIDE.md) §4.
 
 ## Buffers, packet-buffer protection and counters — the silent-drop toolkit
 
