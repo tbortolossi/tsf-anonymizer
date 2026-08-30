@@ -316,3 +316,9 @@ class TestBoundaryParity:
 def test_fqdn_after_a_dot_is_explained():
     idx = MappingIndex({"fqdns": {"home-lab.example": "host001.anon.internal"}})
     assert idx.apply("*.home-lab.example sub.home-lab.example") == "*.host001.anon.internal sub.host001.anon.internal"
+
+
+def test_name_glued_to_a_timestamp_is_explained():
+    idx = MappingIndex({"named_objects": {"GP_globalprotect_home-lab_example": "OBJ-0001"}})
+    assert explain_line("Cert : GP_globalprotect_home-lab_example2026-04-05 09:38:00",
+                        "Cert : OBJ-00012026-04-05 09:38:00", idx)

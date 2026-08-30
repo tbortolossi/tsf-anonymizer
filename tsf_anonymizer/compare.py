@@ -79,7 +79,7 @@ class MappingIndex:
     # (an attribute) or "://" (a URL scheme). "@" and "/" before are fine —
     # "@Mail.Ru", "https://vpn.acme.fr/".
     _BEFORE = r"(?<![\w.\-<])(?<!<\/)"
-    _AFTER = r"(?![\w\-=])(?!:\/\/)"
+    _AFTER = r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)"
 
     def __init__(self, mapping: dict) -> None:
         self.mapping = mapping
