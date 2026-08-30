@@ -274,7 +274,12 @@ class Anonymizer:
         # 0113…; VM-Series: 007 + 12). 486712289187-shaped 12-digit runs are
         # App-ID ids and counters, and 2 397 of them were "serials" on the
         # first real run.
-        self._serial_re = re.compile(r"(?<!\d)(0(?!000)\d{11}|007\d{12})(?!\d)")
+        # …and not a busybox date either: `sys.time.datetime-busybox:
+        # 040509422026` is MMDDhhmmYYYY, twelve digits starting with 0.
+        self._serial_re = re.compile(
+            r"(?<!\d)(?!(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:[01]\d|2[0-3])[0-5]\d(?:19|20)\d\d(?!\d))"
+            r"(0(?!000)\d{11}|007\d{12})(?!\d)"
+        )
         self._email_re = re.compile(
             r"\b([a-zA-Z0-9._%+\-]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b"
         )
@@ -661,6 +666,7 @@ def _extract_dn_identifiers(text: str, anon: Anonymizer) -> None:
 _VOCAB_PARENTS = {
     "decoder", "application", "file-type", "dns-security-categories", "category",
     "threat-exception", "lists", "protocol", "signature", "botnet-domains",
+    "config",  # <gp-app-config><config><entry name="connect-method"> — setting names
 }
 _VOCAB_NAME_RE = re.compile(r"^[a-z][a-z0-9]{0,11}$")
 _VOCAB_PREFIXES = ("pan_", "panw-", "pan-")

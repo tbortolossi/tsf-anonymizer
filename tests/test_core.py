@@ -491,3 +491,20 @@ class TestRealTsfLessonsRound3:
         anon.anonymize_text("mail from bob@mail-corp.ru")       # registers the domain
         out = anon.anonymize_text("bare mail-corp.ru here")      # next file: bare occurrence
         assert "mail-corp.ru" not in out
+
+
+class TestRealTsfLessonsRound4:
+    def test_gp_app_config_setting_names_are_vocabulary(self, tmp_path, anon):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><devices><vsys><global-protect><global-protect-portal><entry name='GP-Portal'>"
+                     "<client-config><configs><entry name='Cfg-1'><gp-app-config><config>"
+                     "<entry name='connect-method'><member>on-demand</member></entry>"
+                     "<entry name='default-browser'><member>no</member></entry>"
+                     "</config></gp-app-config></entry></configs></client-config></entry>"
+                     "</global-protect-portal></global-protect></vsys></devices></c>")
+        prescan_config_xml(p, anon)
+        assert set(anon.named_obj_map) == {"GP-Portal", "Cfg-1"}
+
+    def test_busybox_datetime_is_not_a_serial(self, anon):
+        assert anon.anonymize_text("datetime-busybox: 040509422026.34") == "datetime-busybox: 040509422026.34"
+        assert "001901000123" not in anon.anonymize_text("serial 001901000123")

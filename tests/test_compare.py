@@ -300,3 +300,14 @@ class TestNumericKeyBoundaries:
 
     def test_leak_scan_finds_ip_inside_token(self):
         assert self.idx.find_leaks("lr-203.0.113.184-2") == {"203.0.113.184": 1}
+
+
+class TestBoundaryParity:
+    def test_fqdn_after_at_sign_without_local_part_is_explained(self):
+        idx = MappingIndex({"fqdns": {"mail.ru": "host008.anon.internal"}})
+        assert explain_line("My World @Mail.Ru, et", "My World @host008.anon.internal, et", idx)
+
+    def test_tag_and_attribute_contexts_are_not_leaks(self):
+        idx = MappingIndex({"named_objects": {"connect-method": "OBJ-0001", "default-browser": "OBJ-0002"}})
+        assert idx.find_leaks("<connect-method> x default-browser=0 </connect-method>") == {}
+        assert idx.find_leaks("value connect-method here") == {"connect-method": 1}

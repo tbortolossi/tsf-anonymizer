@@ -73,11 +73,13 @@ class MappingIndex:
     Python callback per *token* (rather than per *hit*) takes tens of minutes.
     """
 
-    # A token is a run of word characters possibly joined by . - @ ; a key is
-    # only matched as a whole token, or as a whole token followed by a dotted
-    # suffix ("Zone-A.x").
-    _BEFORE = r"(?<![\w.\-@])"
-    _AFTER = r"(?![\w\-@])"
+    # Same boundary conventions as the anonymizer (this is tokenisation, not
+    # a decision — every decision still comes from the sidecar): a key is a
+    # whole token; never right after "<" / "</" (an XML tag), never before "="
+    # (an attribute) or "://" (a URL scheme). "@" and "/" before are fine —
+    # "@Mail.Ru", "https://vpn.acme.fr/".
+    _BEFORE = r"(?<![\w.\-<])(?<!<\/)"
+    _AFTER = r"(?![\w\-=])(?!:\/\/)"
 
     def __init__(self, mapping: dict) -> None:
         self.mapping = mapping
