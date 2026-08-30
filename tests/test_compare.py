@@ -43,6 +43,10 @@ class TestMappingIndex:
         idx = MappingIndex(MAPPING)
         assert idx.find_leaks("Zone-A and zone-a and 10.0.0.5 x2 10.0.0.5") == {"Zone-A": 1, "10.0.0.5": 2}
 
+    def test_find_leaks_is_case_insensitive_for_fqdns_only(self):
+        idx = MappingIndex(MAPPING)
+        assert idx.find_leaks("DC01.ACME.LOCAL zone-a") == {"dc01.acme.local": 1}
+
     def test_find_leaks_ignores_short_tokens(self):
         idx = MappingIndex({"named_objects": {"ab": "OBJ-1"}})
         assert idx.find_leaks("ab ab") == {}
@@ -137,6 +141,12 @@ class TestDetectsDamage:
         f = next(f for f in rep.files if f.path == self.LOG)
         assert f.unexplained_lines == 1 and f.status == "warning"
         assert rep.summary["numeric_mismatches"] == 0  # count equal, value differs — caught by explain
+
+    def test_counts_cover_only_unexplained_lines(self, anonymized):
+        _, _, mapping, work = anonymized
+        rep = compare_trees(work / "orig", work / "anon", mapping)
+        f = next(f for f in rep.files if f.path == self.LOG)
+        assert f.unexplained_lines == 0 and f.timestamps_orig == 0 and f.numeric_orig == 0
 
     def test_surviving_identifier_is_an_error(self, anonymized):
         _, _, mapping, work = anonymized
@@ -237,6 +247,7 @@ class TestDottedTokens:
     def test_key_followed_by_dotted_suffix_is_explained(self):
         idx = MappingIndex(MAPPING)
         assert idx.apply("Zone-A.x Zone-A. fw01.acme") == "ZONE-0001.x ZONE-0001. host002.acme"
+        assert idx.apply("x.Zone-A") == "x.Zone-A"  # a label of a dotted name on the left: no
         assert explain_line("in Zone-A.x", "in ZONE-0001.x", idx)
 
     def test_fqdn_key_is_tried_whole_before_splitting(self):

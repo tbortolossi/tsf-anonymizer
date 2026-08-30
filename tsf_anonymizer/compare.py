@@ -38,7 +38,9 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Callable, Optional
 
-from .core import BINARY_EXTENSIONS, MAPPING_CATEGORIES, extract_archive, is_binary_bytes
+from .core import (
+    BINARY_EXTENSIONS, MAPPING_CATEGORIES, extract_archive, is_binary_bytes, trie_regex,
+)
 
 ProgressFn = Callable[[str, int, int, str], None]
 
@@ -63,15 +65,25 @@ _MAX_LINE_CHARS = 4000
 # ---------------------------------------------------------------------------
 
 class MappingIndex:
-    """Token-level view of the mapping sidecar."""
+    """Token-level view of the mapping sidecar.
+
+    Two compiled trie regexes do the heavy lifting in C: one case-sensitive
+    over every key, one case-insensitive over the FQDN/e-mail keys. A real
+    TSF maps ~100 000 identifiers over ~1 GB of text; anything that runs a
+    Python callback per *token* (rather than per *hit*) takes tens of minutes.
+    """
+
+    # A token is a run of word characters possibly joined by . - @ ; a key is
+    # only matched as a whole token, or as a whole token followed by a dotted
+    # suffix ("Zone-A.x").
+    _BEFORE = r"(?<![\w.\-@])"
+    _AFTER = r"(?![\w\-@])"
 
     def __init__(self, mapping: dict) -> None:
         self.mapping = mapping
-        self.forward: dict[str, str] = {}   # exact key → fake
+        self.forward: dict[str, str] = {}    # exact key → fake
         self.forward_ci: dict[str, str] = {}  # lowercased key → fake (fqdns, emails)
         self.category_of: dict[str, str] = {}
-        self.reverse: dict[str, set[str]] = {}
-        self.multiword: list[str] = []
         for cat in MAPPING_CATEGORIES:
             for orig, fake in (mapping.get(cat) or {}).items():
                 if not orig or orig == fake:
@@ -80,14 +92,12 @@ class MappingIndex:
                 self.category_of[orig] = cat
                 if cat in ("fqdns", "emails"):
                     self.forward_ci[orig.lower()] = fake
-                self.reverse.setdefault(fake, set()).add(orig)
-                if not _TOKEN_RE.fullmatch(orig):
-                    self.multiword.append(orig)
-        self.multiword.sort(key=len, reverse=True)
-        self._multi_re = (
-            re.compile(r"(?<!\w)(" + "|".join(re.escape(k) for k in self.multiword) + r")(?!\w)")
-            if self.multiword else None
-        )
+        cs_keys = [k for k in self.forward if k.lower() not in self.forward_ci]
+        self._cs_re = (re.compile(self._BEFORE + trie_regex(cs_keys) + self._AFTER)
+                       if cs_keys else None)
+        self._ci_re = (re.compile(self._BEFORE + trie_regex(self.forward_ci) + self._AFTER,
+                                  re.IGNORECASE)
+                       if self.forward_ci else None)
         # Minimum key length that the leak scan will bother with. Below 3 the
         # false-positive rate makes the report useless.
         self.min_leak_len = 3
@@ -104,53 +114,28 @@ class MappingIndex:
             return self.lookup(stripped) if stripped else None
         return None
 
-    def rewrite_token(self, tok: str) -> str:
-        fake = self.lookup(tok)
-        if fake is not None:
-            if tok in self.forward or tok.lower() in self.forward_ci:
-                return fake
-            # lookup() matched after stripping trailing dots: keep them.
-            return fake + "." * (len(tok) - len(tok.rstrip(".")))
-        if "." in tok:
-            # "Zone-A.x" — a key followed by a dotted suffix. Longest head first
-            # so a FQDN key ("acme-corp.local") is still tried as a whole.
-            parts = tok.split(".")
-            for i in range(len(parts) - 1, 0, -1):
-                head, tail = ".".join(parts[:i]), ".".join(parts[i:])
-                fake = self.lookup(head)
-                if fake is not None:
-                    return fake + "." + self.rewrite_token(tail)
-        return tok
-
     def apply(self, text: str) -> str:
-        """Rewrite `text` with mapping keys → fakes, token by token."""
-        if self._multi_re is not None:
-            text = self._multi_re.sub(lambda m: self.forward.get(m.group(1), m.group(1)), text)
-        return _TOKEN_RE.sub(lambda m: self.rewrite_token(m.group(0)), text)
+        """Rewrite `text` with mapping keys → fakes. Callbacks run per hit only."""
+        if self._cs_re is not None:
+            text = self._cs_re.sub(lambda m: self.forward.get(m.group(0), m.group(0)), text)
+        if self._ci_re is not None:
+            text = self._ci_re.sub(
+                lambda m: self.forward_ci.get(m.group(0).lower(), m.group(0)), text)
+        return text
 
     def find_leaks(self, text: str) -> dict[str, int]:
         """Mapping keys still present in `text` → occurrence count."""
         hits: dict[str, int] = {}
-        if self._multi_re is not None:
-            for m in self._multi_re.finditer(text):
-                hits[m.group(1)] = hits.get(m.group(1), 0) + 1
-        for m in _TOKEN_RE.finditer(text):
-            tok = m.group(0)
-            if len(tok) < self.min_leak_len:
-                continue
-            key = tok if tok in self.forward else None
-            if key is None:
-                low = tok.lower()
-                if low in self.forward_ci:
-                    key = low
-                else:
-                    stripped = tok.rstrip(".")
-                    if stripped in self.forward:
-                        key = stripped
-                    elif stripped.lower() in self.forward_ci:
-                        key = stripped.lower()
-            if key is not None:
-                hits[key] = hits.get(key, 0) + 1
+        if self._cs_re is not None:
+            for m in self._cs_re.finditer(text):
+                k = m.group(0)
+                if len(k) >= self.min_leak_len:
+                    hits[k] = hits.get(k, 0) + 1
+        if self._ci_re is not None:
+            for m in self._ci_re.finditer(text):
+                k = m.group(0).lower()
+                if len(k) >= self.min_leak_len:
+                    hits[k] = hits.get(k, 0) + 1
         return hits
 
 
@@ -243,11 +228,6 @@ def analyze_text_pair(rel: str, orig_raw: bytes, anon_raw: bytes, kind: str,
     o_lines, a_lines = _split_lines(o_text), _split_lines(a_text)
     rep.lines_orig, rep.lines_anon = len(o_lines), len(a_lines)
 
-    rep.timestamps_orig = len(_TIMESTAMP_RE.findall(o_text))
-    rep.timestamps_anon = len(_TIMESTAMP_RE.findall(a_text))
-    rep.numeric_orig = len(_NUMERIC_TOKEN_RE.findall(o_text))
-    rep.numeric_anon = len(_NUMERIC_TOKEN_RE.findall(a_text))
-
     leaks = index.find_leaks(a_text)
     rep.leaks = dict(sorted(leaks.items(), key=lambda kv: -kv[1])[:50])
     rep.leak_count = sum(leaks.values())
@@ -255,24 +235,39 @@ def analyze_text_pair(rel: str, orig_raw: bytes, anon_raw: bytes, kind: str,
     if rep.lines_orig != rep.lines_anon:
         rep.status = "error"
         rep.notes.append(f"line count changed: {rep.lines_orig} → {rep.lines_anon}")
-        # Still count changed lines over the common prefix so the UI has something
-        for o, a in zip(o_lines, a_lines):
-            if o != a:
-                rep.changed_lines += 1
+        rep.changed_lines = sum(1 for o, a in zip(o_lines, a_lines) if o != a)
         return rep
 
-    for n, (o, a) in enumerate(zip(o_lines, a_lines), 1):
-        if o == a:
-            continue
-        rep.changed_lines += 1
-        if explain_line(o, a, index):
-            rep.explained_lines += 1
-        else:
-            rep.unexplained_lines += 1
-            if len(rep.unexplained_sample) < 20:
-                rep.unexplained_sample.append(n)
+    if o_text != a_text:
+        # One C-level rewrite of the whole file; a line the mapping explains is
+        # then byte-equal and costs no Python at all. Only the residue goes
+        # through the per-line span analysis.
+        e_lines = _split_lines(index.apply(o_text))
+        unexplained_pairs: list[tuple[int, str, str]] = []
+        for n, (o, a, e) in enumerate(zip(o_lines, a_lines, e_lines), 1):
+            if o == a:
+                continue
+            rep.changed_lines += 1
+            if e == a or explain_line(o, a, index):
+                rep.explained_lines += 1
+            else:
+                rep.unexplained_lines += 1
+                if len(rep.unexplained_sample) < 20:
+                    rep.unexplained_sample.append(n)
+                if len(unexplained_pairs) < 10_000:
+                    unexplained_pairs.append((n, o, a))
+        # Timestamps and short numeric tokens can only have moved on lines
+        # the mapping does not explain (a mapping key is never a timestamp or
+        # a short number), so the counts are taken there — over a whole TSF
+        # the full-corpus count was minutes of work to report the same thing.
+        o_res = "\n".join(o for _, o, _ in unexplained_pairs)
+        a_res = "\n".join(a for _, _, a in unexplained_pairs)
+        rep.timestamps_orig = len(_TIMESTAMP_RE.findall(o_res))
+        rep.timestamps_anon = len(_TIMESTAMP_RE.findall(a_res))
+        rep.numeric_orig = len(_NUMERIC_TOKEN_RE.findall(o_res))
+        rep.numeric_anon = len(_NUMERIC_TOKEN_RE.findall(a_res))
 
-    if xml:
+    if xml and o_text != a_text:
         rep.xml_structure = _xml_structure(o_text, a_text)
         if rep.xml_structure == "changed":
             rep.notes.append("XML tag sequence differs")
