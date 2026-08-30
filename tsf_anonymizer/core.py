@@ -363,9 +363,12 @@ class Anonymizer:
         survives in https://home-lab.example/… and *.home-lab.example (real TSF)."""
         self.anon_fqdn(fqdn)
         parts = fqdn.lower().rstrip(".").split(".")
+        if any(not p for p in parts) or _FILE_SUFFIX_RE.search(fqdn):
+            return  # "a..b", "x.conf.5.gz": a file name, not a domain
         for i in range(1, len(parts) - 1):
             parent = ".".join(parts[i:])
-            if parent.split(".")[0] in _DC_STOPWORDS or len(parts[i]) < 2:
+            if (parts[i] in _DC_STOPWORDS or len(parts[i]) < 2 or parts[i].isdigit()
+                    or not any(c.isalpha() for c in parent)):
                 continue
             self.anon_fqdn(parent)
 
@@ -449,7 +452,7 @@ class Anonymizer:
             # still wins — the scan is leftmost, so igw.home-lab.example is
             # matched at "igw" before the apex is ever tried.
             self._fqdn_re = re.compile(
-                r"(?<![\w<])(?<!<\/)" + trie_regex(self.fqdn_map) + r"(?![\w\-=])(?!:\/\/)",
+                r"(?<![\w\-<])(?<!<\/)" + trie_regex(self.fqdn_map) + r"(?![\w\-=])(?!:\/\/)",
                 re.IGNORECASE,
             )
         else:
@@ -999,8 +1002,26 @@ def prescan_tree(tree: Path, anon: Anonymizer, progress: ProgressFn = _noop_prog
 # "hostname Tab-S6-Lite-de-Thomas, interface ethernet1/8.100" (pan_dhcpd.log),
 # "hostname: fw01", 'hostname="x"'. A device named after its owner is PII
 # that no config declares. `hostname=?` (audit.log) does not match.
+# Two exact shapes only. The first cut used `hostname\s*(\S+)`: `\s*` crosses
+# a newline, so a *file* named "hostname" in an ls listing captured the next
+# line's first word (drwxr-xr-x, 252.acl), and prose ("hostname to …")
+# registered "to", "of", "in" as FQDNs — 2.3 M lines rewritten, <equal-to>
+# tags included. The value must also look like a device name (a digit, a
+# hyphen or a dot), so "iphone" alone is not one.
 _HOSTNAME_PHRASE_RE = re.compile(
-    r"\bhostname[:=]?\s*[\"']?([A-Za-z][A-Za-z0-9._-]{1,62})(?=[\"',;\s]|$)"
+    r"(?:\bhostname[:=][ \t]*[\"']?|\bhostname[ \t]+)"
+    r"([A-Za-z][A-Za-z0-9._-]{2,62})(?=[\"',;\s]|$)"
+)
+
+
+def _looks_like_device_name(value: str) -> bool:
+    return (any(c.isdigit() or c in ".-" for c in value)
+            and not _FILE_SUFFIX_RE.search(value) and not _IP_LIKE_RE.match(value))
+
+
+_FILE_SUFFIX_RE = re.compile(
+    r"\.(?:gz|log|xml|txt|json|js|css|png|jpg|pem|crt|csr|key|pcap|tar|tgz|zip|"
+    r"service|socket|journal|yang|stats|cfg|acl|conf|d|ha|\d+)$", re.IGNORECASE
 )
 
 
@@ -1032,7 +1053,8 @@ def prescan_text_identities(tree: Path, anon: Anonymizer,
         for m in anon._email_re.finditer(text):
             anon.anon_email(m.group(1), m.group(2))
         for m in _HOSTNAME_PHRASE_RE.finditer(text):
-            anon.register_fqdn(m.group(1))
+            if _looks_like_device_name(m.group(1)):
+                anon.register_fqdn(m.group(1))
         if i % 25 == 0 or i == len(paths):
             progress("prescan-text", i, len(paths), f"{len(anon.user_map)} users, {len(anon.email_map)} e-mails")
     return found

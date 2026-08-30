@@ -533,3 +533,28 @@ class TestRealTsfLessonsRound5:
         assert "tab-s6-lite-de-thomas" in anon.fqdn_map
         out = anon.anonymize_text((tmp_path / "pan_dhcpd.log").read_text())
         assert "Thomas" not in out and "hostname=? addr=?" in out and "ethernet1/8.100" in out
+
+
+class TestHostnamePhraseIsStrict:
+    def test_prose_and_next_line_are_not_hostnames(self, tmp_path):
+        from tsf_anonymizer.core import prescan_text_identities
+        (tmp_path / "x.log").write_text(
+            "set the hostname to something\nhostname of the box\n"
+            "-rw-r--r--. 1 root root 12 2026-03-01 hostname\ndrwxr-xr-x. 2 root root 4096 252.acl\n"
+            "hostnamectl status\nhostname: fw-paris-01\nhostname=\"lab-fw2\"\n"
+            "mac aa:bb - hostname iphone, interface ethernet1/1\n")
+        anon = Anonymizer(); prescan_text_identities(tmp_path, anon)
+        assert set(anon.fqdn_map) == {"fw-paris-01", "lab-fw2"}
+
+    def test_file_names_never_become_domains(self, anon):
+        anon.register_fqdn("hostname.conf.5.gz")
+        assert not any(k.endswith(".gz") or k.startswith(".") for k in anon.fqdn_map if k != "hostname.conf.5.gz")
+        anon.register_fqdn("2f063b1936a14a2687401ccea439ed70-0000000000000001-00064d5ebb4c4413.journal")
+        assert "journal" not in anon.fqdn_map
+
+    def test_hyphenated_compound_is_not_a_fqdn_context(self, anon):
+        anon.register_fqdn("to.example-corp.fr")  # registers "example-corp.fr" too; never "to"
+        anon.build_patterns()
+        assert "to" not in anon.fqdn_map
+        anon.fqdn_map["to"] = "host099"; anon.build_patterns()   # even if it were a key…
+        assert anon.anonymize_text("<equal-to>x</equal-to> link-state") == "<equal-to>x</equal-to> link-state"
