@@ -231,3 +231,14 @@ class TestFileDiff:
 def test_report_is_json_serialisable(anonymized):
     _, _, mapping, work = anonymized
     json.dumps(compare_trees(work / "orig", work / "anon", mapping).to_dict())
+
+
+class TestDottedTokens:
+    def test_key_followed_by_dotted_suffix_is_explained(self):
+        idx = MappingIndex(MAPPING)
+        assert idx.apply("Zone-A.x Zone-A. fw01.acme") == "ZONE-0001.x ZONE-0001. host002.acme"
+        assert explain_line("in Zone-A.x", "in ZONE-0001.x", idx)
+
+    def test_fqdn_key_is_tried_whole_before_splitting(self):
+        idx = MappingIndex(MAPPING)
+        assert idx.apply("dc01.acme.local") == "host001.anon.internal"

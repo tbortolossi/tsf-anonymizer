@@ -16,7 +16,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -73,9 +73,11 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
 
     @app.post("/api/jobs/anonymize")
     async def create_anonymize(file: UploadFile = File(...),
-                               seed_mapping: Optional[UploadFile] = File(None)):
+                               seed_mapping: Optional[UploadFile] = File(None),
+                               delete_original: bool = Form(True)):
         job = store.new("anonymize")
         d = store.job_dir(job.id)
+        job.delete_original = delete_original
         job.input_name = _safe_filename(file.filename, "input.tgz")
         size = await _save_upload(file, d / "input" / job.input_name)
         if size == 0:
@@ -95,9 +97,11 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
 
     @app.post("/api/jobs/compare")
     async def create_compare(original: UploadFile = File(...), anonymized: UploadFile = File(...),
-                             mapping: Optional[UploadFile] = File(None)):
+                             mapping: Optional[UploadFile] = File(None),
+                             delete_original: bool = Form(False)):
         job = store.new("compare")
         d = store.job_dir(job.id)
+        job.delete_original = delete_original
         job.input_name = _safe_filename(original.filename, "original.tgz")
         job.anon_input_name = _safe_filename(anonymized.filename, "anonymized.tgz")
         if job.anon_input_name == job.input_name:
@@ -138,6 +142,14 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
         _job(job_id)
         store.delete(job_id)
         return {"deleted": job_id}
+
+    @app.post("/api/jobs/{job_id}/delete-original")
+    def delete_original(job_id: str):
+        job = _job(job_id)
+        if job.status in ("queued", "running"):
+            raise HTTPException(409, "job still running")
+        store.delete_original(job)
+        return {"original_deleted": job_id}
 
     @app.post("/api/jobs/{job_id}/purge-trees")
     def purge_trees(job_id: str):

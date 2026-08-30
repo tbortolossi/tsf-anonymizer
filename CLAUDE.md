@@ -25,6 +25,7 @@ tsf_anonymizer/
   cli.py         tsf-anonymizer anonymize | compare | serve
   web/app.py     FastAPI routes; templates/ + static/ are vanilla HTML/JS
 tests/           pytest; test_core.py, test_compare.py, test_web.py
+docs/TSF-GUIDE.md  what a TSF contains and how to read one (user-facing)
 Dockerfile, docker-compose.yml
 ```
 
@@ -44,6 +45,17 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   *decompressed* bytes — compressed bytes always look binary.
 - **A replacement never contains a newline**, so line counts are preserved.
   The compare mode treats a line-count change as an error, not a warning.
+- **Name replacement is one trie-regex pass, never a per-token Python
+  callback.** `trie_regex()` builds a longest-match alternation; the previous
+  `re.sub(lambda)` over every token ran 11+ minutes on a real 155 MB TSF
+  (1.2 GB of text). Boundaries: `(?<![\w.\-])name(?![\w\-])` — a name is
+  never replaced inside a word or a hyphenated compound.
+- **`extract_archive` returns the archive's original `TarInfo`s and widens
+  modes only on the disk copy.** Real TSFs ship files in mode 0000; the
+  working copy needs u+rw, the output archive must keep 0000.
+- **`delete_original` deletes only after a clean integrity report.** Errors
+  or archive mismatches keep the original with `original_kept_reason` set;
+  a human deletes it via `POST /api/jobs/{id}/delete-original`.
 - **The output archive is the input archive with payloads swapped.**
   `repack_archive` iterates the original `TarInfo` list; it must not re-walk
   the filesystem (`tar.add(dir)`), which loses order and metadata.

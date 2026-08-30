@@ -178,6 +178,36 @@ MAPPING_CATEGORIES = (
 )
 
 
+
+# ---------------------------------------------------------------------------
+# Trie regex — one C-level pass over the text instead of a Python callback per
+# token. Measured on a real 155 MB TSF (1.2 GB of text): the per-token
+# dict-lookup pass ran for 11+ minutes before being killed; the trie pass is
+# seconds. The trie prefers the longest key at every position, so a key that
+# is a prefix of another ("GW-Paris" / "GW-Paris-Primary") never wins over it.
+# ---------------------------------------------------------------------------
+
+def trie_regex(words: Iterable[str]) -> str:
+    """Regex source matching any of ``words`` (longest alternative first)."""
+    trie: dict = {}
+    for w in words:
+        node = trie
+        for ch in w:
+            node = node.setdefault(ch, {})
+        node[""] = {}
+
+    def render(node: dict) -> str:
+        terminal = "" in node
+        alts = [re.escape(ch) + render(child) for ch, child in sorted(node.items()) if ch != ""]
+        if not alts:
+            return ""
+        if len(alts) == 1 and not terminal:
+            return alts[0]
+        return "(?:" + "|".join(alts) + ")" + ("?" if terminal else "")
+
+    return render(trie) if trie else "(?!)"
+
+
 # ---------------------------------------------------------------------------
 # Anonymizer state
 # ---------------------------------------------------------------------------
@@ -209,9 +239,8 @@ class Anonymizer:
         self._fqdn_counter = 0
         self._email_counter = 0
 
-        self._token_re: Optional[re.Pattern] = None
+        self._obj_re: Optional[re.Pattern] = None
         self._fqdn_re: Optional[re.Pattern] = None
-        self._multiword_re: Optional[re.Pattern] = None
 
         # Per-call replacement tally, reset by anonymize_text().
         self.last_counts: dict[str, int] = {}
@@ -341,23 +370,21 @@ class Anonymizer:
     # -- Build compiled patterns (call once after all prescan) --------------
 
     def build_patterns(self) -> None:
+        """Compile the replacement regexes. Call once after the prescan, and
+        again after registering more names (from_mapping does)."""
         if self.named_obj_map:
-            self._token_re = re.compile(r"\b[\w][\w.\-]{1,}\b")
-            multiword = sorted(
-                (k for k in self.named_obj_map if " " in k or ("-" in k and len(k) > 6)),
-                key=len, reverse=True,
-            )
-            self._multiword_re = (
-                re.compile(r"(?<!\w)(" + "|".join(re.escape(n) for n in multiword) + r")(?!\w)")
-                if multiword else None
+            # A name is replaced only as a whole token: not inside a longer
+            # word, not as one segment of a hyphenated compound ("web" in
+            # "web-server-1"), not as a label of a dotted name on the left
+            # ("x.Zone-A"). A dot *after* is fine — sentence ends.
+            self._obj_re = re.compile(
+                r"(?<![\w.\-])" + trie_regex(self.named_obj_map) + r"(?![\w\-])"
             )
         else:
-            self._token_re = None
-            self._multiword_re = None
+            self._obj_re = None
         if self.fqdn_map:
-            fqdns = sorted(self.fqdn_map.keys(), key=len, reverse=True)
             self._fqdn_re = re.compile(
-                r"(?<![.\w])(" + "|".join(re.escape(f) for f in fqdns) + r")(?![.\w])",
+                r"(?<![.\w])" + trie_regex(self.fqdn_map) + r"(?![.\w])",
                 re.IGNORECASE,
             )
         else:
@@ -402,37 +429,25 @@ class Anonymizer:
             return text
 
         def replace_match(m: re.Match) -> str:
-            fake = self.fqdn_map.get(m.group(1).lower())
+            fake = self.fqdn_map.get(m.group(0).lower())
             if fake is None:
-                return m.group(1)
+                return m.group(0)
             self._count("fqdns")
             return fake
         return self._fqdn_re.sub(replace_match, text)
 
     def _replace_named_objects(self, text: str) -> str:
-        if not self.named_obj_map:
+        if self._obj_re is None:
             return text
         table = self.named_obj_map
 
-        def sub_multi(m: re.Match) -> str:
-            fake = table.get(m.group(1))
-            if fake is None:
-                return m.group(1)
-            self._count("named_objects")
-            return fake
-
-        def sub_token(m: re.Match) -> str:
+        def replace_match(m: re.Match) -> str:
             fake = table.get(m.group(0))
             if fake is None:
                 return m.group(0)
             self._count("named_objects")
             return fake
-
-        if self._multiword_re is not None:
-            text = self._multiword_re.sub(sub_multi, text)
-        if self._token_re is not None:
-            text = self._token_re.sub(sub_token, text)
-        return text
+        return self._obj_re.sub(replace_match, text)
 
     def _replace_serials(self, text: str) -> str:
         def replace_match(m: re.Match) -> str:

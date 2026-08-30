@@ -37,7 +37,8 @@ def test_health_and_index(client):
 
 def test_anonymize_job_end_to_end(client, tmp_path):
     tsf = build_tsf(tmp_path)
-    r = client.post("/api/jobs/anonymize", files={"file": ("in.tgz", tsf.read_bytes())})
+    r = client.post("/api/jobs/anonymize", files={"file": ("in.tgz", tsf.read_bytes())},
+                    data={"delete_original": "false"})
     assert r.status_code == 200, r.text
     job = _wait(client, r.json()["id"])
     assert job["status"] == "done", job["error"]
@@ -128,3 +129,51 @@ def test_interrupted_job_is_marked_on_restart(tmp_path):
     store2 = JobStore(tmp_path / "data")
     assert store2.get(job.id).status == "interrupted"
     store2.shutdown()
+
+
+def test_delete_original_after_clean_verification(client, tmp_path):
+    tsf = build_tsf(tmp_path)
+    r = client.post("/api/jobs/anonymize", files={"file": ("in.tgz", tsf.read_bytes())},
+                    data={"delete_original": "true"})
+    job = _wait(client, r.json()["id"])
+    assert job["status"] == "done" and job["original_deleted"] and not job["trees_kept"]
+    d = client.app.state.store.job_dir(job["id"])
+    assert not (d / "input" / "in.tgz").exists() and not (d / "work").exists()
+    assert (d / "output" / "in_anon.tgz").exists()
+    assert client.get(f"/api/jobs/{job['id']}/download/tgz").status_code == 200
+    assert client.get(f"/api/jobs/{job['id']}/diff", params={"path": "x"}).status_code == 410
+
+
+def test_original_kept_when_verification_has_problems(client, tmp_path, monkeypatch):
+    from tsf_anonymizer import jobs as jobs_mod
+    real = jobs_mod.compare_trees
+
+    def broken(*a, **kw):
+        rep = real(*a, **kw)
+        rep.files[0].status = "error"
+        rep.summary = jobs_mod.summarize(rep.files) if hasattr(jobs_mod, "summarize") else rep.summary
+        rep.summary["errors"] = 1
+        return rep
+    monkeypatch.setattr(jobs_mod, "compare_trees", broken)
+    tsf = build_tsf(tmp_path)
+    r = client.post("/api/jobs/anonymize", files={"file": ("in.tgz", tsf.read_bytes())},
+                    data={"delete_original": "true"})
+    job = _wait(client, r.json()["id"])
+    assert job["status"] == "done" and not job["original_deleted"] and job["original_kept_reason"]
+    d = client.app.state.store.job_dir(job["id"])
+    assert (d / "input" / "in.tgz").exists()
+    # manual deletion after review
+    assert client.post(f"/api/jobs/{job['id']}/delete-original").status_code == 200
+    assert not (d / "input" / "in.tgz").exists()
+    assert client.get(f"/api/jobs/{job['id']}").json()["original_deleted"]
+
+
+def test_delete_original_defaults(client, tmp_path):
+    tsf = build_tsf(tmp_path)
+    r = client.post("/api/jobs/anonymize", files={"file": ("in.tgz", tsf.read_bytes())})
+    assert r.json()["delete_original"] is True
+    _wait(client, r.json()["id"])
+    r = client.post("/api/jobs/anonymize", files={"file": ("in.tgz", tsf.read_bytes())},
+                    data={"delete_original": "false"})
+    job = _wait(client, r.json()["id"])
+    assert job["delete_original"] is False and not job["original_deleted"] and job["trees_kept"]

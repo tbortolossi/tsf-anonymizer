@@ -27,6 +27,9 @@
       <label>Seed mapping <span class="opt">(optional — reuse a previous <code>mapping.json</code>
         so two TSFs from the same customer get the same pseudonyms)</span>
         <input type="file" name="seed_mapping" accept=".json"></label>
+      <label class="check"><input type="checkbox" name="delete_original" value="true" checked>
+        Delete the original after a clean verification <span class="opt">(the un-anonymized upload and
+        its extracted tree are removed; with problems it is kept for review)</span></label>
       <button type="submit">Start</button>
       <div class="upload-progress" hidden><div class="bar"></div><span class="label"></span></div>
     </form>
@@ -42,6 +45,8 @@
       <label>Mapping <span class="opt">(<code>mapping.json</code> — without it, only structural
         checks run and every change reads as unexplained)</span>
         <input type="file" name="mapping" accept=".json"></label>
+      <label class="check"><input type="checkbox" name="delete_original" value="true">
+        Delete the original after a clean verification</label>
       <button type="submit">Start</button>
       <div class="upload-progress" hidden><div class="bar"></div><span class="label"></span></div>
     </form>

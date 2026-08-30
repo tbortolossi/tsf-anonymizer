@@ -56,6 +56,12 @@ class Job:
     outputs: dict = field(default_factory=dict)   # name → relative path under output/
     trees_kept: bool = False
     seed_mapping: bool = False
+    # Delete the un-anonymized upload once the integrity check is clean. When
+    # the check finds problems the original is kept so a human can review the
+    # diff, and `original_kept_reason` says so.
+    delete_original: bool = False
+    original_deleted: bool = False
+    original_kept_reason: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -140,6 +146,31 @@ class JobStore:
     def submit(self, job: Job) -> None:
         self._executor.submit(self._run, job)
 
+    def delete_original(self, job: Job, reason: str = "") -> None:
+        """Remove every copy of the un-anonymized content: the uploaded
+        archive(s) and the extracted trees. The outputs stay."""
+        d = self.job_dir(job.id)
+        for name in (job.input_name, job.anon_input_name if job.kind == "compare" else ""):
+            if name:
+                (d / "input" / name).unlink(missing_ok=True)
+        shutil.rmtree(d / "work", ignore_errors=True)
+        job.trees_kept = False
+        job.original_deleted = True
+        job.original_kept_reason = None
+        self._save(job)
+
+    def _maybe_delete_original(self, job: Job, summary: dict, archive: dict) -> None:
+        if not job.delete_original:
+            return
+        clean = summary.get("errors", 0) == 0 and not archive.get("mismatches")
+        if clean:
+            self.delete_original(job)
+        else:
+            job.original_kept_reason = (
+                "integrity problems found — the original is kept for review; "
+                "delete it manually once you have looked at the report"
+            )
+
     def shutdown(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
@@ -210,6 +241,7 @@ class JobStore:
         job.outputs["integrity_report"] = "integrity-report.json"
         job.compare_summary = cmp.summary
         job.archive_check = cmp.archive
+        self._maybe_delete_original(job, cmp.summary, cmp.archive)
 
     def _run_compare(self, job: Job) -> None:
         d = self.job_dir(job.id)
@@ -228,6 +260,7 @@ class JobStore:
         job.trees_kept = True
         job.compare_summary = cmp.summary
         job.archive_check = cmp.archive
+        self._maybe_delete_original(job, cmp.summary, cmp.archive)
 
     def mapping_for(self, job: Job) -> dict:
         d = self.job_dir(job.id)

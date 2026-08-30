@@ -34,6 +34,12 @@ def cmd_anonymize(args: argparse.Namespace) -> int:
     if args.verify:
         rep = compare_archives(inp, out, mapping, progress=_progress)
         _print_compare(rep, args.report)
+        if args.delete_original:
+            if rep.ok:
+                inp.unlink()
+                print(f"original deleted: {inp}")
+            else:
+                print(f"original KEPT (integrity problems): {inp}")
         return 0 if rep.ok else 2
     return 0
 
@@ -82,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--mapping-only", action="store_true", help="only print what would be mapped")
     a.add_argument("--verify", action="store_true", help="run the compare mode afterwards")
     a.add_argument("--report", help="write the integrity report JSON here (with --verify)")
+    a.add_argument("--delete-original", action="store_true",
+                   help="with --verify: delete the input archive when the check is clean")
     a.set_defaults(fn=cmd_anonymize)
 
     c = sub.add_parser("compare", help="verify an anonymized archive against its original")

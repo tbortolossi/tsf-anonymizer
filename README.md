@@ -51,6 +51,17 @@ independently of the anonymizer:
 The web UI shows the verdict, per-file status, and a side-by-side diff with
 the replaced spans highlighted (red outline = change the mapping does not explain).
 
+**Delete the original after a clean verification** (on by default for
+anonymize jobs): once the compare finds no error, the un-anonymized upload and
+its extracted tree are removed from the server; only the anonymized archive,
+the mapping and the reports remain. If the check finds problems, the original
+is kept for review and the job says why — a *delete original now* button does
+it once you have looked. CLI: `--verify --delete-original`.
+
+New to TSFs? [docs/TSF-GUIDE.md](docs/TSF-GUIDE.md) explains what a tech
+support file contains, where each kind of information lives, which daemon
+log to read for which problem, and how to read an anonymized one.
+
 ## Run it
 
 ```bash
@@ -67,7 +78,7 @@ CLI (same code, no container):
 
 ```bash
 pip install -e ".[dev]"
-tsf-anonymizer anonymize in.tgz --verify --report integrity.json
+tsf-anonymizer anonymize in.tgz --verify --report integrity.json [--delete-original]
 tsf-anonymizer compare in.tgz in_anon.tgz --mapping in_anon.mapping.json
 tsf-anonymizer anonymize second.tgz --seed-mapping in_anon.mapping.json   # same customer, same pseudonyms
 tsf-anonymizer serve --data-dir ./data

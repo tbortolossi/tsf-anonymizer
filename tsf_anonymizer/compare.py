@@ -104,22 +104,29 @@ class MappingIndex:
             return self.lookup(stripped) if stripped else None
         return None
 
+    def rewrite_token(self, tok: str) -> str:
+        fake = self.lookup(tok)
+        if fake is not None:
+            if tok in self.forward or tok.lower() in self.forward_ci:
+                return fake
+            # lookup() matched after stripping trailing dots: keep them.
+            return fake + "." * (len(tok) - len(tok.rstrip(".")))
+        if "." in tok:
+            # "Zone-A.x" — a key followed by a dotted suffix. Longest head first
+            # so a FQDN key ("acme-corp.local") is still tried as a whole.
+            parts = tok.split(".")
+            for i in range(len(parts) - 1, 0, -1):
+                head, tail = ".".join(parts[:i]), ".".join(parts[i:])
+                fake = self.lookup(head)
+                if fake is not None:
+                    return fake + "." + self.rewrite_token(tail)
+        return tok
+
     def apply(self, text: str) -> str:
         """Rewrite `text` with mapping keys → fakes, token by token."""
         if self._multi_re is not None:
             text = self._multi_re.sub(lambda m: self.forward.get(m.group(1), m.group(1)), text)
-
-        def sub(m: re.Match) -> str:
-            tok = m.group(0)
-            fake = self.lookup(tok)
-            if fake is None:
-                return tok
-            if tok in self.forward or tok.lower() in self.forward_ci:
-                return fake
-            # lookup() matched after stripping trailing dots: keep them.
-            stripped = tok.rstrip(".")
-            return fake + "." * (len(tok) - len(stripped))
-        return _TOKEN_RE.sub(sub, text)
+        return _TOKEN_RE.sub(lambda m: self.rewrite_token(m.group(0)), text)
 
     def find_leaks(self, text: str) -> dict[str, int]:
         """Mapping keys still present in `text` → occurrence count."""

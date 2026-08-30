@@ -21,6 +21,9 @@
     form.addEventListener("submit", (ev) => {
       ev.preventDefault();
       const fd = new FormData(form);
+      // An unchecked checkbox is absent from FormData; the API needs an explicit false.
+      const cb = form.querySelector("input[name=delete_original]");
+      if (cb) fd.set("delete_original", cb.checked ? "true" : "false");
       const prog = $(".upload-progress", form), bar = $(".bar", prog), label = $(".label", prog);
       const btn = $("button[type=submit]", form);
       prog.hidden = false; btn.disabled = true;
@@ -114,8 +117,17 @@
       ${job.error ? `<div class="verdict bad">${esc(job.error)}</div>` : ""}
       ${job.status === "done" ? `<div class="actions">${dl}
         ${job.trees_kept ? `<button class="secondary" id="purge-trees">free disk (purge extracted trees)</button>` : `<span class="notes">extracted trees purged — diff viewer unavailable</span>`}</div>` : ""}
-      ${job.seed_mapping ? `<p class="notes">seeded from a previous mapping</p>` : ""}`;
+      ${job.seed_mapping ? `<p class="notes">seeded from a previous mapping</p>` : ""}
+      ${job.status === "done" && job.original_deleted ? `<p class="notes">✓ original deleted after a clean verification</p>` : ""}
+      ${job.status === "done" && !job.original_deleted && job.original_kept_reason ? `<div class="verdict warn">⚠ ${esc(job.original_kept_reason)} <button class="danger" id="delete-original">delete original now</button></div>` : ""}
+      ${job.status === "done" && !job.original_deleted && !job.original_kept_reason ? `<p class="notes">original kept (not requested to delete) <button class="danger" id="delete-original">delete original</button></p>` : ""}`;
     $("#back-jobs").addEventListener("click", () => showTab("jobs"));
+    const delOrig = $("#delete-original");
+    if (delOrig) delOrig.addEventListener("click", async () => {
+      if (!confirm("Delete the un-anonymized upload and the extracted trees? Outputs stay; the diff viewer will not.")) return;
+      await fetch(`/api/jobs/${job.id}/delete-original`, { method: "POST" });
+      pollJob();
+    });
     const purge = $("#purge-trees");
     if (purge) purge.addEventListener("click", async () => {
       if (!confirm("Purge the extracted trees? Downloads stay available; the diff viewer will not.")) return;

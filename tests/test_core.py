@@ -298,3 +298,34 @@ class TestAnonymizeTsf:
             names = tar.getnames()
         assert names == ["system.log"]
         assert not (tmp_path.parent / "escape.log").exists()
+
+
+class TestTrieRegex:
+    def test_longest_key_wins(self, anon):
+        anon.register_named_object("GW-Paris", "gw")
+        anon.register_named_object("GW-Paris-Primary", "gw")
+        anon.build_patterns()
+        out = anon.anonymize_text("GW-Paris-Primary and GW-Paris")
+        assert out == "GW-0002 and GW-0001"
+
+    def test_not_inside_a_longer_word_or_hyphenated_compound(self, anon):
+        anon.register_named_object("web", "addr")
+        anon.build_patterns()
+        assert anon.anonymize_text("web webserver web-server-1 x.web web.") == \
+            "ADDR-0001 webserver web-server-1 x.web ADDR-0001."
+
+    def test_special_characters_in_names(self, anon):
+        anon.register_named_object("Rule (test) [v2]", "rule")
+        anon.build_patterns()
+        assert anon.anonymize_text("hit Rule (test) [v2] now") == "hit RULE-0001 now"
+
+    def test_thousands_of_keys_are_a_single_fast_pass(self, anon):
+        import time
+        for i in range(5000):
+            anon.register_named_object(f"Object-Name-{i:05d}", "addr")
+        anon.build_patterns()
+        text = " ".join(f"token{i} Object-Name-{i % 5000:05d}" for i in range(50_000))
+        t0 = time.monotonic()
+        out = anon.anonymize_text(text)
+        assert time.monotonic() - t0 < 5.0
+        assert "Object-Name-" not in out

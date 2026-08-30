@@ -75,3 +75,5 @@ tbody tr.clickable { cursor: pointer; } tbody tr.clickable:hover { background: #
 .mono { font-family: ui-monospace, monospace; }
 details summary { cursor: pointer; color: var(--accent); }
 .leaks { margin: 6px 0 0; padding-left: 18px; }
+label.check { display: flex; gap: 8px; align-items: baseline; }
+label.check input { margin: 0; }
