@@ -126,6 +126,30 @@ That is how "what did memory/CPU/processes look like *before* the incident"
 gets answered from a snapshot archive — compare the sections across
 timestamps instead of reading one block.
 
+**Multi-DP and CP — chassis platforms have more than one of everything.**
+A PA-400/800/1400/3200 or VM has one MP and one DP: `var/log/pan/dp-monitor.log`
+is *the* dataplane. PA-5200/PA-7000 (and older 5000) do not:
+
+- **Each dataplane logs under its own root**: `opt/var.dp0/log/pan/dp-monitor.log`,
+  `opt/var.dp1/…`, `opt/var.dp2/…`. Always `ls -d opt/var.dp*` first, and
+  analyse **per plane, never the aggregate** — on a PA-7000 the classic
+  finding is one line card at 90 % while the others idle (traffic imbalance),
+  invisible in any average. Model quirk: PA-5220 has dp0 only, **PA-5250 has
+  dp0 + dp2 (dp1 is skipped)**, PA-5260/5280 have dp0-dp2 — an empty
+  `opt/var.dp1` on a 5250 is normal, not a broken TSF.
+- **`cp-monitor.log`** (`opt/var.cp/log/pan/` or `var/log/pan/`) exists only
+  on platforms with a dedicated control-plane processor (PA-5000/5200/7000).
+  Same sectioned-snapshot format; it tracks the MP↔DP plumbing: `netmsg`
+  stats vs **errors** (ARP/MAC sync between MP and DP — `arp_delete` errors ≫
+  stats = MP/DP desync; `arp_update` errors = DP ARP table full), `ifconfig`
+  TX/RX errors on the internal CP interfaces (config-push and sync failures).
+  Absent on single-chip platforms by design — not a gap.
+- `sysd.log` names components per plane (`s1.dp0`, `s1.mp`), and
+  `show running resource-monitor` in the techsupport txt repeats its blocks
+  per slot/DP on a chassis — check which DP a block belongs to before
+  comparing numbers. MIPS-based DPs (5200/7000) at 80 % are more saturated
+  than x86 at 80 % — lower per-core headroom.
+
 ## Step 3 — symptom → files → what to grep
 
 `sdb.txt` (the sysd state database) and `techsupport_*.txt` are useful for
