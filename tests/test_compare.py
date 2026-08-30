@@ -282,3 +282,21 @@ class TestCollisionsAndLongLines:
         from tsf_anonymizer.compare import _changed_spans
         a = " ".join(f"t{i}" for i in range(5000)); b = a.replace("t7 ", "x ")
         assert _changed_spans(a, b) == [(0, len(a), 0, len(b))]
+
+
+class TestNumericKeyBoundaries:
+    idx = MappingIndex({"ip_addresses": {"203.0.113.184": "198.51.100.231"},
+                        "serial_numbers": {"001901000456": "900000000001"}})
+
+    def test_ip_inside_hyphenated_token_is_explained(self):
+        assert self.idx.apply("connid: lr-203.0.113.184-2 x") == "connid: lr-198.51.100.231-2 x"
+        assert explain_line("devid=triallr-203.0.113.184-1-def", "devid=triallr-198.51.100.231-1-def", self.idx)
+
+    def test_serial_inside_underscored_token_is_explained(self):
+        assert self.idx.apply("PA_001901000456_dt_12.1.4") == "PA_900000000001_dt_12.1.4"
+
+    def test_ip_prefix_of_longer_ip_is_not_touched(self):
+        assert self.idx.apply("203.0.113.1840 1.203.0.113.184") == "203.0.113.1840 1.203.0.113.184"
+
+    def test_leak_scan_finds_ip_inside_token(self):
+        assert self.idx.find_leaks("lr-203.0.113.184-2") == {"203.0.113.184": 1}

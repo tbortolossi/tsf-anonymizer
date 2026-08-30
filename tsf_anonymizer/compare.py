@@ -101,7 +101,15 @@ class MappingIndex:
         for k in self.collisions:
             self.forward_ci.pop(k.lower(), None)
         self.forward = {k: v for k, v in self.forward.items() if k not in values}
-        cs_keys = [k for k in self.forward if k.lower() not in self.forward_ci]
+        # IPs and serials sit inside hyphenated/underscored tokens all the time
+        # (lr-203.0.113.184-2, PA_001901000456_dt): digit boundaries, not
+        # token boundaries, or 100 000 real-TSF lines read as unexplained.
+        num_keys = [k for k in self.forward if self.category_of[k] in ("ip_addresses", "serial_numbers")]
+        cs_keys = [k for k in self.forward
+                   if k.lower() not in self.forward_ci and self.category_of[k]
+                   not in ("ip_addresses", "serial_numbers")]
+        self._num_re = (re.compile(r"(?<![.\d])" + trie_regex(num_keys) + r"(?!\d)(?!\.\d)")
+                        if num_keys else None)
         self._cs_re = (re.compile(self._BEFORE + trie_regex(cs_keys) + self._AFTER)
                        if cs_keys else None)
         self._ci_re = (re.compile(self._BEFORE + trie_regex(self.forward_ci) + self._AFTER,
@@ -125,6 +133,8 @@ class MappingIndex:
 
     def apply(self, text: str) -> str:
         """Rewrite `text` with mapping keys → fakes. Callbacks run per hit only."""
+        if self._num_re is not None:
+            text = self._num_re.sub(lambda m: self.forward.get(m.group(0), m.group(0)), text)
         if self._cs_re is not None:
             text = self._cs_re.sub(lambda m: self.forward.get(m.group(0), m.group(0)), text)
         if self._ci_re is not None:
@@ -135,8 +145,10 @@ class MappingIndex:
     def find_leaks(self, text: str) -> dict[str, int]:
         """Mapping keys still present in `text` → occurrence count."""
         hits: dict[str, int] = {}
-        if self._cs_re is not None:
-            for m in self._cs_re.finditer(text):
+        for rx in (self._num_re, self._cs_re):
+            if rx is None:
+                continue
+            for m in rx.finditer(text):
                 k = m.group(0)
                 if len(k) >= self.min_leak_len:
                     hits[k] = hits.get(k, 0) + 1

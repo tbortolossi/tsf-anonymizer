@@ -405,3 +405,41 @@ class TestRealTsfLessons:
         anon.anon_ip("100.64.0.1")            # the customer uses our fake range
         fake = anon.anon_ip("10.0.0.9")        # first private fake would be 100.64.0.1
         assert fake != "100.64.0.1"
+
+
+class TestRealTsfLessonsRound2:
+    def test_url_and_path_contexts_are_rewritten_but_tags_are_not(self, anon):
+        anon.register_fqdn("vpn.acme.fr")
+        anon.register_named_object("Zone-A", "zone")
+        anon.build_patterns()
+        out = anon.anonymize_text("https://vpn.acme.fr/x /etc/Zone-A/y </Zone-A> <Zone-A> vpn.acme.fr.csr")
+        assert out == "https://host001.anon.internal/x /etc/ZONE-0001/y </Zone-A> <Zone-A> host001.anon.internal.csr"
+
+    def test_url_scheme_is_never_rewritten(self, anon):
+        anon.register_named_object("MyProto", "obj")
+        anon.build_patterns()
+        assert anon.anonymize_text("MyProto://x and MyProto") == "MyProto://x and OBJ-0001"
+
+    def test_ip_at_end_of_sentence_is_replaced(self, anon):
+        out = anon.anonymize_text("peer 10.0.0.5. next 10.0.0.6.7.8")
+        assert "10.0.0.5" not in out and "10.0.0.6.7.8" in out
+
+    def test_vocabulary_entries_are_not_registered(self, tmp_path):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><devices><vsys><zone><entry name='LAN'/><entry name='lan2'/></zone>"
+                     "<profiles><virus><entry name='AV-Prod'><decoder><entry name='http'/><entry name='smtp'/></decoder></entry></virus>"
+                     "<spyware><entry name='SP'><botnet-domains><dns-security-categories><entry name='pan-dns-sec-malware'/></dns-security-categories></botnet-domains></entry></spyware></profiles>"
+                     "<application><entry name='QUIC'/></application>"
+                     "<certificate><entry name='pan_devicetelem'/><entry name='Cert-GP'/></certificate>"
+                     "<external-list><entry name='panw-known-ip-list'/><entry name='EDL-Blocklist'/></external-list>"
+                     "</vsys></devices></c>")
+        anon = Anonymizer(); prescan_config_xml(p, anon)
+        assert set(anon.named_obj_map) == {"LAN", "AV-Prod", "SP", "Cert-GP", "EDL-Blocklist"}
+
+    def test_object_named_like_a_known_fqdn_gets_the_fqdn_pseudonym(self, anon):
+        anon.register_fqdn("igw.acme.fr")
+        anon.register_named_object("igw.acme.fr", "obj")     # certificate entry
+        anon.build_patterns()
+        out = anon.anonymize_text("cert igw.acme.fr file igw.acme.fr.csr")
+        assert out == "cert host001.anon.internal file host001.anon.internal.csr"
+        assert "igw.acme.fr" not in anon.named_obj_map

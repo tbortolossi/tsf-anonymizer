@@ -250,8 +250,11 @@ class Anonymizer:
         # Per-call replacement tally, reset by anonymize_text().
         self.last_counts: dict[str, int] = {}
 
+        # Not preceded by a digit or dot, not followed by a digit or by
+        # ".<digit>" — so 10.1.2.3.4 is not half-rewritten, but "peer 10.0.0.5."
+        # at the end of a sentence is.
         self._ip_re = re.compile(
-            r"(?<![.\d])(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(/\d{1,2})?(?![.\d])"
+            r"(?<![.\d])(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(/\d{1,2})?(?!\d)(?!\.\d)"
         )
         self._user_re = re.compile(
             r"(?:authenticated\s+for\s+user\s+['\"]"
@@ -403,22 +406,29 @@ class Anonymizer:
     def build_patterns(self) -> None:
         """Compile the replacement regexes. Call once after the prescan, and
         again after registering more names (from_mapping does)."""
+        # A certificate entry named after its own CN is the same identity as
+        # the FQDN; two pseudonyms for it broke correlation on a real TSF.
+        for name in [n for n in self.named_obj_map if n.lower().rstrip(".") in self.fqdn_map]:
+            del self.named_obj_map[name]
         if self.named_obj_map:
             # A name is replaced only as a whole token: not inside a longer
             # word, not as one segment of a hyphenated compound ("web" in
             # "web-server-1"), not as a label of a dotted name on the left
             # ("x.Zone-A"). A dot *after* is fine — sentence ends.
-            # "<" and "/" excluded before, "=" after: an object named like an
-            # XML tag or attribute ("enabled", "bgp", "name") must not rewrite
-            # <enabled> or name="…". Verified on a real TSF: it did.
+            # "<" and "</" excluded before, "=" and "://" after: an object named
+            # like an XML tag, an attribute or a URL scheme must not rewrite
+            # <enabled>, name="…" or http://. Verified on a real TSF: it did.
             self._obj_re = re.compile(
-                r"(?<![\w.\-<\/])" + trie_regex(self.named_obj_map) + r"(?![\w\-=])"
+                r"(?<![\w.\-<])(?<!<\/)" + trie_regex(self.named_obj_map) + r"(?![\w\-=])(?!:\/\/)"
             )
         else:
             self._obj_re = None
         if self.fqdn_map:
+            # "/" before is allowed on purpose: https://vpn.acme.fr/ and
+            # /path/to/vpn.acme.fr.csr must be rewritten; only </tag> is not.
+            # "." after is allowed too — a sentence ends, a file has a suffix.
             self._fqdn_re = re.compile(
-                r"(?<![.\w<\/])" + trie_regex(self.fqdn_map) + r"(?![.\w=])",
+                r"(?<![.\w<])(?<!<\/)" + trie_regex(self.fqdn_map) + r"(?![\w\-=])(?!:\/\/)",
                 re.IGNORECASE,
             )
         else:
@@ -613,6 +623,25 @@ def _extract_dn_identifiers(text: str, anon: Anonymizer) -> None:
                 anon.register_fqdn(part)
 
 
+# Entry names that are PAN-OS vocabulary rather than customer identifiers.
+# Found on a real TSF: "http", "ftp", "pdf", "linux", "title", "archive" are
+# entries under decoders / file types / applications, and replacing them
+# rewrote every "http" in every log (and http:// in XML namespaces).
+# "pan_devicetelem" is a system account. A customer zone named "lan" is
+# kept too — that is the trade-off, and it is not an identifier.
+_VOCAB_PARENTS = {
+    "decoder", "application", "file-type", "dns-security-categories", "category",
+    "threat-exception", "lists", "protocol", "signature", "botnet-domains",
+}
+_VOCAB_NAME_RE = re.compile(r"^[a-z][a-z0-9]{0,11}$")
+_VOCAB_PREFIXES = ("pan_", "panw-", "pan-")
+
+
+def _is_vocabulary(name: str, parent_tag: str) -> bool:
+    return (parent_tag in _VOCAB_PARENTS or _VOCAB_NAME_RE.match(name) is not None
+            or name.startswith(_VOCAB_PREFIXES))
+
+
 # Subtrees that hold Palo Alto's own content, not the customer's: the
 # App-ID / threat / URL-category catalog. A candidate config that embeds it
 # registered 41 973 "objects" named Apple, Linux, bgp, enabled, … and the
@@ -633,7 +662,8 @@ def _walk_xml(elem: ET.Element, anon: Anonymizer, parent_tag: str = "") -> None:
 
     if tag == "entry":
         name_attr = elem.get("name")
-        if name_attr and len(name_attr) >= 2 and name_attr.lower() not in BUILTIN_OBJECTS:
+        if (name_attr and len(name_attr) >= 2 and name_attr.lower() not in BUILTIN_OBJECTS
+                and not _is_vocabulary(name_attr, parent_tag)):
             category = "obj"
             for obj_tag, cat in NAMED_OBJ_PATHS:
                 if parent_tag == obj_tag:
