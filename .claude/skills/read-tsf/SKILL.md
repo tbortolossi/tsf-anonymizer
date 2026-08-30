@@ -76,10 +76,55 @@ the interesting hour away before the TSF is generated. Search them all:
 zgrep -h "<pattern>" var/log/pan/ikemgr-ng.log* var/log/pan/ikemgr.log* 2>/dev/null | sort | head -50
 ```
 
-Timestamps sort textually within one format, but formats differ per file
-(`2026-04-07 10:00:01`, `2026/04/05 09:40:34`, `Apr  7 10:00:09` — yearless!,
-`ikemgr-ng`: `2026:03:09T…` with colons in the date). Epoch-ms values
-(13 digits) appear inline. `md_out.log` glues records without separators.
+Timestamps sort textually within one format, but formats differ per file —
+six distinct families on one device; see step 2b before writing a grep.
+
+## Step 2b — how the log files actually read
+
+**One record = one timestamped line, plus untimestamped continuation lines.**
+A file often *starts* mid-record (rotation cuts anywhere): the first lines may
+have no timestamp — scan down to the first timestamped line before concluding
+anything about format. Daemons print startup banners (`*** STARTING DHCPD ***`)
+as multi-line blocks under a single timestamp.
+
+Format families (all verified on a real PA-440 TSF — match the file, then
+pick the right grep):
+
+| family | example | files |
+|---|---|---|
+| PAN standard: `YYYY-MM-DD HH:MM:SS.mmm +ZZZZ` | `2026-04-05 05:57:32.225 +0200 Error: pan_cfg…(file.c:647): msg` | most of `var/log/pan/`: configd, authd, sysd, useridd, routed, mprelay, devsrv, ha_agent… The `func(file.c:line):` prefix is grep-able and names the code path. |
+| ikemgr-ng: `YYYY:MM:DDTHH:MM:SS.mmm+ZZ:ZZ` | `2026:03:01T15:13:18.024+01:00 [4371-4442] [INFO]: …` | `ikemgr-ng.log`, `keymgr-ng.log` — **colons in the date**: a `2026-03-01` grep finds nothing here. `[pid-tid]` follows. |
+| JSON lines | `{"level":"info","time":"2026-03-01T15:13:17.65+01:00","message":"…"}` | `gpsvc.log`, `wifgo*.log`, `gp_broker` parts, `logging-services*.log` — use `jq -r` or grep the `"message"` value; `"level":"error"` filters. |
+| syslog, **yearless** | `Mar  1 06:12:39 400 kernel: […] msg` | `var/log/messages`, `show_log_journal.txt` — no year: infer it from the TSF window; day-of-month is space-padded (`Mar  1` = two spaces). |
+| audit key=value, **epoch** | `type=USER_AUTH msg=audit(1774665326.812:16547): … acct="x" exe="/usr/bin/su"` | `var/log/audit/audit.log*` — the only time is the epoch inside `audit(…)`: `date -d @1774665326`. |
+| nginx access | `IP - - [01/Mar/2026:15:20:33 +0100] "GET /x" 200 …` | `var/log/nginx/*`, `sslvpn-access.log`(text ones), `mgmt_httpd_access.log`. |
+| bracketed | `[2026-03-30 00:00:00.001 INF] msg` | plugin logs (`opt/plugins/var/log/pan/plugin-*`). |
+| periodic dump | a timestamp line, then a raw command dump (netstat, counters), repeated | `md_out.log` (netstat every few min, records glued without separators), `evtmgr_*_snapshot` (counter tables, few timestamps), `req_stats.log`. Diff two dumps rather than reading one. |
+
+**The monitor logs are the TSF's time machine — sectioned snapshots, not a
+stream.** Every ~2–5 min, `mp-monitor.log` and `dp-monitor.log` append blocks
+of the form `<timestamp>  --- <section>`:
+
+- `mp-monitor.log` sections: `cpu` (incl. load avg), `memory`,
+  `memory_detail`, `processes`/`top_summary`/`pidstat` (per-PID — **a PID
+  change between snapshots = daemon restart with no reboot**), `filesystem`,
+  `diskstats`, `swapusage`, `conntrack`, `netstat`, `logging_status`,
+  `logrcvr_statistics`, `health_check`, `smart`, `env` (temperatures)…
+- `dp-monitor.log` sections: `cpu`, `memory`, `processes`, `panio` (DP
+  message latency histograms — the congestion evidence), `netstat`,
+  `filesystem`, `smart`…
+
+Carve one section's history, or one instant, like this:
+
+```bash
+grep -n " --- " var/log/pan/mp-monitor.log | head            # index of snapshots
+awk '/--- memory$/{on=1} on&&/^2026.* --- /&&!/--- memory$/{on=0} on' var/log/pan/mp-monitor.log | head -80
+sed -n '/^2026-04-05 09:2.* --- /,/^2026-04-05 09:[3-9]/p' var/log/pan/dp-monitor.log   # a time window
+```
+
+That is how "what did memory/CPU/processes look like *before* the incident"
+gets answered from a snapshot archive — compare the sections across
+timestamps instead of reading one block.
 
 ## Step 3 — symptom → files → what to grep
 
