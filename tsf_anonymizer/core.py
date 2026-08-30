@@ -260,13 +260,16 @@ class Anonymizer:
             r"|user\s+thru\s+\S+\s+['\"]"
             r")([a-zA-Z][a-zA-Z0-9._@-]{1,})['\"]?"
         )
-        # Fallback for serials the config did not declare: 12 digits (PAN-OS
-        # hardware) or 15 starting with 007 (VM-Series). 13- and 14-digit runs
-        # are deliberately NOT matched — 13 digits is an epoch in milliseconds —
-        # and neither is a 12-digit run starting 0000: those are zero-padded
-        # counters in `show counter` output, not serials (real TSF: 3 434 of
+        # Fallback for serials the config did not declare. 13- and 14-digit
+        # runs are deliberately NOT matched — 13 digits is an epoch in
+        # milliseconds — and neither is a 12-digit run starting 0000: those are
+        # zero-padded counters in `show counter` output (real TSF: 3 434 of
         # them were "anonymized").
-        self._serial_re = re.compile(r"(?<!\d)((?!0000)\d{12}|007\d{12})(?!\d)")
+        # A PAN-OS serial starts with 0 (hardware: 12 digits, e.g. 0019…,
+        # 0113…; VM-Series: 007 + 12). 486712289187-shaped 12-digit runs are
+        # App-ID ids and counters, and 2 397 of them were "serials" on the
+        # first real run.
+        self._serial_re = re.compile(r"(?<!\d)(0(?!000)\d{11}|007\d{12})(?!\d)")
         self._email_re = re.compile(
             r"\b([a-zA-Z0-9._%+\-]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b"
         )
@@ -620,6 +623,12 @@ _SKIP_SUBTREES = {"predefined", "threats", "application-type"}
 def _walk_xml(elem: ET.Element, anon: Anonymizer, parent_tag: str = "") -> None:
     tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
     if tag in _SKIP_SUBTREES:
+        return
+    # <config><global> is the content catalog a candidate config embeds
+    # (application, signature, iot-definitions, opswat, modification-history…):
+    # 42 165 vendor names on a real box, against 345 customer objects under
+    # <devices>/<shared>/<mgt-config>.
+    if tag == "global" and parent_tag == "config":
         return
 
     if tag == "entry":

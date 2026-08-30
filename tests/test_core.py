@@ -378,6 +378,20 @@ class TestRealTsfLessons:
     def test_zero_padded_counters_are_not_serials(self, anon):
         assert anon.anonymize_text("pkts 000000024894 000000000000") == "pkts 000000024894 000000000000"
 
+    def test_12_digit_ids_not_starting_with_zero_are_not_serials(self, anon):
+        assert anon.anonymize_text("id 486712289187 x 111111111111") == "id 486712289187 x 111111111111"
+
+    def test_config_global_catalog_is_not_prescanned(self, tmp_path):
+        (tmp_path / "candidatecfg.1.xml").write_text(
+            "<config><global><application><entry name='Apple'/></application>"
+            "<iot-definitions><attribute><entry name='Gosund'/></attribute></iot-definitions></global>"
+            "<devices><entry name='localhost.localdomain'><vsys><entry name='vsys1'>"
+            "<address><entry name='SRV-X'/></address></entry></vsys></entry></devices></config>")
+        anon = Anonymizer()
+        from tsf_anonymizer.core import prescan_tree
+        prescan_tree(tmp_path, anon)
+        assert set(anon.named_obj_map) == {"SRV-X"}
+
     def test_declared_serial_is_replaced_whatever_its_shape(self, anon):
         anon.anon_serial("000000000021"); anon.build_patterns()
         out = anon.anonymize_text("device 000000000021 ok")
