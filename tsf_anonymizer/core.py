@@ -438,8 +438,13 @@ class Anonymizer:
             # "<" and "</" excluded before, "=" and "://" after: an object named
             # like an XML tag, an attribute or a URL scheme must not rewrite
             # <enabled>, name="…" or http://. Verified on a real TSF: it did.
+            # The trailing boundary also accepts a glued timestamp:
+            # md_out.log writes "…_com2026-04-05 09:38:00" with no separator,
+            # and the customer name leaked inside it. A longer key that
+            # really ends in a date is still preferred by the trie.
             self._obj_re = re.compile(
-                r"(?<![\w.\-<])(?<!<\/)" + trie_regex(self.named_obj_map) + r"(?![\w\-=])(?!:\/\/)"
+                r"(?<![\w.\-<])(?<!<\/)" + trie_regex(self.named_obj_map)
+                + r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)"
             )
         else:
             self._obj_re = None
@@ -452,7 +457,8 @@ class Anonymizer:
             # still wins — the scan is leftmost, so igw.home-lab.example is
             # matched at "igw" before the apex is ever tried.
             self._fqdn_re = re.compile(
-                r"(?<![\w\-<])(?<!<\/)" + trie_regex(self.fqdn_map) + r"(?![\w\-=])(?!:\/\/)",
+                r"(?<![\w\-<])(?<!<\/)" + trie_regex(self.fqdn_map)
+                + r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)",
                 re.IGNORECASE,
             )
         else:

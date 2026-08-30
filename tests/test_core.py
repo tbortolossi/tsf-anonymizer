@@ -558,3 +558,14 @@ class TestHostnamePhraseIsStrict:
         assert "to" not in anon.fqdn_map
         anon.fqdn_map["to"] = "host099"; anon.build_patterns()   # even if it were a key…
         assert anon.anonymize_text("<equal-to>x</equal-to> link-state") == "<equal-to>x</equal-to> link-state"
+
+
+def test_object_glued_to_a_timestamp_is_still_replaced():
+    """md_out.log: 'SSL Server Cert : GP_globalprotect_home-lab_example2026-04-05 09:38:00'."""
+    anon = Anonymizer()
+    anon.register_named_object("GP_globalprotect_home-lab_example", "obj")
+    anon.build_patterns()
+    out = anon.anonymize_text("Cert : GP_globalprotect_home-lab_example2026-04-05 09:38:00")
+    assert "home-lab" not in out and "2026-04-05 09:38:00" in out
+    # but a name glued to arbitrary digits is a different token and stays
+    assert anon.anonymize_text("GP_globalprotect_home-lab_example42") == "GP_globalprotect_home-lab_example42"
