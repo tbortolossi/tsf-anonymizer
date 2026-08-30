@@ -56,6 +56,27 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
 - **`delete_original` deletes only after a clean integrity report.** Errors
   or archive mismatches keep the original with `original_kept_reason` set;
   a human deletes it via `POST /api/jobs/{id}/delete-original`.
+- **The prescan reads customer configuration, not vendor content.**
+  `_SKIP_SUBTREES` (`<predefined>`, `<threats>`…) and `_is_prescan_candidate`
+  (global.xml, predefined.xml, updates/, regip/, report templates) exist
+  because a candidate config embeds the App-ID catalog: 41 973 names like
+  `Apple`, `bgp`, `enabled` were registered as objects and then rewritten
+  inside XML tags. The boundaries `(?<![\w.\-<\/])…(?![\w\-=])` are the
+  second line of defence: never match right after `<` / `</`, never before `=`.
+- **A fake value is never an input to a later pass.** `Anonymizer._fakes`
+  holds every pseudonym handed out; `anon_user`, `anon_ip`, `anon_serial` and
+  `register_named_object` return a fake unchanged. Without it, `user 'Zone-A'`
+  became `OBJ-0002` then `user001`, and config and logs no longer agreed.
+- **Fakes are shaped to not collide with originals**: serials start with 9,
+  fake IPs skip any address already seen as an original. When a collision
+  still happens (the customer uses 100.64/10), `MappingIndex.collisions`
+  reports it as such — separately from leaks, which it would otherwise inflate.
+- **Serial fallback: 12 digits not starting `0000`, or `007`+12.** Zero-padded
+  counters in `show counter` output are 12 digits too; 3 434 of them were
+  "anonymized" on the first real run.
+- **Compare never runs difflib on a long line character by character.**
+  `_changed_spans` switches to token level past 2 000 chars and gives up
+  (one span, unexplained) past 4 000 tokens; XML lines of 24 000 chars exist.
 - **The output archive is the input archive with payloads swapped.**
   `repack_archive` iterates the original `TarInfo` list; it must not re-walk
   the filesystem (`tar.add(dir)`), which loses order and metadata.
@@ -78,6 +99,8 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
 - Hostnames absent from every XML config are not redacted (no reliable
   hostname heuristic without heavy false positives). Test:
   `test_hostname_absent_from_the_config_is_not_redacted`.
+- Free-text fields (rule descriptions, comments, login banners) are not
+  scanned for company names; `<contact>` and `<full-name>` are.
 - Binary files may embed identifiers; the compare report flags them as
   warnings rather than the anonymizer rewriting them.
 - IPv6 untouched; usernames only in known log phrasings.

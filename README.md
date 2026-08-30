@@ -22,7 +22,7 @@ file (rotated `.gz` logs included) with consistent pseudonyms:
 | e-mail | `j.dupont@acme.fr` | `user003@host002.anon.internal` |
 | named object | `Zone-Prod-DMZ` | `ZONE-0012` (category prefix kept) |
 | username | `jdupont` | `user001` |
-| serial | `001901000123` | `000000000000001` |
+| serial | `001901000123` | `900000000001` (same length, leading 9) |
 
 Same original value → same pseudonym everywhere, so VPN peers, LDAP servers,
 rules and users can still be correlated across logs and config.
@@ -93,6 +93,12 @@ tsf-anonymizer serve --data-dir ./data
   IPs, e-mails, serials and `user '…'` patterns are matched by shape
   everywhere. Free text (login banners, rule descriptions, comments) can
   carry a company name nothing matches.
+- **Free text is not scanned.** Rule descriptions, comments, login banners
+  can carry a company name that nothing matches. `<contact>` / `<full-name>`
+  are anonymized.
+- **A customer address inside our fake ranges (100.64/10, RFC 5737) is a
+  collision.** It is still replaced, but the same string then also appears as
+  somebody else's pseudonym; the report lists these under *mapping collisions*.
 - **Binary files are not rewritten.** `rule-hit-count.bin`, sqlite databases
   or core dumps may embed rule names or IPs; the compare report lists which
   ones. Remove them from the archive if that matters.
