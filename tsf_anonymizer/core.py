@@ -511,9 +511,13 @@ class Anonymizer:
             # must be rewritten when only the apex is known. A longer key
             # still wins — the scan is leftmost, so igw.home-lab.example is
             # matched at "igw" before the apex is ever tried.
+            # "_" is a separator here, not a word character: a hostname cannot
+            # contain one, and PAN-OS glues the device name with underscores
+            # (techsupport_<devicename>_<date>.txt, in the member name and in
+            # the text) — the one place the name survived a real run.
             self._fqdn_re = re.compile(
-                r"(?<![\w\-<])(?<!<\/)" + trie_regex(self.fqdn_map)
-                + r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)",
+                r"(?<![A-Za-z0-9\-<])(?<!<\/)" + trie_regex(self.fqdn_map)
+                + r"(?:(?![A-Za-z0-9\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)",
                 re.IGNORECASE,
             )
         else:
@@ -1197,9 +1201,14 @@ def extract_archive(archive: Path, work_dir: Path, *,
 
 
 def repack_archive(members: Iterable[tarfile.TarInfo], tree: Path, output: Path, *,
-                   progress: ProgressFn = _noop_progress) -> int:
+                   progress: ProgressFn = _noop_progress,
+                   rename: Optional[Callable[[str], str]] = None) -> int:
     """Write `output` with the same member order and metadata as the input,
-    swapping in the payload found under `tree`. Returns members written."""
+    swapping in the payload found under `tree`. Returns members written.
+
+    `rename` maps a member name to the name it gets in the output — member
+    names carry identifiers too (techsupport_<devicename>_<date>.txt). The
+    payload is still read under the *original* name on disk."""
     members = list(members)
     total, written = len(members), 0
     # ~100 updates whatever the size: a small archive still moves, a 500-member
@@ -1214,7 +1223,7 @@ def repack_archive(members: Iterable[tarfile.TarInfo], tree: Path, output: Path,
                 progress("repack", written, total, output.name)
             if m.name == ".":
                 continue
-            info = tarfile.TarInfo(m.name)
+            info = tarfile.TarInfo(rename(m.name) if rename else m.name)
             info.mode, info.uid, info.gid = m.mode, m.uid, m.gid
             info.uname, info.gname, info.mtime = m.uname, m.gname, m.mtime
             info.type = m.type
@@ -1250,6 +1259,7 @@ class AnonymizeReport:
     redacted: int = 0
     errors: int = 0
     members_skipped: int = 0
+    members_renamed: int = 0
     config_files_scanned: int = 0
     mapping_sizes: dict[str, int] = field(default_factory=dict)
     replacements: dict[str, int] = field(default_factory=dict)
@@ -1273,11 +1283,56 @@ def _is_prescan_candidate(p: Path) -> bool:
     return not (set(p.parts) & _PRESCAN_SKIP_PARTS)
 
 
+# tmp/cli/techsupport_<devicename>_<YYYYMMDD>_<HHMM>.txt — the device's own
+# name, chosen by the customer, in a member name. Not the model (the skill
+# used to say so): verified on four real TSFs.
+_TECHSUPPORT_NAME_RE = re.compile(r"^techsupport_(.+)_(\d{8})_(\d{4})\.txt$")
+_MODEL_LIKE_RE = re.compile(r"^(?:PA|VM|M|PAN|WF|CN)-?\d", re.IGNORECASE)
+_SYSINFO_KEYS = {"hostname": "host", "devicename": "host", "domain": "host", "serial": "serial"}
+
+
+def _prescan_system_info(tree: Path, anon: Anonymizer) -> int:
+    """The device's identity as the device itself states it: the name in the
+    techsupport txt file name and the `> show system info` block. Authoritative
+    — no "looks like a device name" heuristic here: a hostname without a digit
+    or hyphen (`CoreFirewall`) went out in clear on three of four real TSFs,
+    in a member name and in the text."""
+    found = 0
+    for ts in sorted((tree / "tmp" / "cli").glob("techsupport_*.txt")):
+        m = _TECHSUPPORT_NAME_RE.match(ts.name)
+        if m and not _MODEL_LIKE_RE.match(m.group(1)) and m.group(1).lower() not in BUILTIN_OBJECTS:
+            anon.register_fqdn(m.group(1))
+            found += 1
+        try:
+            head = ts.read_bytes()[:2_000_000].decode("utf-8", "surrogateescape")
+        except Exception:
+            continue
+        block = re.search(r"^> show system info.*?(?=^> |\Z)", head, re.S | re.M)
+        if not block:
+            continue
+        for key, kind in _SYSINFO_KEYS.items():
+            mm = re.search(rf"^{key}:\s*(\S+)\s*$", block.group(0), re.M)
+            if not mm:
+                continue
+            val = mm.group(1).strip()
+            if kind == "host":
+                if (len(val) > 2 and val.lower() not in BUILTIN_OBJECTS
+                        and not _IP_LIKE_RE.match(val) and not _MODEL_LIKE_RE.match(val)
+                        and val.lower() not in ("unknown", "none")):
+                    anon.register_fqdn(val)
+                    found += 1
+            elif kind == "serial" and val.isdigit() and 8 <= len(val) <= 16:
+                anon.anon_serial(val)
+                found += 1
+    return found
+
+
 def prescan_tree(tree: Path, anon: Anonymizer, progress: ProgressFn = _noop_progress) -> int:
     """Prescan every customer-config XML in the tree. Running/candidate configs
     first so they own the categories; other XMLs then only add what they
     introduce. Vendor content (App-ID catalog, URL DB, report templates) is
     skipped — see _is_prescan_candidate / _SKIP_SUBTREES."""
+    _prescan_system_info(tree, anon)
     primary = sorted(tree.rglob("running-config.xml")) + sorted(tree.rglob("candidate-config.xml"))
     seen = set(primary)
     others = [p for p in sorted(tree.rglob("*.xml")) if p not in seen and _is_prescan_candidate(p)]
@@ -1556,7 +1611,17 @@ def anonymize_tsf(
         if output_tgz is not None:
             progress("repack", 0, len(members), f"Repacking → {output_tgz.name}")
             output_tgz.parent.mkdir(parents=True, exist_ok=True)
-            repack_archive(members, anon_dir, output_tgz, progress=progress)
+            renamed = [0]
+
+            def _rename(name: str) -> str:
+                # Same frozen tables, same passes: a member name is text too.
+                new = anon.anonymize_text(name)
+                if new != name:
+                    renamed[0] += 1
+                return new
+
+            repack_archive(members, anon_dir, output_tgz, progress=progress, rename=_rename)
+            report.members_renamed = renamed[0]
             mapping_path = mapping_sidecar_path(output_tgz)
             mapping_path.write_text(
                 json.dumps(anon.get_mapping(), indent=2, ensure_ascii=False), encoding="utf-8"

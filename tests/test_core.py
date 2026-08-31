@@ -232,10 +232,14 @@ class TestAnonymizeTsf:
         assert gzip.decompress(read_member(out, "./var/log/pan/core.1.gz")) == BINARY_PAYLOAD
 
     def test_member_order_and_metadata_are_preserved(self, output, tsf):
-        out, _, _ = output
+        out, _, mapping = output
+        from tsf_anonymizer.compare import MappingIndex
+        idx = MappingIndex(mapping)
         with tarfile.open(tsf) as a, tarfile.open(out) as b:
             ma, mb = a.getmembers(), b.getmembers()
-        assert [m.name for m in ma] == [m.name for m in mb]
+        # Names are preserved *through the mapping*: a member named after the
+        # device comes out renamed, exactly as the text would.
+        assert [idx.apply(m.name) for m in ma] == [m.name for m in mb]
         for x, y in zip(ma, mb):
             assert (x.mode, x.uid, x.gid, x.uname, x.mtime, x.type) == (y.mode, y.uid, y.gid, y.uname, y.mtime, y.type)
 
@@ -260,8 +264,9 @@ class TestAnonymizeTsf:
 
     def test_report_counts(self, output):
         _, report, _ = output
-        assert report.files_total == 7
-        assert report.modified == 4          # log, gz log, config, mode-0000 json
+        assert report.files_total == 8
+        assert report.modified == 5          # log, gz log, config, mode-0000 json, techsupport txt
+        assert report.members_renamed == 1   # techsupport_<devicename>_<date>.txt
         assert report.binary == 2            # .bin + core.gz
         assert report.unchanged == 1
         assert report.errors == 0
@@ -811,3 +816,44 @@ def test_email_case_variants_share_one_pseudonym(anon):
     fakes = {w for w in out.split() if "@" in w}
     assert len(fakes) == 1
     assert len(anon.email_map) == 1
+
+
+class TestDeviceNameEverywhere:
+    """The device's own name is in the techsupport txt *file name* and in
+    `show system info` — and a name without a digit or hyphen went out in
+    clear on three of four real TSFs, in a member name and in the text."""
+
+    @pytest.fixture
+    def output(self, tmp_path, tsf):
+        out = tmp_path / "out.tgz"
+        report, mapping = anonymize_tsf(tsf, out)
+        return out, report, mapping
+
+    def test_member_named_after_the_device_is_renamed(self, output):
+        out, report, _ = output
+        with tarfile.open(out) as tar:
+            names = [m.name for m in tar.getmembers()]
+        assert not any("fw-paris-01" in n for n in names)
+        renamed = [n for n in names if n.startswith("./tmp/cli/techsupport_host")]
+        assert len(renamed) == 1 and renamed[0].endswith("_20260407_1000.txt")
+        assert report.members_renamed == 1
+
+    def test_devicename_from_show_system_info_is_redacted(self, output):
+        out, _, _ = output
+        from conftest import DEVICE_NAME
+        with tarfile.open(out) as tar:
+            member = next(m for m in tar.getmembers() if "techsupport_host" in m.name)
+            payload = tar.extractfile(member).read()
+        assert DEVICE_NAME.encode() not in payload
+        assert b"fw-paris-01" not in payload
+        assert b"001901000123" not in payload
+        assert b"model: PA-440" in payload                       # the model is not an identity
+        assert b"techsupport_host" in payload                    # underscore-glued name in text, too
+
+    def test_compare_pairs_the_renamed_member(self, tmp_path, tsf, output):
+        from tsf_anonymizer.compare import compare_archives
+        out, report, mapping = output
+        rep = compare_archives(tsf, out, mapping)
+        assert rep.ok and not rep.archive["mismatches"]
+        assert rep.summary["members_renamed"] == 1
+        assert rep.summary["errors"] == 0

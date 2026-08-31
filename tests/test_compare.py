@@ -88,7 +88,7 @@ class TestHappyPath:
         assert s["timestamp_mismatches"] == 0
         assert s["numeric_mismatches"] == 0
         assert s["xml_checked"] == 1 and s["xml_structure_changed"] == 0
-        assert s["anonymized"] == 4 and s["binary_identical"] == 2
+        assert s["anonymized"] == 5 and s["binary_identical"] == 2
 
     def test_binary_with_identifiers_is_a_warning_not_an_error(self, anonymized):
         _, _, mapping, work = anonymized
@@ -99,9 +99,14 @@ class TestHappyPath:
         assert rep.summary["binary_files_with_identifiers"] == 2  # .bin + core.gz
 
     def test_archive_level_check_passes(self, anonymized):
-        tsf, out, _, _ = anonymized
-        arc = compare_members(tsf, out)
+        tsf, out, mapping, _ = anonymized
+        arc = compare_members(tsf, out, mapping=mapping)
         assert arc["order_preserved"] and arc["metadata_differences"] == 0 and not arc["mismatches"]
+        assert arc["members_renamed"] == 1
+
+    def test_renamed_member_without_the_mapping_is_a_mismatch(self, anonymized):
+        tsf, out, _, _ = anonymized
+        assert compare_members(tsf, out)["mismatches"]
 
     def test_compare_archives_end_to_end(self, anonymized):
         tsf, out, mapping, _ = anonymized

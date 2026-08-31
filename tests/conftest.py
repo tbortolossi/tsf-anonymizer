@@ -69,6 +69,25 @@ IDENTIFIERS = [
     "acme-corp.fr", "GW-Paris-Primary", "Zone-Prod-DMZ", "SRV-Compta-Paris",
     "Allow-Compta-to-DMZ", "fw-paris-01", "10.20.30.40",
 ]
+
+# The command dump PAN-OS names after the *device*, not the model — and the
+# devicename below has no digit or hyphen, which the log-phrase heuristic
+# would reject: only `show system info` can vouch for it.
+TECHSUPPORT_NAME = "techsupport_fw-paris-01_20260407_1000.txt"
+TECHSUPPORT_TXT = """\
+> show clock
+Tue Apr  7 10:00:00 CEST 2026
+> show system info
+hostname: fw-paris-01
+devicename: CoreFirewallParis
+ip-address: 172.16.4.1
+serial: 001901000123
+model: PA-440
+sw-version: 11.1.4
+> show system files
+/opt/panlogs/tmp/techsupport/techsupport_fw-paris-01_20260407_1000.txt
+"""
+DEVICE_NAME = "CoreFirewallParis"
 PRESERVED = ["ethernet1/1", "'admin'", "1743840000123", "pid 4711", "metric 10", "rc=49",
              "2026-04-07 10:00:01", "Apr  7 10:00:09", "/24"]
 
@@ -83,6 +102,8 @@ def build_tsf(tmp_path: Path, name: str = "in.tgz") -> Path:
     (staging / "var/log/pan/system.log").write_bytes(_latin(LOG_SAMPLE))
     (staging / "var/log/pan/rule-hit-count.bin").write_bytes(BINARY_PAYLOAD)
     (staging / "var/log/pan/untouched.txt").write_text("nothing identifying here\n")
+    (staging / "tmp/cli").mkdir(parents=True)
+    (staging / "tmp/cli" / TECHSUPPORT_NAME).write_text(TECHSUPPORT_TXT)
     # A real TSF ships files in mode 0000 (opt/pancfg/mgmt/global/.hcr_metadata.json).
     (staging / "opt/pancfg/mgmt/global").mkdir(parents=True)
     (staging / "opt/pancfg/mgmt/global/.hcr_metadata.json").write_text('{"peer": "172.16.4.9"}\n')
