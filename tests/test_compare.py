@@ -358,3 +358,9 @@ def test_compare_explains_the_vsys_glued_edl_name():
     from tsf_anonymizer.compare import MappingIndex, explain_line
     idx = MappingIndex({"named_objects": {"ThreatFeed-Partner": "OBJ-0001"}})
     assert explain_line("vsys1_ThreatFeed-Partner.ebl", "vsys1_OBJ-0001.ebl", idx)
+
+
+def test_compare_explains_a_hostname_inside_a_hyphenated_compound():
+    from tsf_anonymizer.compare import MappingIndex, explain_line
+    idx = MappingIndex({"fqdns": {"fw-dc1": "host001"}})
+    assert explain_line('host: "adm-fw-dc1"', 'host: "adm-host001"', idx)
