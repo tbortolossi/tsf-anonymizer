@@ -102,6 +102,15 @@ class MappingIndex:
                 self.category_of[orig] = cat
                 if cat in ("fqdns", "emails"):
                     self.forward_ci[orig.lower()] = fake
+        # Distinct originals sharing one pseudonym is a defect of the mapping
+        # itself (a generator bug once merged tens of thousands of distinct
+        # public sources on a real TSF): the copies cannot be told apart, so
+        # correlation on the anonymized tree is silently wrong. Reported in
+        # the summary; the anonymizer guarantees injectivity on its side.
+        counts: dict[str, int] = {}
+        for v in self.forward.values():
+            counts[v] = counts.get(v, 0) + 1
+        self.duplicate_pseudonyms = sorted(v for v, c in counts.items() if c > 1)
         # A key that is also a fake value somewhere in the mapping (the customer
         # used 100.64.0.3, which is also what we hand out) cannot be told apart
         # from that fake in the output: it is a collision, not a leak, and is
@@ -530,6 +539,8 @@ def compare_trees(orig_dir: Path, anon_dir: Path, mapping: dict,
     report.summary["members_renamed"] = renamed
     report.summary["mapping_collisions"] = len(index.collisions)
     report.summary["mapping_collision_sample"] = index.collisions[:20]
+    report.summary["mapping_duplicate_pseudonyms"] = len(index.duplicate_pseudonyms)
+    report.summary["mapping_duplicate_sample"] = index.duplicate_pseudonyms[:20]
     return report
 
 

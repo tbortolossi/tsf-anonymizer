@@ -55,7 +55,7 @@ file (rotated `.gz` logs included) with consistent pseudonyms:
 | class | original | replacement |
 |---|---|---|
 | private IPv4 | `10.1.2.3` | `100.64.x.y` (RFC 6598, never a real internal range) |
-| public IPv4 | `8.8.8.8` | `192.0.2.x` / `198.51.100.x` / `203.0.113.x` (RFC 5737) |
+| public IPv4 | `8.8.8.8` | `192.0.2.x` / `198.51.100.x` / `203.0.113.x` (RFC 5737), then `240.x.y.z` (class E) once those 762 are used |
 | FQDN / hostname | `fw01.acme.local` | `host007.anon.internal` |
 | e-mail | `j.dupont@acme.fr` | `user003@host002.anon.internal` |
 | named object | `Zone-Prod-DMZ` | `ZONE-0012` (category prefix kept) |

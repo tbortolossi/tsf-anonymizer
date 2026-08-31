@@ -417,6 +417,31 @@ class TestRealTsfLessons:
         fake = anon.anon_ip("10.0.0.9")        # first private fake would be 100.64.0.1
         assert fake != "100.64.0.1"
 
+    def test_private_fakes_are_unique_at_scale(self, anon):
+        # The old generator merged .0/.1 host octets every 256th allocation:
+        # 52 duplicate pseudonyms in one real mapping, invisible to the
+        # compare. 70 000 crosses every octet boundary of the counter.
+        import ipaddress
+        fakes = [anon.anon_ip(f"10.{(i >> 16) & 255}.{(i >> 8) & 255}.{i & 255}")
+                 for i in range(1, 70_000)]
+        assert len(set(fakes)) == len(fakes)
+        for f in fakes[:512] + fakes[-512:]:
+            assert ipaddress.ip_address(f) in ipaddress.ip_network("100.64.0.0/10")
+
+    def test_public_fakes_spill_into_class_e_instead_of_cycling(self, anon):
+        # RFC 5737 holds 762 pseudonyms; the old generator then cycled — on a
+        # real TSF 54 197 of 84 971 distinct IPs (public attack sources
+        # included) shared a pseudonym. The overflow now spills into 240/4.
+        import ipaddress
+        fakes = [anon.anon_ip(f"{8 + (i >> 16)}.{(i >> 8) & 255}.{i & 255}.7")
+                 for i in range(2_000)]
+        assert len(set(fakes)) == len(fakes)
+        for f in fakes[:762]:
+            assert int(f.split(".")[0]) in (192, 198, 203)
+        for f in fakes[762:]:
+            assert 240 <= int(f.split(".")[0]) <= 255
+            ipaddress.ip_address(f)  # every spilled fake is a valid address
+
 
 class TestRealTsfLessonsRound2:
     def test_url_and_path_contexts_are_rewritten_but_tags_are_not(self, anon):

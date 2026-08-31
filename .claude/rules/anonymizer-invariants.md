@@ -49,6 +49,15 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   fake IPs skip any address already seen as an original. When a collision
   still happens (the customer uses 100.64/10), `MappingIndex.collisions`
   reports it as such — separately from leaks, which it would otherwise inflate.
+- **The IP mapping is injective — and the compare checks it.** The generation
+  loop skips any pseudonym already handed out (`_fakes`), and public fakes
+  beyond the 762 RFC 5737 addresses spill into 240.0.0.0/4 (class E — never
+  routable, never a real third party) instead of cycling. The old generator
+  merged `.0`/`.1` host octets every 256th allocation and cycled the public
+  blocks: 54 197 of 84 971 distinct IPs shared a pseudonym on one real TSF —
+  distinct attack sources merged on the copy, invisible to a compare that
+  never checked value uniqueness. `MappingIndex.duplicate_pseudonyms` now
+  reports a non-injective mapping in the summary and the UI.
 - **Serial fallback: 12 digits not starting `0000`, or `007`+12 — and never
   right after a dot.** Zero-padded counters in `show counter` output are 12
   digits too; 3 434 of them were "anonymized" on the first real run. logdb

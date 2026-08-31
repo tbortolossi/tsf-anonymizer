@@ -375,16 +375,29 @@ class Anonymizer:
 
     def _fake_private_ip(self) -> str:
         self._priv_counter += 1
-        n = self._priv_counter
-        second = 64 + ((n - 1) >> 16) % 64  # 100.64.x – 100.127.x (RFC 6598)
-        return f"100.{second}.{(n >> 8) & 0xFF}.{n & 0xFF or 1}"
+        n = self._priv_counter - 1
+        # 254 hosts per /24 (.1-.254: .0/.255 read as network/broadcast), then
+        # 100.64.0.0/10 (RFC 6598) — 64 x 256 x 254 distinct values before the
+        # anti-reuse loop in anon_ip would ever see a repeat.
+        host = n % 254 + 1
+        n //= 254
+        return f"100.{64 + (n >> 8) % 64}.{n & 0xFF}.{host}"
 
     def _fake_public_ip(self) -> str:
         self._pub_counter += 1
-        n = self._pub_counter
-        blocks = [(192, 0, 2), (198, 51, 100), (203, 0, 113)]  # RFC 5737
-        b = blocks[(n - 1) // 256 % len(blocks)]
-        return f"{b[0]}.{b[1]}.{b[2]}.{n % 256 or 1}"
+        n = self._pub_counter - 1
+        host = n % 254 + 1
+        n //= 254
+        if n < 3:
+            b = ((192, 0, 2), (198, 51, 100), (203, 0, 113))[n]  # RFC 5737
+            return f"{b[0]}.{b[1]}.{b[2]}.{host}"
+        # RFC 5737 is 3 x 254 addresses; a real TSF carries tens of thousands
+        # of public IPs (54 845 measured on one). The overflow spills into
+        # 240.0.0.0/4 (class E: never routable, never a real third party)
+        # instead of cycling — cycling handed one pseudonym to thousands of
+        # distinct public sources on real archives.
+        n -= 3
+        return f"{240 + (n >> 16) % 16}.{(n >> 8) & 0xFF}.{n & 0xFF}.{host}"
 
     def anon_ip(self, ip_str: str) -> str:
         if ip_str in self._SKIP_IPS:
@@ -404,8 +417,11 @@ class Anonymizer:
             gen = self._fake_private_ip if addr.is_private else self._fake_public_ip
             fake = gen()
             # A customer may use our fake ranges (100.64/10 is a common GP
-            # pool). Never hand out a fake that is also an original we know.
-            while fake in self.ip_map:
+            # pool). Never hand out a fake that is also an original we know —
+            # nor one already handed out: the mapping must stay injective
+            # (distinct originals never share a pseudonym), and the compare
+            # checks that it is.
+            while fake in self.ip_map or fake in self._fakes:
                 fake = gen()
         except ValueError:
             return ip_str

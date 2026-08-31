@@ -277,6 +277,14 @@ class TestCollisionsAndLongLines:
         _, _, mapping, work = anonymized
         rep = compare_trees(work / "orig", work / "anon", mapping)
         assert rep.summary["mapping_collisions"] == 0
+        assert rep.summary["mapping_duplicate_pseudonyms"] == 0
+
+    def test_two_originals_sharing_a_pseudonym_are_reported(self):
+        m = {"ip_addresses": {"10.0.0.1": "100.64.0.9", "10.0.0.2": "100.64.0.9"}}
+        idx = MappingIndex(m)
+        assert idx.duplicate_pseudonyms == ["100.64.0.9"]
+        # Both keys still apply — the mapping is honest about what it did.
+        assert idx.apply("10.0.0.1 10.0.0.2") == "100.64.0.9 100.64.0.9"
 
     def test_long_line_is_diffed_by_token_quickly(self):
         import time

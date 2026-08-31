@@ -8,6 +8,15 @@ change what is mapped, a patch bump only fixes).
 ## [Unreleased]
 
 ### Fixed
+- The fake-IP generators are injective again: the private one merged `.0`/`.1`
+  host octets every 256th allocation and the public one cycled over the 762
+  RFC 5737 addresses — on one real archive 54 197 of 84 971 distinct IPs
+  (public attack sources included) silently shared a pseudonym, breaking
+  correlation on the copy. Public pseudonyms now spill into 240.0.0.0/4
+  (class E — never routable, never a real third party) once RFC 5737 is
+  exhausted, the generation loop skips every pseudonym already handed out,
+  and the compare reports a non-injective mapping (*duplicate pseudonyms*)
+  in its summary and the UI.
 - An object whose name embeds a FQDN is now rewritten whole by the FQDN pass
   instead of having its key dropped: a certificate named after its flattened
   FQDN (`<site>-fw-xx-<domain>-org-au`) kept the site prefix of the device's
