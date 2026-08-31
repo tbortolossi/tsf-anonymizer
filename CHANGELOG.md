@@ -17,6 +17,11 @@ change what is mapped, a patch bump only fixes).
 ## [0.3.0] - 2026-08-31
 
 ### Added
+- `read-tsf` skill: the reading heuristics that lived only in `TSF-GUIDE.md`
+  (expired licences, `dagger.log` for what was run and when, the HA peer's
+  config in `.ha-remote-rc.xml`, `show_log_globalprotect.txt` columns,
+  `content_telemetry.log` as a second `show system info`, two more huge
+  files to skip) are now in `SKILL.md` — the method, not only the map.
 - `tsf-anonymizer mock-tsf`: a deterministic synthetic TSF (fictional company,
   reserved address ranges) to try the tool on, reproduce bugs and generate the
   documentation — real archives are customer material and never enter the repo.

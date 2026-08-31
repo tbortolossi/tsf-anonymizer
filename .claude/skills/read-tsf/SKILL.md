@@ -40,7 +40,16 @@ Real TSFs ship files in mode `0000` — hence the `chmod`. Files may hold
 Latin-1 bytes; add `-a` to grep or decode with `errors="surrogateescape"`.
 The command dump is named after the **device** (hostname or devicename as
 the customer set it), never the model — verified on four real TSFs; the
-model is on the `model:` line of `show system info`.
+model is on the `model:` line of `show system info`. If the command dump is
+truncated or missing, `var/log/pan/content_telemetry.log` opens with a full
+`--- show system info ---` block — a second copy of the device's identity
+and versions.
+
+A fourth fact worth one grep before diving into any symptom:
+`grep -A40 "^> request license info" tmp/cli/techsupport_*.txt` — an
+**expired licence** (Threat Prevention, URL, GlobalProtect, support…)
+explains many "it stopped working on <date>" reports, and no daemon log
+says so as plainly.
 
 ## Step 1 — the reading order that works
 
@@ -57,7 +66,12 @@ model is on the `model:` line of `show system info`.
 6. The config for the objects the log lines name.
 7. What changed: `grep -B2 -A8 "^> show jobs processed" tmp/cli/techsupport_*.txt`
    (commit history), `opt/pancfg/mgmt/audit/cfg-audit.xml,v` (RCS history of
-   every commit — `grep -n "^date" `, or `co -p` if RCS tools exist).
+   every commit — `grep -n "^date" `, or `co -p` if RCS tools exist), and
+   `var/log/pan/dagger.log` for **what was run** from the CLI/API and when:
+   one `OPCMD: handler "<command>"` / `finish handler …` pair per operational
+   command, timestamped — `grep -h "OPCMD" var/log/pan/dagger.log*` around
+   the failure minute says whether a human restarted, cleared or tested
+   something just before it broke.
 
 ## Step 2 — logs: aliases and rotations (the two classic misses)
 
@@ -187,16 +201,16 @@ its own state is" without parsing anything. Then, per domain (P0 files first
 | symptom | read first | then | grep for / interpret |
 |---|---|---|---|
 | **VPN site-à-site** | `ikemgr-ng.log`* | `keymgr*.log`, `> show vpn ike-sa / ipsec-sa / flow` | `failed to get sainfo`=Phase2 proxy-ID mismatch · `no proposal chosen`=no common crypto · `AUTHENTICATION_FAILED`=PSK (case-sensitive!) or cert · `TS_UNACCEPTABLE`=IKEv2 selector mismatch · SPI mismatch=peer rebooted, stale SA · `DPD: peer dead`=connectivity, NOT negotiation. Phase 1 must establish before any Phase 2 diagnosis. |
-| **HA / failover** | `ha_agent.log`, `> show high-availability all` | `path-monitoring`, `state-synchronization`, `brdagent.log` | Classify the cause: heartbeat_loss (HA1 flap/peer down) · link_monitoring (NIC → check failure-condition any/all) · path_monitoring · **commit within 120 s of failover = spurious** (commits pause heartbeats 5–15 s) · process_restart. Preemption disabled = no auto-failback. |
-| **GlobalProtect** | `gpsvc.log`, `show_log_globalprotect.txt`, `gp_broker.log` | `sslvpn-access.log`, `sslvpn_ngx_error.log`, `rasmgr.log` | Split by WHERE the client stops: portal (config fetch) → auth → gateway (tunnel) → data. `Authentication failed` in gpsvc = **not a GP problem**, pivot to authd. Portal-vs-gateway auth-profile mismatch = auth OK then fails seconds later. |
+| **HA / failover** | `ha_agent.log`, `> show high-availability all` | `path-monitoring`, `state-synchronization`, `brdagent.log`; `saved-configs/.ha-remote-rc.xml` = the **peer's** running config, for a config-sync mismatch (`diff <(xmllint --format running-config.xml) <(xmllint --format .ha-remote-rc.xml)`) | Classify the cause: heartbeat_loss (HA1 flap/peer down) · link_monitoring (NIC → check failure-condition any/all) · path_monitoring · **commit within 120 s of failover = spurious** (commits pause heartbeats 5–15 s) · process_restart. Preemption disabled = no auto-failback. |
+| **GlobalProtect** | `gpsvc.log`, `show_log_globalprotect.txt` (one row per portal/gateway event — columns: time, gateway/portal, status, event, region, `domain\user`; can be the biggest text file of the TSF, 64 MB seen: grep it by user or by status, never open it), `gp_broker.log` | `sslvpn-access.log`, `sslvpn_ngx_error.log`, `rasmgr.log` | Split by WHERE the client stops: portal (config fetch) → auth → gateway (tunnel) → data. `Authentication failed` in gpsvc = **not a GP problem**, pivot to authd. Portal-vs-gateway auth-profile mismatch = auth OK then fails seconds later. |
 | **Auth** | `authd.log`, `useridd.log` | `show_log_system.txt`, `sslmgr.log` (certs) | LDAP `rc=49`=bad bind credentials; RADIUS timeouts; SAML clock skew. **An exposed GP portal is brute-forced**: `grep -c "failed authentication for user" tmp/cli/logs/show_log_system.txt` then `grep -o "for user '[^']*'" … \| sort \| uniq -c \| sort -rn \| head` — guessed names (`error`, `request`, `port`, `cli`, `usr`, `test`, `admin`) and one source IP per burst are a scanner, not a customer problem; the `From:` IP of the same lines in `authd.log` says where it comes from. Real users fail with their real names, a few times, from a few IPs. |
-| **User-ID** | `useridd.log`, `distributord.log` | `> show user ip-user-mapping…` | Identification ≠ authentication: nobody fails a login, policy just mis-applies / user shows `unknown`. A login failing = auth domain instead. |
+| **User-ID** | `useridd.log`, `distributord.log` | `> show user ip-user-mapping-mp all` (the MP's table), `> show user user-id-agent statistics` | Identification ≠ authentication: nobody fails a login, policy just mis-applies / user shows `unknown`. A login failing = auth domain instead. |
 | **Crash / reboot** | `crashinfo/`, `reboot.log`, `sysd.log` | `messages`, `mce.log`, `bios.log`, `history.log` | `grep -E "panic|oops|segfault|watchdog|Killed process"`. PID change in `mp-monitor.log` = daemon restart without reboot. **After any upgrade, check for crashes even if the symptom isn't crash-shaped.** |
 | **CPU** | `dp-monitor.log`, `mp-monitor.log`, `> show running resource-monitor` | `var/log/sa/sar*` (31-day history) | DP CPU = traffic-side (sessions, decryption, App-ID); MP CPU = reports/logging/configd. DP > 80 % sustained 3+ snapshots = critical. Correlate spikes with commits/content updates. |
 | **Memory** | `mp-monitor.log`, `> show system resources` | `grep -E "Out of memory|oom-killer"` | Growth across 3+ snapshots is the signal, never one reading. Linux cache ≠ pressure. LEAK (one RSS rising) vs LOAD (tracks sessions/tunnels) vs steady-high (benign). A leaking daemon is a future-crashing daemon. |
 | **Drops / perf / buffers** | `> show counter global filter delta yes`, `> show running resource-monitor` | `dp-monitor.log`, `> show session info`, `> debug dataplane pool statistics`, `> show zone-protection` | See the buffers/PBP/counters section below. Read `drop`/`error` severities first; the **delta** section says what happens now. `flow_policy_deny`+`tcp_rst_from_self`=policy RST · `flow_fwd_mtu_exceeded`+`ip_df_drop`=MTU in tunnel path (big packets fail, ping works) · `flow_tcp_non_syn` right after failover is EXPECTED. Depleted DP pools drop silently. |
-| **Interfaces** | `> show interface all`, `pan_ifmgr.log` | `brdagent.log` (port/ASIC), `l2ctrld.log` | Physical first — it invalidates every higher-layer diagnosis on the path. CRC/FCS on one port=cable/SFP · late collisions=duplex mismatch · `dot1q_tag_err`=VLAN arriving on a port not carrying it. |
-| **Disk** | `> show system disk-space`, `df` in techsupport | `logpurger.log`, `messages` | WHICH partition decides the cause: /var/log=logrotate stuck (du≠df = deleted-fd) or forgotten debug level · /opt/panrepo=old images (safe cleanup) · /opt/panlogs=at quota by design, only purge *errors* matter · root full=the dangerous one (commits fail). Cores on disk = pivot to crash, don't delete them. |
+| **Interfaces** | `> show interface all`, `pan_ifmgr.log` | `brdagent.log` (port/ASIC), `l2ctrld.log`, `> show system environmentals` (temperature, fans, PSU — a port that flaps with a failed fan or PSU is a hardware case) | Physical first — it invalidates every higher-layer diagnosis on the path. CRC/FCS on one port=cable/SFP · late collisions=duplex mismatch · `dot1q_tag_err`=VLAN arriving on a port not carrying it. |
+| **Disk** | `> show system disk-space`, `> show system logdb-quota` (per-log-type quota vs usage — a log type at 100 % is purging by design, not full) | `logpurger.log`, `messages` | WHICH partition decides the cause: /var/log=logrotate stuck (du≠df = deleted-fd) or forgotten debug level · /opt/panrepo=old images (safe cleanup) · /opt/panlogs=at quota by design, only purge *errors* matter · root full=the dangerous one (commits fail). Cores on disk = pivot to crash, don't delete them. |
 | **Routing** | `routed.log` or `frr_export.log`+`var/log/pan/frr/`+`etc/frr/` | `> show routing route` / `> show advanced-routing …`, `bfd.log` | Advanced-routing engine = FRR (`advanced-routing: on` in `show system info`; its daemons log under `var/log/pan/frr/`); legacy = routed. Check which one owns the config. |
 | **Commit / config** | `configd.log`, `commit_stats.log`, `show_log_config.txt` | `cfg-audit.xml,v` | `commit_stats.log` has per-phase durations (Jobid/Start/Fin blocks). |
 | **Content / AV updates** | `paninstaller_content.log`, `contentd.log` | `opt/pancfg/mgmt/global/*info.xml` | Correlate the update **time** with the symptom start before blaming it. |
@@ -298,8 +312,12 @@ points: `TSF-GUIDE.md` §5. Two specifics:
 - **mtime is meaningless** post-extraction; dates live in filenames and line
   content.
 - **Huge vendor files** — `updates/*/global.xml` (37 MB App-ID DB),
-  `regip/reg_ips.xml`, `*.dat`, `fs_manifest.txt`, `req_stats.log` — are
-  almost never the answer; don't burn context reading them.
+  `regip/reg_ips.xml`, `*.dat`, `fs_manifest.txt`, `req_stats.log`,
+  `tmp/cli/logs/sysd_objects_meta.xml` (the whole sysd tree as XML, 100 MB on
+  a chassis — `sdb.txt` is the same data as grep-able dotted keys),
+  `last-candidatecfg-audit.xml,v` (RCS history of every *candidate*, tens of
+  MB — `cfg-audit.xml,v` is the one with the commits) — are almost never the
+  answer; don't burn context reading them.
 - **Binary files** (`rule-hit-count.bin`, `wtmp`/`btmp`/`lastlog`,
   `var/log/sa/sa*`, `var/log/pan/sslvpn-access/sslvpn-task.log*.gz` — one
   serialized `GpTaskStat` record per GP request: task id, vsys, source IP,

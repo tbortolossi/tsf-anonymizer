@@ -77,7 +77,7 @@ rotations before concluding "nothing in the log".
 
 ## 3. Where to start: the techsupport txt
 
-`tmp/cli/techsupport_<model>_<date>.txt` is ~20 000 lines of `> command`
+`tmp/cli/techsupport_<devicename>_<date>.txt` is ~20 000 lines of `> command`
 headers followed by output. Search for the `> ` prefix to navigate. The
 sections worth reading on every case, in order:
 
