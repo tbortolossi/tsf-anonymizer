@@ -524,7 +524,7 @@ class TestRealTsfLessonsRound4:
 class TestRealTsfLessonsRound5:
     def test_parent_domains_are_registered_and_wildcards_rewritten(self, anon):
         anon.register_fqdn("igw.home-lab.example")
-        assert "home-lab.example" in anon.fqdn_map and "com" not in anon.fqdn_map
+        assert "home-lab.example" in anon.fqdn_map and "example" not in anon.fqdn_map
         anon.build_patterns()
         out = anon.anonymize_text("https://home-lab.example/x <member>*.home-lab.example</member> igw.home-lab.example sub.home-lab.example")
         assert "home-lab" not in out
