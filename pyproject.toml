@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tsf-anonymizer"
-version = "0.2.0"
+version = "0.2.1"
 description = "Anonymize PAN-OS tech support files (TSF) without losing debugging value, and prove it with a compare mode."
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

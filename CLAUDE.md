@@ -100,6 +100,19 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   (slot 6, eth2, VLAN 252), and every one became an e-mail — and `252.acl` a
   domain — on a real chassis. The price is a genuine `x@163.com`, absent
   from firewall logs.
+- **A stray NUL does not make a file binary.** `is_binary_bytes` measured on
+  ~700 binary-classified files of eight real TSFs: `slot<n>-console-output.log`
+  has one NUL in 4 KB and 200 identifiers; GpTaskStat records have 5 % NUL
+  and 16 % control bytes; `wtmp` 90 % NUL; a zip 10 % control. Text with
+  NULs is ≤ 2 % NUL, ≤ 5 % other control bytes and ≥ 8 newlines per 4 KB —
+  all three, because rewriting a length-prefixed format corrupts it. `.ebl`
+  EDL caches are plain IP lists (340 identifiers in one) and left
+  `BINARY_EXTENSIONS`. The compare classifies with the same function.
+- **The device's own serial can look like a busybox date** (`0101…` =
+  MMDDhhmmYYYY) and be refused by the fallback regex — 63 823 raw hits in
+  `PA_<serial>_dt_…` telemetry file names on a real PA-7050 whose compare
+  reported nothing. `_prescan_system_info` registers it authoritatively, and
+  the known-serial trie has no date exclusion.
 - **Every mapping entry is a replacement that actually happens.** An entry
   registered whole but whose name embeds an identity an *earlier* pass owns
   can never fire — the earlier pass rewrites that part first. Two real cases:

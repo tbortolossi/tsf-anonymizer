@@ -912,3 +912,34 @@ class TestSysdKeysAreNotEmails:
     def test_real_addresses_still_match(self, anon):
         out = anon.anonymize_text("mail ops@acme-corp.fr, alert to j.doe@mail.example.org.")
         assert "acme-corp.fr" not in out and "j.doe" not in out
+
+
+class TestBinaryHeuristic:
+    """Ratios measured on eight real TSFs (see is_binary_bytes)."""
+
+    def test_console_log_with_a_stray_nul_is_text(self):
+        from tsf_anonymizer.core import is_binary_bytes
+        chunk = (b"Tue Aug 26 20:48:43 2025: Welcome to the PanOS Bootloader.\n" * 60)[:4000] + b"\x00" + b"ok\n" * 30
+        assert not is_binary_bytes(chunk)
+
+    def test_length_prefixed_record_format_is_binary(self):
+        from tsf_anonymizer.core import is_binary_bytes
+        rec = b"\x00\x00\x05\xfe\xfe\x04\xa6\x7f\x03\x01\x01\nGpTaskStat\x01\xff\x80\x00\x01>\x01\x06TaskId\x01\x06\x00\x01\x08VsysName\x01\x0c\x00"
+        assert is_binary_bytes(rec * 100)
+
+    def test_compressed_stream_is_binary(self):
+        import random
+        from tsf_anonymizer.core import is_binary_bytes
+        random.seed(3)
+        chunk = bytes(random.randrange(256) for _ in range(4096))
+        assert is_binary_bytes(chunk)
+
+    def test_edl_cache_is_text(self, tmp_path):
+        p = tmp_path / "vsys1_Feed.ebl"
+        p.write_bytes(b"10.0.0.1\n10.0.0.2\n" * 50)
+        assert not is_binary_file(p)
+
+
+def test_brute_force_word_port_is_not_a_username(anon):
+    line = "failed authentication for user 'port'.  Reason: Invalid username/password."
+    assert anon.anonymize_text(line) == line

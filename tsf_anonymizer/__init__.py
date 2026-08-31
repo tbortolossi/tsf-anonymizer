@@ -14,4 +14,4 @@ Two halves, deliberately independent of each other:
 from .core import Anonymizer, AnonymizeReport, anonymize_tsf  # noqa: F401
 from .compare import CompareReport, compare_archives, compare_trees  # noqa: F401
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
