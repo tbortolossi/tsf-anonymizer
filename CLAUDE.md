@@ -66,6 +66,12 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   `Apple`, `bgp`, `enabled` were registered as objects and then rewritten
   inside XML tags. The boundaries `(?<![\w.\-<\/])…(?![\w\-=])` are the
   second line of defence: never match right after `<` / `</`, never before `=`.
+- **A config that does not parse is still prescanned.** A truncated or
+  rejected `failed_candidatecfg.xml` used to register *nothing* — identifiers
+  the compare cannot see, since the compare only knows the mapping.
+  `_salvage_prescan_xml` pull-parses the parseable prefix with the parent
+  context intact, so the vendor-catalog guardrails above still apply; a bare
+  regex sweep over `<entry name=…>` would have re-registered the catalog.
 - **A fake value is never an input to a later pass.** `Anonymizer._fakes`
   holds every pseudonym handed out; `anon_user`, `anon_ip`, `anon_serial` and
   `register_named_object` return a fake unchanged. Without it, `user 'Zone-A'`
@@ -74,19 +80,37 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   fake IPs skip any address already seen as an original. When a collision
   still happens (the customer uses 100.64/10), `MappingIndex.collisions`
   reports it as such — separately from leaks, which it would otherwise inflate.
-- **Serial fallback: 12 digits not starting `0000`, or `007`+12.** Zero-padded
-  counters in `show counter` output are 12 digits too; 3 434 of them were
-  "anonymized" on the first real run.
+- **Serial fallback: 12 digits not starting `0000`, or `007`+12 — and never
+  right after a dot.** Zero-padded counters in `show counter` output are 12
+  digits too; 3 434 of them were "anonymized" on the first real run. logdb
+  file names are `pan.000100628656.log`: thousands of those sequence numbers
+  became fake serials, producing exactly the "changed beyond the mapping"
+  warnings the compare exists to raise (its numeric boundary already excluded
+  a leading dot; the anonymizer now uses the same one, known serials included).
+- **Every mapping entry is a replacement that actually happens.** An entry
+  registered whole but whose name embeds an identity an *earlier* pass owns
+  can never fire — the earlier pass rewrites that part first. Two real cases:
+  `<entry name="acme\jdupont">` (userinfo.xml) is decomposed at prescan into a
+  domain and a username (119 299 unexplained lines otherwise), and
+  `build_patterns` drops object keys a FQDN/e-mail matches inside ('Enloe
+  Domain controllers' after 'Enloe' → host1208). Same doctrine as the CN
+  dedup: one identity, one pseudonym, owned by the pass that wins.
 - **Compare never runs difflib on a long line character by character.**
   `_changed_spans` switches to token level past 2 000 chars and gives up
   (one span, unexplained) past 4 000 tokens; XML lines of 24 000 chars exist.
-- **Identities are discovered before anything is rewritten, in two passes.**
-  XML prescan (`prescan_tree`) for objects, hosts, serials, contacts; then
-  `prescan_text_identities` over every text file for usernames (log
-  phrasings), e-mails and `hostname X` phrases. Usernames then go through a
-  trie and are replaced everywhere (`UID="x"`, `(x)`), not only in the
-  phrasing that revealed them. Tables that still grow mid-run (an e-mail
-  domain in file 3) trigger a recompile at the next file — `_built_for`.
+- **Every identity is discovered before anything is rewritten, then the
+  tables freeze.** XML prescan (`prescan_tree`) for objects, hosts, serials,
+  contacts; then `prescan_text_identities` over every text file for usernames
+  (log phrasings), e-mails, `hostname X` phrases — and IPs and
+  fallback-shaped serials, so that *nothing* is left to discover at rewrite
+  time. Usernames then go through a trie and are replaced everywhere
+  (`UID="x"`, `(x)`), not only in the phrasing that revealed them — which is
+  also why the frozen rewrite skips the phrasing regex entirely: the trie
+  already covers every hit it could find. `anon.frozen = True` turns any
+  would-be allocation during the rewrite into an unchanged value plus a
+  logged `FileOutcome.warnings` entry — a bug to surface, never silent
+  divergence. The `_built_for` recompile is now a safety net for direct
+  (unfrozen) API use, not something a TSF run relies on.
 - **A FQDN registers its parent domains** down to the registrable one, and
   the FQDN regex allows a dot before: `https://apex/` and `*.apex` survived a
   raw grep of the anonymized real TSF while the compare reported 0 leaks,
@@ -104,9 +128,23 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   milliseconds; `\d{12,15}` turned every such timestamp into a fake serial.
 - **Same original → same pseudonym**, within a run and across runs seeded
   with the same `mapping.json` (`Anonymizer.from_mapping`).
-- **Never anonymize** PAN-OS interface names, `BUILTIN_OBJECTS`,
-  `VENDOR_DOMAINS`, netmasks, loopback/multicast/link-local. Downstream tools
-  match counters and interfaces by name.
+- **Never anonymize** PAN-OS interface names, `BUILTIN_OBJECTS` (`www`
+  included — a service named `www` rewrote http://www.w3.org in every vendor
+  XML namespace), `VENDOR_DOMAINS`, netmasks, loopback/multicast/link-local,
+  or `_USER_STOPWORDS` as usernames — brute-force attempts on an exposed GP
+  portal log `failed authentication for user 'error'` (also 'request',
+  'block', 'usr'), and pseudonymizing those words rewrote every standalone
+  "error" in every log. A word that identifies nobody needs no pseudonym.
+  Object and user tries also never match right after `//` (a URL authority)
+  and share the glued-timestamp trailing boundary — the compare has both,
+  and every boundary the two sides do not share is a future
+  unexplained-or-leak report. An `<address>` field holding `10.18.2.254/24`
+  is the IP pass's territory (`_IP_LIKE_RE`, not `_IPV4_ONLY_RE`): as a
+  "FQDN" it lost its netmask. `MappingIndex.apply` mirrors the anonymizer's
+  pass order (fqdns → objects → numeric) because a key can contain another
+  category's key — an address object named `FW-Outside-10.30.135.97` is one
+  FQDN identity, and applying the IP first destroyed the key (11 000
+  "unexplained" lines per config).
 - **The web UI handles the un-anonymized archive and the mapping that
   reverses it**, so HTTP Basic auth (`TSF_PASSWORD`) covers *every* route —
   `/api/health` leaks the data dir and job count, `/static` is a mount, not a
@@ -127,22 +165,79 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   survives a re-issue.
 - **The container runs as the host user** (`user:` in compose) so `./data`
   stays deletable without `sudo`.
-- **A batch chains, it does not fan out.** Several TSFs dropped together are
-  separate jobs; a shared mapping is passed by `seed_from` pointing at the
-  *previous* job, so the mapping accumulates instead of restarting from the
-  first archive. `_seed_ancestor` walks back over a job that produced no
-  mapping: a failure in the middle of a batch must cost neither the shared
-  pseudonyms of the archives after it nor their run. An uploaded seed wins
-  over the chain.
+- **A batch chains, it does not fan out — and it chains by device, not by
+  batch.** Several TSFs dropped together are separate jobs; a shared mapping is
+  passed by `seed_from`, which the server resolves at submit time to the
+  previous job of the same `group` — the firewall the archive comes from
+  (`JobStore.latest_in_group`). Two firewalls in one drop are two groups, hence
+  two mappings that never link an identifier across devices; the same group
+  name a month later continues *that* firewall's mapping instead of starting
+  over. The head of a group is its most recently **created** job, not a
+  finished one: inside a batch the next upload arrives while the previous
+  archive is still queued, and `_seed_ancestor` walks back at run time over a
+  job that produced no mapping — a failure in the middle of a batch must cost
+  neither the shared pseudonyms of the archives after it nor their run. An
+  uploaded seed wins over the chain, and seeds the first archive of *each*
+  group. The UI guesses the device from the filename (PAN-OS names a TSF
+  `<date>_<time>_techsupport.tgz`, so what a human added around that is the
+  device) and the guess is editable: grouping is the user's call, never the
+  filename's.
+- **Archives run several at a time; a chain still runs in order.** One TSF is
+  two long single-core loops (anonymize, then compare) over a few thousand
+  files, so one archive used one core and a batch of eight took a working day.
+  `JobStore` runs `TSF_WORKERS` archives at once (cpu/4, capped at 4) and
+  `_pump` starts a pending job only when `_chain_clear` says nothing it seeds
+  from is still queued or running — the *whole* chain, since a parent that
+  failed fast may have a grandparent still running. The wait happens in the
+  queue, never inside a worker: a chain of jobs each blocking a worker
+  deadlocks a full pool. Because the wait is per chain, a batch of unrelated
+  firewalls fans out while a batch of one firewall stays a chain. The job
+  threads only *orchestrate*: CPU work on threads serialises on the GIL (a
+  4-job batch ran on one core, and one job's regex pass starved another's
+  extract into looking hung), so every heavy phase runs in worker processes.
+- **Heavy passes are spread over processes by detect-then-freeze.**
+  `compare_one` is a pure function of the sidecar, so `compare_trees` maps it
+  over a `forkserver` pool (`TSF_COMPARE_WORKERS`) and collects reports back
+  in path order. The anonymize side earns the same right in two steps
+  (`TSF_ANON_WORKERS`): detection (`_detect_in_file`, stateless, parallel)
+  reports what each file reveals, the *parent* allocates pseudonyms in path
+  order — so counters fall exactly as a sequential run's would — and the
+  rewrite then runs with frozen tables, a pure lookup that `anonymize_tree`
+  maps over a pool. Allocation during a parallel rewrite would make the
+  mapping depend on scheduling and break "same original → same pseudonym";
+  freezing is what makes the parallelism sound, and `workers=1` vs `workers=N`
+  is asserted byte-identical by test. forkserver, not fork: this runs on a
+  worker thread of a live server, and forking a threaded process inherits
+  locks held by other threads. One nuance vs the old sequential code:
+  detection scans the *original* text, so an IP or serial embedded inside a
+  replaced identifier can enter the mapping where the old code never saw it —
+  a superset, never a miss.
+- **Rewritten `.gz` members are recompressed at level 6, not gzip's default
+  9** — measured 12 MB/s at 9 against 38 MB/s at 6 for the same output size,
+  the same trade `repack_archive` already makes for the outer archive.
 - **Every run keeps its own log.** `_capture_log` tees the package logger into
   `output/job.log` for the duration of one job (they run one at a time, so one
-  handler captures exactly one job), and a crash also stores its traceback in
+  handler is filtered to that job's own thread, so concurrent jobs do not bleed
+  into each other's file), and a crash also stores its traceback in
   `job.error_detail`. The container's stderr is not a log: it is gone the next
   time the container is recreated, and it is the only place that said which
   file and which pattern broke. `core` logs the files it had to skip as
   warnings, and those surface nowhere else — the UI opens the panel by itself
   when a job failed. A failed job also *keeps the phase it died in* so the flow
-  marks the step that broke.
+  marks the step that broke. `Job.phase_durations` records the seconds each
+  phase took (also logged at every transition): a slow run says *where* it was
+  slow, instead of leaving that to be reconstructed from guesses.
+- **A phase that runs for minutes counts.** `extract`, `copy` and `repack` used
+  to report `0/1` then `1/1`: on a real TSF the bar sat at 0 % for minutes and
+  a slow run could not be told from a hung one. They now report ~100 updates
+  whatever the size — `extract` drives `extractall` in slices (which keeps its
+  directory-attribute semantics and reads the stream forward-only), `copy`
+  counts through `copytree(copy_function=…)`, `repack` through the member loop.
+  `Job.updated_at` records when the run last said anything, which is what lets
+  the UI say *quiet for 4m* instead of leaving "running" to mean both. The
+  jobs list polls every 2 s while anything is queued or running — a batch is
+  watched from the list, not from one job's page — and every timer is cleared
+  when the view goes away.
 - **A capped list says it is capped** (`truncated` in diff hunks, `total` in
   the report endpoint, top-50 leaks per file with a total count).
 
@@ -154,7 +249,17 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
 - Free-text fields (rule descriptions, comments, login banners) are not
   scanned for company names; `<contact>` and `<full-name>` are.
 - Binary files may embed identifiers; the compare report flags them as
-  warnings rather than the anonymizer rewriting them.
+  warnings rather than the anonymizer rewriting them. The big real-world case
+  is `var/log/pan/sslvpn-access/sslvpn-task.log*.gz`: a *binary* serialized
+  format (GpTaskStat records, length-prefixed strings) holding SrcIp/UserName/
+  Portal per record — ~27 000 flagged identifiers per file on a real TSF.
+  Rewriting length-prefixed strings would corrupt the framing; the operator
+  decides whether such files may ship — `redact_binaries` (a per-job opt-in:
+  UI checkbox, `--redact-binaries`) replaces such payloads with
+  `REDACTED_PAYLOAD` instead. The core decides with its *own* scanner
+  (deliberately duplicated boundaries, not shared code) and the compare
+  verifies each redaction was warranted against the original — an
+  unwarranted one is a warning, gratuitous data loss.
 - IPv6 untouched; usernames only in the log phrasings `_user_re` knows
   (then replaced everywhere).
 - Addresses rendered as byte arrays (`[0 0 … 255 255 10 0 0 254]` in Go

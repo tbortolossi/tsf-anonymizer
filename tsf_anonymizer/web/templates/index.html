@@ -37,20 +37,35 @@
       <ul id="file-list" class="file-list"></ul>
       <fieldset id="batch-seed" class="seed" hidden>
         <legend>Pseudonyms across the batch</legend>
-        <label class="check"><input type="radio" name="seed_policy" value="shared" checked>
-          One shared mapping <span class="opt">— same customer: an identifier gets the same
-          pseudonym in every archive of the batch (each job seeds from the previous one)</span></label>
-        <label class="check"><input type="radio" name="seed_policy" value="separate">
-          A separate mapping per TSF <span class="opt">— unrelated customers: nothing links an
-          identifier from one archive to another</span></label>
+        <div id="seed-policy" hidden>
+          <label class="check"><input type="radio" name="seed_policy" value="shared" checked>
+            One shared mapping <span class="opt">— one firewall, or one customer: an identifier gets
+            the same pseudonym in every archive of the batch (each job seeds from the previous
+            one)</span></label>
+          <label class="check"><input type="radio" name="seed_policy" value="device">
+            One mapping per firewall <span class="opt">— several devices dropped together: archives
+            of the same firewall share a mapping, different firewalls stay unrelated. The name next
+            to each file is the firewall; it is guessed from the filename — edit it to regroup</span></label>
+          <label class="check"><input type="radio" name="seed_policy" value="separate">
+            A separate mapping per TSF <span class="opt">— unrelated archives: nothing links an
+            identifier from one to another</span></label>
+        </div>
+        <label id="device-one">Firewall <span class="opt">(optional — name the device; a TSF
+          uploaded later under the same name continues that firewall's mapping instead of starting
+          a new one)</span>
+          <input type="text" id="batch-device" placeholder="e.g. fw-paris-01" maxlength="40"></label>
       </fieldset>
       <label>Seed mapping <span class="opt">(optional — reuse a previous <code>mapping.json</code>
-        so a new TSF from the same customer gets the same pseudonyms; with a shared batch it seeds
-        the first archive and travels down the chain)</span>
+        so a new TSF from the same customer gets the same pseudonyms; it seeds the first archive of
+        each mapping and travels down the chain from there)</span>
         <input type="file" name="seed_mapping" accept=".json"></label>
       <label class="check"><input type="checkbox" name="delete_original" value="true" checked>
         Delete the original after a clean verification <span class="opt">(the un-anonymized upload and
         its extracted tree are removed; with problems it is kept for review)</span></label>
+      <label class="check"><input type="checkbox" name="redact_binaries" value="true">
+        Redact binary files that embed identifiers <span class="opt">(e.g. sslvpn-task logs — their
+        payload is replaced by a marker instead of shipping the identifiers; the verification checks
+        each redaction was warranted)</span></label>
       <button type="submit">Start</button>
       <div class="upload-progress" hidden><div class="bar"></div><span class="label"></span></div>
       <p id="batch-log" class="notes"></p>

@@ -155,7 +155,32 @@ button.secondary:disabled:hover { background: var(--card); }
   background: var(--bg-soft);
 }
 .file-list li .opt { margin-left: auto; font-size: 12px; }
+.file-list li input.dev {
+  font: inherit; font-size: 12px; font-weight: 400; width: 15ch; padding: 3px 7px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: var(--bg); color: var(--fg);
+}
+.file-list li input.dev:focus { outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft); }
+#device-one input { font: inherit; font-weight: 400; margin-top: 6px; padding: 5px 9px;
+  min-width: 22ch; border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: var(--bg); color: var(--fg); }
+#seed-policy + #device-one { margin-top: 12px; }
 .file-list li.notes { background: none; border: 0; padding: 2px 2px; }
+
+/* A job in the list says how far it is: one archive of a batch runs for the
+   better part of an hour, and the row is where that is watched. */
+.row-progress { height: 4px; max-width: 170px; margin: 5px 0 3px; overflow: hidden;
+  background: var(--line); border-radius: 999px; }
+.row-progress .bar { height: 100%; background: var(--accent); transition: width .3s linear; }
+/* One segment per phase: a done phase is full, the current one fills, the
+   rest are empty — the bar never appears to jump backwards between phases. */
+.row-progress.segs { display: flex; gap: 2px; height: 5px; background: none; overflow: visible; }
+.row-progress.segs .seg { flex: 1; background: var(--line); border-radius: 2px; overflow: hidden; }
+.row-progress.segs .seg .fill { height: 100%; background: var(--accent); transition: width .3s linear; }
+.row-progress.segs .seg.cur { outline: 1px solid var(--accent); outline-offset: 1px; }
+.timings { margin-top: -8px; }
+.timings b { font-weight: 650; color: var(--fg); }
 
 /* -- progress -------------------------------------------------------------- */
 .upload-progress {

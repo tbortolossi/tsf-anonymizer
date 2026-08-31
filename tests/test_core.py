@@ -569,3 +569,245 @@ def test_object_glued_to_a_timestamp_is_still_replaced():
     assert "home-lab" not in out and "2026-04-05 09:38:00" in out
     # but a name glued to arbitrary digits is a different token and stays
     assert anon.anonymize_text("GP_globalprotect_home-lab_example42") == "GP_globalprotect_home-lab_example42"
+
+
+def test_every_phase_reports_how_far_it_is(tsf, tmp_path):
+    """extract, copy and repack must count, not just start and stop.
+
+    On a real TSF each of them runs for minutes; a bar that only knows 0/1 then
+    1/1 sits at 0 % the whole time and cannot be told from a hung run.
+    """
+    seen = []
+    anonymize_tsf(tsf, tmp_path / "out.tgz",
+                  progress=lambda phase, done, total, msg: seen.append((phase, done, total)))
+
+    for phase in ("extract", "copy", "repack"):
+        steps = [(d, t) for p, d, t in seen if p == phase]
+        assert steps, f"{phase} reported nothing"
+        assert max(t for _, t in steps) > 1, f"{phase} still reports a 0/1 → 1/1 bar"
+        assert all(0 <= d <= t for d, t in steps), f"{phase} reported an impossible position"
+        assert steps[-1][0] == steps[-1][1], f"{phase} did not end full"
+
+
+class TestDetectThenFreeze:
+    """The rewrite runs with frozen tables: everything is discovered before
+    anything is rewritten, which is what makes the rewrite a pure function
+    and the process pool safe."""
+
+    def test_parallel_run_is_identical_to_sequential(self, tmp_path, tsf):
+        out_seq, out_par = tmp_path / "seq.tgz", tmp_path / "par.tgz"
+        _, m_seq = anonymize_tsf(tsf, out_seq, workers=1)
+        _, m_par = anonymize_tsf(tsf, out_par, workers=2)
+        assert m_seq == m_par
+        with tarfile.open(out_seq) as t1, tarfile.open(out_par) as t2:
+            names1 = [m.name for m in t1.getmembers()]
+            assert names1 == [m.name for m in t2.getmembers()]
+            for name in names1:
+                a, b = t1.getmember(name), t2.getmember(name)
+                if not a.isfile():
+                    continue
+                p1, p2 = t1.extractfile(a).read(), t2.extractfile(b).read()
+                if name.endswith(".gz"):
+                    # gzip stamps the write time in its header; the payload
+                    # is what must match.
+                    try:
+                        p1, p2 = gzip.decompress(p1), gzip.decompress(p2)
+                    except OSError:
+                        pass
+                assert p1 == p2, name
+
+    def test_rewrite_allocates_nothing_after_the_prescan(self, tmp_path, tsf):
+        report, full_mapping = anonymize_tsf(tsf, tmp_path / "out.tgz")
+        _, prescan_mapping = anonymize_tsf(tsf, None, mapping_only=True)
+        assert prescan_mapping == full_mapping
+        assert not any(f.warnings for f in report.files)
+
+
+class TestSalvagePrescan:
+    """A config that fails ET.parse used to register nothing — its identifiers
+    went out un-anonymized, invisible to the compare mode. The pull-parser
+    salvage reads the parseable prefix with parent context intact."""
+
+    def test_truncated_config_still_registers_its_objects(self, tmp_path):
+        broken = CONFIG_XML[:CONFIG_XML.rindex("<certificate")]
+        p = tmp_path / "failed_candidatecfg.xml"
+        p.write_text(broken)
+        anon = Anonymizer()
+        prescan_config_xml(p, anon)
+        assert "Zone-Prod-DMZ" in anon.named_obj_map
+        assert "GW-Paris-Primary" in anon.named_obj_map
+        assert "acme-corp.local" in anon.fqdn_map
+
+    def test_salvaged_prefix_still_skips_the_vendor_catalog(self, tmp_path):
+        broken = (
+            "<config>"
+            "<predefined><application><entry name='vendor-app-x'/></application></predefined>"
+            "<global><application><entry name='vendor-app-y'/></application></global>"
+            "<devices><entry name='localhost.localdomain'><vsys><entry name='vsys1'>"
+            "<zone><entry name='Zone-Cut-Test'/></zone>"
+        )
+        p = tmp_path / "failed_candidatecfg.xml"
+        p.write_text(broken)
+        anon = Anonymizer()
+        prescan_config_xml(p, anon)
+        assert "Zone-Cut-Test" in anon.named_obj_map
+        assert "vendor-app-x" not in anon.named_obj_map
+        assert "vendor-app-y" not in anon.named_obj_map
+
+    def test_empty_xml_registers_nothing_and_does_not_raise(self, tmp_path):
+        p = tmp_path / "dp-config.xml"
+        p.write_text("")
+        anon = Anonymizer()
+        prescan_config_xml(p, anon)
+        assert not anon.named_obj_map
+
+
+class TestRealTsfWarningFixes:
+    """Each of these reproduces a warning family from a real 2026-08-31 run:
+    thousands of 'changed beyond the mapping' lines, all traced to mapping
+    entries that could never fire (or should never have existed)."""
+
+    def test_logdb_filename_sequence_is_not_a_serial(self, anon):
+        anon.build_patterns()
+        line = "dst_profile : /opt/pancfg/mgmt/logdb/traffic/1/20260225/pan.000100628656.log"
+        assert anon.anonymize_text(line) == line
+
+    def test_declared_serial_after_a_dot_is_a_filename_not_a_serial(self, anon):
+        anon.anon_serial("001901000123")
+        anon.build_patterns()
+        assert "9" + "0" * 8 not in anon.anonymize_text("kept: pan.001901000123.log")
+        assert "001901000123" not in anon.anonymize_text("serial: 001901000123")
+
+    def test_domain_backslash_user_entry_is_two_identities(self, tmp_path, anon):
+        xml = ('<config><devices><users>'
+               '<entry name="acme\\jdupont" id="21621"/>'
+               '</users></devices></config>')
+        p = tmp_path / "userinfo.xml"
+        p.write_text(xml)
+        prescan_config_xml(p, anon)
+        anon.build_patterns()
+        out = anon.anonymize_text("login acme\\jdupont ok; portal acme; user 'jdupont'")
+        assert "acme" not in out and "jdupont" not in out
+        assert "\\" in out  # the DOMAIN\\user shape survives, the identities do not
+        assert not any("\\" in k for k in anon.named_obj_map)
+
+    def test_stopword_domain_registers_only_the_user(self, tmp_path, anon):
+        xml = '<config><devices><users><entry name="corp\\jdoe"/></users></devices></config>'
+        p = tmp_path / "userinfo.xml"
+        p.write_text(xml)
+        prescan_config_xml(p, anon)
+        anon.build_patterns()
+        out = anon.anonymize_text("login corp\\jdoe")
+        assert "jdoe" not in out and "corp\\" in out
+
+    def test_object_embedding_a_fqdn_is_not_a_dead_mapping_entry(self, anon):
+        anon.register_fqdn("enloe")
+        anon.register_named_object("Enloe Domain controllers", "srv-prof")
+        anon.build_patterns()
+        out = anon.anonymize_text("server profile 'Enloe Domain controllers'")
+        assert "enloe" not in out.lower()
+        # the whole-name key can never fire (the FQDN pass wins on 'Enloe'),
+        # so it must not sit in the mapping as an entry that never happens
+        assert "Enloe Domain controllers" not in anon.named_obj_map
+
+    def test_user_named_like_a_known_fqdn_is_owned_by_the_fqdn_pass(self, anon):
+        anon.register_fqdn("ehs")
+        assert anon.anon_user("ehs") == "ehs"
+        assert "ehs" not in anon.user_map
+
+
+class TestRedactBinaries:
+    """Opt-in: binary payloads that embed mapping identifiers are replaced by
+    REDACTED_PAYLOAD instead of shipping the identifiers. The compare treats a
+    *warranted* redaction as anonymization, and an unwarranted one as a
+    warning — verified against the original, never trusted."""
+
+    def test_binary_with_identifiers_is_redacted_and_compare_is_clean(self, tmp_path, tsf):
+        from tsf_anonymizer.core import REDACTED_PAYLOAD
+        from tsf_anonymizer.compare import compare_archives
+        out = tmp_path / "out.tgz"
+        report, mapping = anonymize_tsf(tsf, out, redact_binaries=True)
+        assert report.redacted >= 2  # rule-hit-count.bin and core.1.gz both embed Zone-Prod-DMZ
+        assert read_member(out, "./var/log/pan/rule-hit-count.bin") == REDACTED_PAYLOAD
+        assert gzip.decompress(read_member(out, "./var/log/pan/core.1.gz")) == REDACTED_PAYLOAD
+        rep = compare_archives(tsf, out, mapping)
+        assert rep.summary["errors"] == 0
+        assert rep.summary["binary_redacted"] == report.redacted
+        assert rep.summary["binary_files_with_identifiers"] == 0
+
+    def test_redaction_off_by_default_keeps_binaries_byte_identical(self, tmp_path, tsf):
+        out = tmp_path / "out.tgz"
+        report, _ = anonymize_tsf(tsf, out)
+        assert report.redacted == 0
+        from conftest import BINARY_PAYLOAD
+        assert read_member(out, "./var/log/pan/rule-hit-count.bin") == BINARY_PAYLOAD
+
+    def test_unwarranted_redaction_is_a_warning(self, tmp_path):
+        from tsf_anonymizer.core import REDACTED_PAYLOAD
+        from tsf_anonymizer.compare import compare_one, MappingIndex
+        (tmp_path / "o").mkdir(); (tmp_path / "a").mkdir()
+        (tmp_path / "o/x.bin").write_bytes(b"\x00\x01 nothing identifying \xff")
+        (tmp_path / "a/x.bin").write_bytes(REDACTED_PAYLOAD)
+        rep = compare_one("x.bin", tmp_path / "o/x.bin", tmp_path / "a/x.bin",
+                          MappingIndex({"usernames": {"jdoe": "user001"}}))
+        assert rep.status == "warning"
+        assert rep.redacted
+
+    def test_parallel_redaction_matches_sequential(self, tmp_path, tsf):
+        out1, out2 = tmp_path / "s.tgz", tmp_path / "p.tgz"
+        _, m1 = anonymize_tsf(tsf, out1, redact_binaries=True, workers=1)
+        _, m2 = anonymize_tsf(tsf, out2, redact_binaries=True, workers=2)
+        assert m1 == m2
+        assert read_member(out1, "./var/log/pan/rule-hit-count.bin") \
+            == read_member(out2, "./var/log/pan/rule-hit-count.bin")
+        assert read_member(out1, "./var/log/pan/core.1.gz") \
+            == read_member(out2, "./var/log/pan/core.1.gz")
+
+
+class TestBatchErrorFixes:
+    """Regressions from the first full 8-TSF batch (2026-08-31): the two jobs
+    that ended in errors, one root cause per test."""
+
+    def test_www_never_rewrites_vendor_xml_namespaces(self, anon):
+        assert anon.register_named_object("www", "svc") == "www"
+        anon.build_patterns()
+        line = '<x xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+        assert anon.anonymize_text(line) == line
+
+    def test_object_after_double_slash_is_a_url_authority_not_an_object(self, anon):
+        anon.register_named_object("GW-Paris", "gw")
+        anon.build_patterns()
+        out = anon.anonymize_text("see http://GW-Paris.acme.example/ and gateway GW-Paris up")
+        assert "http://GW-Paris.acme.example/" in out       # URL host: not an object
+        assert "gateway GW-Paris up" not in out              # standalone: replaced
+
+    def test_bruteforce_login_vocabulary_is_not_a_username(self, anon):
+        for word in ("error", "request", "block", "usr"):
+            line = f"failed authentication for user '{word}'.  Reason: Invalid username/password."
+            assert anon.anonymize_text(line) == line
+        assert not anon.user_map
+
+    def test_username_glued_to_a_timestamp_is_still_replaced(self, anon):
+        anon.anon_user("jdupont")
+        anon.build_patterns()
+        out = anon.anonymize_text("by jdupont2026-01-31 09:00:00")
+        assert "jdupont" not in out
+
+    def test_address_value_with_cidr_is_owned_by_the_ip_pass(self, tmp_path, anon):
+        xml = ('<config><devices><server><entry name="s1">'
+               '<address>10.18.2.254/24</address></entry></server></devices></config>')
+        p = tmp_path / "config.xml"
+        p.write_text(xml)
+        prescan_config_xml(p, anon)
+        assert "10.18.2.254/24" not in anon.fqdn_map
+        anon.build_patterns()
+        out = anon.anonymize_text("<address>10.18.2.254/24</address>")
+        assert out.endswith("/24</address>")                 # the netmask survives
+        assert "10.18.2.254" not in out                      # the address does not
+
+
+def test_email_case_variants_share_one_pseudonym(anon):
+    out = anon.anonymize_text("from JDupont@acme-corp.fr and jdupont@Acme-Corp.fr")
+    fakes = {w for w in out.split() if "@" in w}
+    assert len(fakes) == 1
+    assert len(anon.email_map) == 1

@@ -27,11 +27,13 @@ import gzip
 import ipaddress
 import json
 import logging
+import multiprocessing
 import re
 import tarfile
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -88,6 +90,21 @@ BUILTIN_OBJECTS = {
     "localhost.localdomain", "vsys1", "vsys2", "vsys3", "vsys4",
     "panorama", "admin", "root", "system", "pre-logon", "none",
     "yes", "no", "true", "false",
+    # "www" as a service/category name is not a customer identifier, and
+    # replacing it rewrote http://www.w3.org in every vendor XML namespace —
+    # 11 "XML tag sequence differs" errors per box on a real batch.
+    "www",
+}
+
+# Login names that are log vocabulary, not people: brute-force attempts on an
+# exposed GP portal show up as `failed authentication for user 'error'`
+# (also 'request', 'block', 'usr' on a real TSF), and replacing those words
+# *everywhere* rewrote every standalone "error" in every log — 60 571
+# unexplained lines. A word that identifies nobody needs no pseudonym.
+_USER_STOPWORDS = {
+    "error", "request", "block", "usr", "user", "username", "login", "logout",
+    "test", "guest", "unknown", "invalid", "failed", "success", "warning",
+    "info", "debug", "password",
 }
 
 # PAN-OS hardware interface name pattern — keep as-is (not customer-identifying,
@@ -209,6 +226,52 @@ def trie_regex(words: Iterable[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Detection regexes — module level so the (stateless) parallel detection
+# workers can use them without carrying an Anonymizer across processes.
+# ---------------------------------------------------------------------------
+
+# Not preceded by a digit or dot, not followed by a digit or by
+# ".<digit>" — so 10.1.2.3.4 is not half-rewritten, but "peer 10.0.0.5."
+# at the end of a sentence is.
+_IP_RE = re.compile(
+    r"(?<![.\d])(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(/\d{1,2})?(?!\d)(?!\.\d)"
+)
+_USER_PHRASE_RE = re.compile(
+    r"(?:authenticated\s+for\s+user\s+['\"]"
+    r"|for\s+user\s+['\"]"
+    r"|(?:non-admin\s+)?user(?:name)?\s*[=:,\s]+['\"]"
+    r"|user\s+thru\s+\S+\s+['\"]"
+    r")([a-zA-Z][a-zA-Z0-9._@-]{1,})['\"]?"
+)
+# Fallback for serials the config did not declare. 13- and 14-digit
+# runs are deliberately NOT matched — 13 digits is an epoch in
+# milliseconds — and neither is a 12-digit run starting 0000: those are
+# zero-padded counters in `show counter` output (real TSF: 3 434 of
+# them were "anonymized").
+# A PAN-OS serial starts with 0 (hardware: 12 digits, e.g. 0019…,
+# 0113…; VM-Series: 007 + 12). 486712289187-shaped 12-digit runs are
+# App-ID ids and counters, and 2 397 of them were "serials" on the
+# first real run.
+# …and not a busybox date either: `sys.time.datetime-busybox:
+# 040509422026` is MMDDhhmmYYYY, twelve digits starting with 0.
+# Not right after a dot: logdb file names are `pan.000100628656.log`, and a
+# real run turned thousands of those sequence numbers into fake serials —
+# lines the compare then (rightly) could not explain, since its own numeric
+# boundary already excluded a leading dot.
+_SERIAL_FALLBACK_RE = re.compile(
+    r"(?<![.\d])(?!(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:[01]\d|2[0-3])[0-5]\d(?:19|20)\d\d(?!\d))"
+    r"(0(?!000)\d{11}|007\d{12})(?!\d)"
+)
+_EMAIL_RE = re.compile(
+    r"\b([a-zA-Z0-9._%+\-]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b"
+)
+
+
+def _valid_ipv4_octets(ip: str) -> bool:
+    return all(p.isdigit() and 0 <= int(p) <= 255 for p in ip.split("."))
+
+
+# ---------------------------------------------------------------------------
 # Anonymizer state
 # ---------------------------------------------------------------------------
 
@@ -252,37 +315,25 @@ class Anonymizer:
         # Per-call replacement tally, reset by anonymize_text().
         self.last_counts: dict[str, int] = {}
 
-        # Not preceded by a digit or dot, not followed by a digit or by
-        # ".<digit>" — so 10.1.2.3.4 is not half-rewritten, but "peer 10.0.0.5."
-        # at the end of a sentence is.
-        self._ip_re = re.compile(
-            r"(?<![.\d])(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(/\d{1,2})?(?!\d)(?!\.\d)"
-        )
-        self._user_re = re.compile(
-            r"(?:authenticated\s+for\s+user\s+['\"]"
-            r"|for\s+user\s+['\"]"
-            r"|(?:non-admin\s+)?user(?:name)?\s*[=:,\s]+['\"]"
-            r"|user\s+thru\s+\S+\s+['\"]"
-            r")([a-zA-Z][a-zA-Z0-9._@-]{1,})['\"]?"
-        )
-        # Fallback for serials the config did not declare. 13- and 14-digit
-        # runs are deliberately NOT matched — 13 digits is an epoch in
-        # milliseconds — and neither is a 12-digit run starting 0000: those are
-        # zero-padded counters in `show counter` output (real TSF: 3 434 of
-        # them were "anonymized").
-        # A PAN-OS serial starts with 0 (hardware: 12 digits, e.g. 0019…,
-        # 0113…; VM-Series: 007 + 12). 486712289187-shaped 12-digit runs are
-        # App-ID ids and counters, and 2 397 of them were "serials" on the
-        # first real run.
-        # …and not a busybox date either: `sys.time.datetime-busybox:
-        # 040509422026` is MMDDhhmmYYYY, twelve digits starting with 0.
-        self._serial_re = re.compile(
-            r"(?<!\d)(?!(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:[01]\d|2[0-3])[0-5]\d(?:19|20)\d\d(?!\d))"
-            r"(0(?!000)\d{11}|007\d{12})(?!\d)"
-        )
-        self._email_re = re.compile(
-            r"\b([a-zA-Z0-9._%+\-]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b"
-        )
+        # Frozen: the tables are complete (detection ran) and must not grow —
+        # which is exactly what makes the rewrite a pure function, safe to
+        # spread over processes. A value that *would* have been allocated is
+        # left unchanged and recorded here; it should never happen, and the
+        # caller surfaces it as a warning rather than silently diverging.
+        self.frozen = False
+        self.frozen_misses: set[str] = set()
+
+        # Replace binary payloads that embed mapping identifiers with
+        # REDACTED_PAYLOAD instead of shipping them untouched (sslvpn-task
+        # logs carried ~27 000 identifiers per file on a real TSF). Off by
+        # default: it deliberately loses data, so it is the operator's call.
+        self.redact_binaries = False
+        self._redaction_scanner: Optional[list[re.Pattern]] = None
+
+        self._ip_re = _IP_RE
+        self._user_re = _USER_PHRASE_RE
+        self._serial_re = _SERIAL_FALLBACK_RE
+        self._email_re = _EMAIL_RE
 
     # -- IP anonymization ---------------------------------------------------
 
@@ -310,6 +361,10 @@ class Anonymizer:
                 return ip_str
             if addr.is_link_local:
                 return ip_str
+            if self.frozen:
+                if ip_str not in self._fakes:
+                    self.frozen_misses.add(ip_str)
+                return ip_str
             gen = self._fake_private_ip if addr.is_private else self._fake_public_ip
             fake = gen()
             # A customer may use our fake ranges (100.64/10 is a common GP
@@ -327,10 +382,18 @@ class Anonymizer:
     # -- Username anonymization ---------------------------------------------
 
     def anon_user(self, username: str) -> str:
-        if (username.lower() in BUILTIN_OBJECTS or username in self._fakes
-                or username.startswith(_VOCAB_PREFIXES)):
+        if (username.lower() in BUILTIN_OBJECTS or username.lower() in _USER_STOPWORDS
+                or username in self._fakes or username.startswith(_VOCAB_PREFIXES)):
+            return username
+        # `user 'ehs'` where ehs is a GP portal domain: the FQDN pass owns
+        # that identity — a second pseudonym here would be a dead mapping
+        # entry (the FQDN pass runs first and always wins).
+        if username.lower().rstrip(".") in self.fqdn_map:
             return username
         if username not in self.user_map:
+            if self.frozen:
+                self.frozen_misses.add(username)
+                return username
             self._user_counter += 1
             self.user_map[username] = f"user{self._user_counter:03d}"
             self._fakes.add(self.user_map[username])
@@ -375,9 +438,16 @@ class Anonymizer:
     # -- Email anonymization ------------------------------------------------
 
     def anon_email(self, local: str, domain: str) -> str:
-        original = f"{local}@{domain}"
+        # Case-insensitive key: JDupont@x and jdupont@x are one identity,
+        # and two pseudonyms for it broke correlation on a real TSF (the
+        # compare matches e-mails case-insensitively and could explain only
+        # one of the two).
+        original = f"{local}@{domain}".lower()
         if original in self.email_map:
             return self.email_map[original]
+        if self.frozen:
+            self.frozen_misses.add(original)
+            return original
         self._email_counter += 1
         fake_domain = self.anon_fqdn(domain)
         fake = f"user{self._email_counter:03d}@{fake_domain}"
@@ -413,6 +483,9 @@ class Anonymizer:
             return self.serial_map[serial]
         if serial in self._fakes:
             return serial
+        if self.frozen:
+            self.frozen_misses.add(serial)
+            return serial
         self._serial_counter += 1
         # Same length, leading 9: no PAN-OS serial starts with 9, so a fake
         # cannot collide with a real one.
@@ -430,24 +503,6 @@ class Anonymizer:
         # the FQDN; two pseudonyms for it broke correlation on a real TSF.
         for name in [n for n in self.named_obj_map if n.lower().rstrip(".") in self.fqdn_map]:
             del self.named_obj_map[name]
-        if self.named_obj_map:
-            # A name is replaced only as a whole token: not inside a longer
-            # word, not as one segment of a hyphenated compound ("web" in
-            # "web-server-1"), not as a label of a dotted name on the left
-            # ("x.Zone-A"). A dot *after* is fine — sentence ends.
-            # "<" and "</" excluded before, "=" and "://" after: an object named
-            # like an XML tag, an attribute or a URL scheme must not rewrite
-            # <enabled>, name="…" or http://. Verified on a real TSF: it did.
-            # The trailing boundary also accepts a glued timestamp:
-            # md_out.log writes "…_com2026-04-05 09:38:00" with no separator,
-            # and the customer name leaked inside it. A longer key that
-            # really ends in a date is still preferred by the trie.
-            self._obj_re = re.compile(
-                r"(?<![\w.\-<])(?<!<\/)" + trie_regex(self.named_obj_map)
-                + r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)"
-            )
-        else:
-            self._obj_re = None
         if self.fqdn_map:
             # "/" before is allowed on purpose: https://vpn.acme.fr/ and
             # /path/to/vpn.acme.fr.csr must be rewritten; only </tag> is not.
@@ -463,24 +518,96 @@ class Anonymizer:
             )
         else:
             self._fqdn_re = None
+        # An object whose name *embeds* a FQDN or an e-mail can never win: the
+        # earlier pass rewrites that part first and the whole-name key is dead
+        # — a mapping entry that never fires, and thousands of lines the
+        # compare cannot explain ('Enloe Domain controllers' after 'Enloe'
+        # became host1208, on a real TSF). The identifying part is owned by
+        # the earlier pass; drop the dead key so the mapping stays honest.
+        for name in [n for n in self.named_obj_map
+                     if (self._fqdn_re and self._fqdn_re.search(n)) or _EMAIL_RE.search(n)]:
+            del self.named_obj_map[name]
+        if self.named_obj_map:
+            # A name is replaced only as a whole token: not inside a longer
+            # word, not as one segment of a hyphenated compound ("web" in
+            # "web-server-1"), not as a label of a dotted name on the left
+            # ("x.Zone-A"). A dot *after* is fine — sentence ends.
+            # "<" and "</" excluded before, "=" and "://" after: an object named
+            # like an XML tag, an attribute or a URL scheme must not rewrite
+            # <enabled>, name="…" or http://. Verified on a real TSF: it did.
+            # The trailing boundary also accepts a glued timestamp:
+            # md_out.log writes "…_com2026-04-05 09:38:00" with no separator,
+            # and the customer name leaked inside it. A longer key that
+            # really ends in a date is still preferred by the trie.
+            # "(?<!//)": a name right after "//" is the start of a URL
+            # authority (http://www.w3.org), never a standalone object —
+            # rewriting one broke vendor XML namespaces on a real TSF.
+            self._obj_re = re.compile(
+                r"(?<![\w.\-<])(?<!<\/)(?<!\/\/)" + trie_regex(self.named_obj_map)
+                + r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)"
+            )
+        else:
+            self._obj_re = None
         # Usernames (from the config's <users>/<admin> entries they are named
         # objects; from log phrasings they land here) are replaced wherever they
         # appear — UID="x", (x), x@host — not only in the phrasing that found them.
+        # Same trailing boundary as the object trie, glued timestamps
+        # included: md_out.log writes "user2026-01-31…" with no separator,
+        # and the compare (which has that alternative) reported every one the
+        # rewrite missed as a leak.
         self._user_trie_re = (
-            re.compile(r"(?<![\w.\-<@])(?<!<\/)" + trie_regex(self.user_map) + r"(?![\w\-=])(?!:\/\/)")
+            re.compile(r"(?<![\w.\-<@])(?<!<\/)(?<!\/\/)" + trie_regex(self.user_map)
+                       + r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)")
             if self.user_map else None
         )
         self._built_for = self._map_sizes()
         # Serials discovered in the config are replaced wherever they appear,
-        # whatever their shape; the regex fallback below is stricter.
+        # whatever their shape; the regex fallback below is stricter. Same
+        # leading boundary as the compare's numeric pass — a dot before means
+        # a file-name segment, not a serial.
         self._known_serial_re = (
-            re.compile(r"(?<!\d)" + trie_regex(self.serial_map) + r"(?!\d)")
+            re.compile(r"(?<![.\d])" + trie_regex(self.serial_map) + r"(?!\d)")
             if self.serial_map else None
         )
 
     def _map_sizes(self) -> tuple:
         return (len(self.named_obj_map), len(self.fqdn_map), len(self.user_map),
                 len(self.serial_map))
+
+    def binary_embeds_identifier(self, raw: bytes) -> bool:
+        """Does a binary payload contain a mapping key? Same boundary
+        conventions as the compare's leak scan — deliberately *duplicated*,
+        not shared: if this decided what the compare then verifies with the
+        same code, a bug here would be invisible there."""
+        if self._redaction_scanner is None:
+            values = {v for table in (self.ip_map, self.user_map, self.fqdn_map,
+                                      self.email_map, self.named_obj_map, self.serial_map)
+                      for v in table.values()}
+            num, cs, ci = [], [], []
+            for k in list(self.ip_map) + list(self.serial_map):
+                if len(k) >= 3 and k not in values:
+                    num.append(k)
+            for k in list(self.fqdn_map) + list(self.email_map):
+                if len(k) >= 3 and k not in values:
+                    ci.append(k)
+            ci_low = {k.lower() for k in ci}
+            for k in list(self.named_obj_map) + list(self.user_map):
+                if len(k) >= 3 and k not in values and k.lower() not in ci_low:
+                    cs.append(k)
+            scanners = []
+            if num:
+                scanners.append(re.compile(r"(?<![.\d])" + trie_regex(num) + r"(?!\d)(?!\.\d)"))
+            if cs:
+                scanners.append(re.compile(
+                    r"(?<![\w.\-<])(?<!<\/)" + trie_regex(cs)
+                    + r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)"))
+            if ci:
+                scanners.append(re.compile(
+                    r"(?<![\w\-<])(?<!<\/)" + trie_regex(ci)
+                    + r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)", re.IGNORECASE))
+            self._redaction_scanner = scanners
+        text = raw.decode("latin-1")  # never fails; identifiers stay findable
+        return any(rx.search(text) for rx in self._redaction_scanner)
 
     # -- Full text replacement ----------------------------------------------
 
@@ -508,6 +635,14 @@ class Anonymizer:
                 self._count("usernames")
                 return table[m.group(0)]
             text = self._user_trie_re.sub(sub_known, text)
+
+        # Frozen means the text-identity prescan ran: every username this
+        # phrasing regex can find is already in the trie, which replaces it
+        # everywhere — re-scanning here would be the single most expensive
+        # regex for zero effect. Unfrozen (direct API use, no prescan), the
+        # phrasing pass is still how usernames get discovered at all.
+        if self.frozen:
+            return text
 
         def replace_match(m: re.Match) -> str:
             full = m.group(0)
@@ -601,7 +736,9 @@ class Anonymizer:
         anon.ip_map.update(mapping.get("ip_addresses", {}))
         anon.user_map.update(mapping.get("usernames", {}))
         anon.fqdn_map.update(mapping.get("fqdns", {}))
-        anon.email_map.update(mapping.get("emails", {}))
+        # Older mappings may carry mixed-case e-mail keys; fold them so a
+        # seeded run keeps one pseudonym per address.
+        anon.email_map.update({k.lower(): v for k, v in mapping.get("emails", {}).items()})
         anon.named_obj_map.update(mapping.get("named_objects", {}))
         anon.serial_map.update(mapping.get("serial_numbers", {}))
         anon._priv_counter = sum(1 for v in anon.ip_map.values() if v.startswith("100."))
@@ -723,6 +860,73 @@ def _is_vocabulary(name: str, parent_tag: str) -> bool:
 _SKIP_SUBTREES = {"predefined", "threats", "application-type"}
 
 
+# <entry name="acme\jdupont"> (userinfo.xml): a DOMAIN\user spelling is two
+# identities, not one. Registered whole, it becomes a mapping entry that can
+# never win — the FQDN pass rewrites the domain part first — and on a real TSF
+# that was 119 299 lines the compare could not explain.
+_DOMAIN_USER_NAME_RE = re.compile(
+    r"^([A-Za-z][A-Za-z0-9.-]{1,62})\\+([A-Za-z0-9][A-Za-z0-9._@$-]{0,63})$"
+)
+
+
+def _register_entry_name(name_attr: Optional[str], parent_tag: str, anon: Anonymizer) -> None:
+    if not (name_attr and len(name_attr) >= 2 and name_attr.lower() not in BUILTIN_OBJECTS
+            and not _is_vocabulary(name_attr, parent_tag)):
+        return
+    name_attr = name_attr.strip()
+    du = _DOMAIN_USER_NAME_RE.match(name_attr)
+    if du:
+        domain, user = du.group(1), du.group(2)
+        # A stopword domain ("corp", "local") is generic, like a zone named
+        # "lan" — the user part is the identity either way.
+        if domain.lower() not in _DC_STOPWORDS and domain.lower() not in BUILTIN_OBJECTS:
+            anon.register_fqdn(domain)
+        anon.anon_user(user)
+        return
+    if _IP_LIKE_RE.match(name_attr):
+        pass  # an address object named by its IP: the IP pass owns it
+    elif _FQDN_LIKE_RE.match(name_attr) and not name_attr.lower().endswith((".log", ".xml")):
+        anon.register_fqdn(name_attr)  # one identity, one pseudonym
+    else:
+        category = "obj"
+        for obj_tag, cat in NAMED_OBJ_PATHS:
+            if parent_tag == obj_tag:
+                category = cat
+                break
+        anon.register_named_object(name_attr, category)
+
+
+def _register_sensitive_field(tag: str, val: str, anon: Anonymizer) -> None:
+    field_type = SENSITIVE_XML_FIELDS.get(tag)
+    if not field_type:
+        return
+    # _IP_LIKE_RE, not _IPV4_ONLY_RE: an <address> holding "10.18.2.254/24"
+    # is the IP pass's territory too — registered as a "FQDN" it became
+    # host005.anon.internal and the /24 was lost (real TSF).
+    if field_type == "fqdn":
+        if "." in val and not val.startswith("DC=") and not _IP_LIKE_RE.match(val):
+            anon.register_fqdn(val)
+    elif field_type == "host":
+        if len(val) > 2 and val.lower() not in BUILTIN_OBJECTS and not _IP_LIKE_RE.match(val):
+            anon.register_fqdn(val)
+    elif field_type == "cert":
+        _extract_cert_identifiers(val, anon)
+    elif field_type == "dn":
+        _extract_dn_identifiers(val, anon)
+    elif field_type == "domain":
+        if len(val) > 2 and val.lower() not in BUILTIN_OBJECTS:
+            anon.register_fqdn(val)
+    elif field_type == "email":
+        for m in _EMAIL_IN_TEXT_RE.finditer(val):
+            anon.anon_email(m.group(1), m.group(2))
+    elif field_type == "serial":
+        if val.isdigit() and 8 <= len(val) <= 16:
+            anon.anon_serial(val)
+    elif field_type == "person":
+        if len(val) > 1 and val.lower() not in BUILTIN_OBJECTS:
+            anon.register_named_object(val, "user")
+
+
 def _walk_xml(elem: ET.Element, anon: Anonymizer, parent_tag: str = "") -> None:
     tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
     if tag in _SKIP_SUBTREES:
@@ -735,50 +939,64 @@ def _walk_xml(elem: ET.Element, anon: Anonymizer, parent_tag: str = "") -> None:
         return
 
     if tag == "entry":
-        name_attr = elem.get("name")
-        if (name_attr and len(name_attr) >= 2 and name_attr.lower() not in BUILTIN_OBJECTS
-                and not _is_vocabulary(name_attr, parent_tag)):
-            name_attr = name_attr.strip()
-            if _IP_LIKE_RE.match(name_attr):
-                pass  # an address object named by its IP: the IP pass owns it
-            elif _FQDN_LIKE_RE.match(name_attr) and not name_attr.lower().endswith((".log", ".xml")):
-                anon.register_fqdn(name_attr)  # one identity, one pseudonym
-            else:
-                category = "obj"
-                for obj_tag, cat in NAMED_OBJ_PATHS:
-                    if parent_tag == obj_tag:
-                        category = cat
-                        break
-                anon.register_named_object(name_attr, category)
+        _register_entry_name(elem.get("name"), parent_tag, anon)
 
-    field_type = SENSITIVE_XML_FIELDS.get(tag)
-    if field_type and elem.text and elem.text.strip():
-        val = elem.text.strip()
-        if field_type == "fqdn":
-            if "." in val and not val.startswith("DC=") and not _IPV4_ONLY_RE.match(val):
-                anon.register_fqdn(val)
-        elif field_type == "host":
-            if len(val) > 2 and val.lower() not in BUILTIN_OBJECTS and not _IPV4_ONLY_RE.match(val):
-                anon.register_fqdn(val)
-        elif field_type == "cert":
-            _extract_cert_identifiers(val, anon)
-        elif field_type == "dn":
-            _extract_dn_identifiers(val, anon)
-        elif field_type == "domain":
-            if len(val) > 2 and val.lower() not in BUILTIN_OBJECTS:
-                anon.register_fqdn(val)
-        elif field_type == "email":
-            for m in _EMAIL_IN_TEXT_RE.finditer(val):
-                anon.anon_email(m.group(1), m.group(2))
-        elif field_type == "serial":
-            if val.isdigit() and 8 <= len(val) <= 16:
-                anon.anon_serial(val)
-        elif field_type == "person":
-            if len(val) > 1 and val.lower() not in BUILTIN_OBJECTS:
-                anon.register_named_object(val, "user")
+    if elem.text and elem.text.strip():
+        _register_sensitive_field(tag, elem.text.strip(), anon)
 
     for child in elem:
         _walk_xml(child, anon, parent_tag=tag)
+
+
+def _salvage_prescan_xml(xml_path: Path, anon: Anonymizer) -> None:
+    """Prescan the parseable prefix of a malformed XML — most often a
+    truncated or rejected candidate config (`failed_candidatecfg.xml`).
+
+    A config that fails ``ET.parse`` used to register *nothing*, so its
+    identifiers went out un-anonymized — invisible to the compare mode, which
+    only knows the mapping. The pull parser yields every element up to the
+    error with its parent context intact, so the vendor-catalog guardrails
+    (_SKIP_SUBTREES, <config><global>, _is_vocabulary) still apply — a bare
+    regex sweep over ``<entry name=…>`` would have re-registered the 41 973
+    App-ID names the tree walk exists to skip.
+    """
+    parser = ET.XMLPullParser(events=("start", "end"))
+    stack: list[str] = []
+    skip_depth = 0
+    try:
+        with open(xml_path, "rb") as f:
+            while True:
+                chunk = f.read(1 << 20)
+                stop = not chunk
+                try:
+                    if chunk:
+                        parser.feed(chunk)
+                    else:
+                        parser.close()  # raises on a truncated document
+                except ET.ParseError:
+                    stop = True
+                for event, elem in parser.read_events():
+                    tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+                    if event == "start":
+                        parent = stack[-1] if stack else ""
+                        stack.append(tag)
+                        if skip_depth:
+                            skip_depth += 1
+                        elif tag in _SKIP_SUBTREES or (tag == "global" and parent == "config"):
+                            skip_depth = 1
+                        elif tag == "entry":
+                            _register_entry_name(elem.get("name"), parent, anon)
+                    else:
+                        if stack:
+                            stack.pop()
+                        if skip_depth:
+                            skip_depth -= 1
+                        elif elem.text and elem.text.strip():
+                            _register_sensitive_field(tag, elem.text.strip(), anon)
+                if stop:
+                    break
+    except Exception as e:  # salvage is best-effort by definition
+        logger.warning("prescan: salvage of %s stopped early: %s", xml_path.name, e)
 
 
 def prescan_config_xml(xml_path: Path, anon: Anonymizer) -> tuple[int, int]:
@@ -789,7 +1007,9 @@ def prescan_config_xml(xml_path: Path, anon: Anonymizer) -> tuple[int, int]:
         tree = ET.parse(xml_path)
         _walk_xml(tree.getroot(), anon)
     except ET.ParseError as e:
-        logger.warning("prescan: could not parse %s: %s", xml_path.name, e)
+        logger.warning("prescan: could not parse %s (%s) — salvaging the parseable prefix",
+                       xml_path.name, e)
+        _salvage_prescan_xml(xml_path, anon)
     return len(anon.named_obj_map) - before, len(anon.fqdn_map) - before_fqdn
 
 
@@ -797,12 +1017,25 @@ def prescan_config_xml(xml_path: Path, anon: Anonymizer) -> tuple[int, int]:
 # File processing
 # ---------------------------------------------------------------------------
 
+# What a redacted binary member is replaced with. A stable, recognizable
+# sentinel: the compare identifies a deliberate redaction by these exact
+# bytes and then verifies it was warranted against the original.
+REDACTED_PAYLOAD = (
+    b"[tsf-anonymizer] binary payload redacted: "
+    b"the original embedded identifiers from the mapping.\n"
+)
+
+
 @dataclass
 class FileOutcome:
     path: str
-    action: str  # modified | unchanged | binary | gz_binary | error
+    action: str  # modified | unchanged | binary | gz_binary | redacted | error
     replacements: dict[str, int] = field(default_factory=dict)
     error: Optional[str] = None
+    # Identifiers the frozen rewrite would have had to allocate a pseudonym
+    # for — the detection prescan should make this impossible, so anything
+    # here is a bug to surface, not to hide.
+    warnings: list[str] = field(default_factory=list)
 
 
 def _decode(raw: bytes) -> str:
@@ -829,33 +1062,60 @@ def process_file(path: Path, anon: Anonymizer, rel: str = "") -> FileOutcome:
         return process_gz_file(path, anon, rel)
 
     if is_binary_file(path):
+        if anon.redact_binaries:
+            try:
+                if anon.binary_embeds_identifier(path.read_bytes()):
+                    path.write_bytes(REDACTED_PAYLOAD)
+                    return FileOutcome(rel, "redacted")
+            except Exception as e:
+                logger.warning("redaction scan failed on %s: %s", rel, e)
         return FileOutcome(rel, "binary")
 
     try:
+        misses_before = set(anon.frozen_misses)
         raw = path.read_bytes()
         out = anonymize_bytes(raw, anon)
+        warnings = _new_frozen_misses(anon, misses_before, rel)
         if out is None:
-            return FileOutcome(rel, "unchanged")
+            return FileOutcome(rel, "unchanged", warnings=warnings)
         path.write_bytes(out)
-        return FileOutcome(rel, "modified", dict(anon.last_counts))
+        return FileOutcome(rel, "modified", dict(anon.last_counts), warnings=warnings)
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("skipping %s: %s", rel, e)
         return FileOutcome(rel, "error", error=str(e))
 
 
+def _new_frozen_misses(anon: Anonymizer, before: set[str], rel: str) -> list[str]:
+    # Logged by _tally in the parent, where a worker process's records reach
+    # the job's own captured log.
+    return sorted(anon.frozen_misses - before)[:50]
+
+
 def process_gz_file(path: Path, anon: Anonymizer, rel: str = "") -> FileOutcome:
     rel = rel or str(path)
     try:
+        misses_before = set(anon.frozen_misses)
         with gzip.open(path, "rb") as f:
             raw = f.read()
         if is_binary_bytes(raw[:4096]):
+            if anon.redact_binaries and anon.binary_embeds_identifier(raw):
+                # mtime=0 keeps the redacted member byte-identical whatever
+                # worker (or run) produced it.
+                with open(path, "wb") as out:
+                    with gzip.GzipFile(fileobj=out, mode="wb", mtime=0) as gz:
+                        gz.write(REDACTED_PAYLOAD)
+                return FileOutcome(rel, "redacted")
             return FileOutcome(rel, "gz_binary")
         out = anonymize_bytes(raw, anon)
+        warnings = _new_frozen_misses(anon, misses_before, rel)
         if out is None:
-            return FileOutcome(rel, "unchanged")
-        with gzip.open(path, "wb") as f:
+            return FileOutcome(rel, "unchanged", warnings=warnings)
+        # Level 6, not the gzip default of 9: measured 12 MB/s at 9 against
+        # 38 MB/s at 6 for the same output size on this kind of text — the
+        # same trade the outer repack already makes.
+        with gzip.open(path, "wb", compresslevel=6) as f:
             f.write(out)
-        return FileOutcome(rel, "modified", dict(anon.last_counts))
+        return FileOutcome(rel, "modified", dict(anon.last_counts), warnings=warnings)
     except Exception as e:
         logger.warning("skipping gz %s: %s", rel, e)
         return FileOutcome(rel, "error", error=str(e))
@@ -884,7 +1144,9 @@ def _is_safe_member(member: tarfile.TarInfo, work_dir: Path) -> bool:
     return True
 
 
-def extract_archive(archive: Path, work_dir: Path) -> tuple[list[tarfile.TarInfo], int]:
+def extract_archive(archive: Path, work_dir: Path, *,
+                    progress: ProgressFn = _noop_progress,
+                    phase: str = "extract") -> tuple[list[tarfile.TarInfo], int]:
     """Extract safely. Returns (members in archive order, members skipped).
 
     The returned TarInfo objects carry the archive's *original* metadata —
@@ -892,6 +1154,12 @@ def extract_archive(archive: Path, work_dir: Path) -> tuple[list[tarfile.TarInfo
     / u+rwx (dirs) added, because a real TSF ships files in mode 0000 and the
     working copy has to be readable and writable; that widening must never
     reach the output archive.
+
+    The extraction is driven in slices so it can say how far it is: on a real
+    TSF this phase is minutes long, and a bar that only knows "started" and
+    "finished" cannot be told from a hung run. Slices keep `extractall`'s own
+    semantics (directory attributes applied after their contents) and read the
+    stream forward-only, which is what keeps a gzip member cheap to reach.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     members: list[tarfile.TarInfo] = []
@@ -918,16 +1186,32 @@ def extract_archive(archive: Path, work_dir: Path) -> tuple[list[tarfile.TarInfo
             disk = copy.copy(m)
             disk.mode |= 0o600 if m.isfile() else 0o700
             to_extract.append(disk)
-        tar.extractall(work_dir, members=to_extract)
+        total = len(to_extract)
+        progress(phase, 0, total, f"Extracting {archive.name}")
+        step = max(1, total // 200)
+        for i in range(0, total, step):
+            chunk = to_extract[i:i + step]
+            tar.extractall(work_dir, members=chunk)
+            progress(phase, min(i + step, total), total, archive.name)
     return members, skipped
 
 
-def repack_archive(members: Iterable[tarfile.TarInfo], tree: Path, output: Path) -> int:
+def repack_archive(members: Iterable[tarfile.TarInfo], tree: Path, output: Path, *,
+                   progress: ProgressFn = _noop_progress) -> int:
     """Write `output` with the same member order and metadata as the input,
     swapping in the payload found under `tree`. Returns members written."""
-    written = 0
-    with tarfile.open(output, "w:gz") as tar:
+    members = list(members)
+    total, written = len(members), 0
+    # ~100 updates whatever the size: a small archive still moves, a 500-member
+    # one does not write job.json for every file.
+    step = max(1, total // 100)
+    # Level 6, not gzip's 9: measured on a real TSF, 9 runs at 61 MB/s and 6 at
+    # 133 MB/s for the *same* output size — the last three levels buy nothing
+    # on this kind of text and cost half the repack phase.
+    with tarfile.open(output, "w:gz", compresslevel=6) as tar:
         for m in members:
+            if written % step == 0:
+                progress("repack", written, total, output.name)
             if m.name == ".":
                 continue
             info = tarfile.TarInfo(m.name)
@@ -942,6 +1226,7 @@ def repack_archive(members: Iterable[tarfile.TarInfo], tree: Path, output: Path)
                 with open(src, "rb") as f:
                     tar.addfile(info, f)
             written += 1
+    progress("repack", total, total, output.name)
     return written
 
 
@@ -962,6 +1247,7 @@ class AnonymizeReport:
     modified: int = 0
     unchanged: int = 0
     binary: int = 0
+    redacted: int = 0
     errors: int = 0
     members_skipped: int = 0
     config_files_scanned: int = 0
@@ -1031,61 +1317,166 @@ _FILE_SUFFIX_RE = re.compile(
 )
 
 
+def _detect_in_file(path) -> list[tuple]:
+    """Every identity one text file reveals, in position order per kind:
+    usernames (log phrasings), e-mails, `hostname X` phrases — and IPs and
+    fallback-shaped serials, so that *nothing* is left to discover at rewrite
+    time and the tables can be frozen. Pure and stateless (the detection
+    regexes need no tables), which is what lets it run in worker processes;
+    allocation stays in the parent, in path order, so the pseudonym counters
+    fall exactly as a sequential run's would."""
+    path = Path(path)
+    try:
+        if path.suffix == ".gz":
+            with gzip.open(path, "rb") as f:
+                raw = f.read()
+            if is_binary_bytes(raw[:4096]):
+                return []
+        elif is_binary_file(path):
+            return []
+        else:
+            raw = path.read_bytes()
+    except Exception:
+        return []
+    text = _decode(raw)
+    found: dict[tuple, None] = {}
+    for m in _USER_PHRASE_RE.finditer(text):
+        found.setdefault(("user", m.group(1)))
+    for m in _EMAIL_RE.finditer(text):
+        found.setdefault(("email", m.group(1), m.group(2)))
+    for m in _HOSTNAME_PHRASE_RE.finditer(text):
+        if _looks_like_device_name(m.group(1)):
+            found.setdefault(("host", m.group(1)))
+    for m in _IP_RE.finditer(text):
+        if _valid_ipv4_octets(m.group(1)):
+            found.setdefault(("ip", m.group(1)))
+    for m in _SERIAL_FALLBACK_RE.finditer(text):
+        found.setdefault(("serial", m.group(1)))
+    return list(found)
+
+
+def _register_findings(anon: Anonymizer, findings: list[tuple]) -> int:
+    """Apply one file's detections. Returns how many usernames were new."""
+    users = 0
+    for f in findings:
+        kind = f[0]
+        if kind == "user":
+            if anon.anon_user(f[1]) != f[1]:
+                users += 1
+        elif kind == "email":
+            anon.anon_email(f[1], f[2])
+        elif kind == "host":
+            anon.register_fqdn(f[1])
+        elif kind == "ip":
+            anon.anon_ip(f[1])
+        elif kind == "serial":
+            anon.anon_serial(f[1])
+    return users
+
+
 def prescan_text_identities(tree: Path, anon: Anonymizer,
-                            progress: ProgressFn = _noop_progress) -> int:
-    """Discover usernames (log phrasings) and e-mails in every text file before
-    anything is rewritten, so the first file sees the same tables as the last
-    and every occurrence — not only the phrasing that revealed it — is replaced.
-    One extra read of the corpus; the regexes run in C."""
+                            progress: ProgressFn = _noop_progress,
+                            workers: int = 1) -> int:
+    """Discover every text-borne identity — usernames, e-mails, hostnames,
+    IPs, fallback serials — before anything is rewritten, so the first file
+    sees the same tables as the last, every occurrence is replaced, and the
+    tables can then be frozen (which is what makes the rewrite itself safe
+    to spread over processes). Detection is read-only and stateless, so
+    `workers` > 1 fans the file scans out; registration always happens here,
+    in path order, keeping "same original → same pseudonym" scheduling-free."""
     paths = [p for p in sorted(tree.rglob("*")) if p.is_file()]
     found = 0
-    for i, p in enumerate(paths, 1):
-        try:
-            if p.suffix == ".gz":
-                with gzip.open(p, "rb") as f:
-                    raw = f.read()
-                if is_binary_bytes(raw[:4096]):
-                    continue
-            elif is_binary_file(p):
-                continue
-            else:
-                raw = p.read_bytes()
-        except Exception:
-            continue
-        text = _decode(raw)
-        for m in anon._user_re.finditer(text):
-            if anon.anon_user(m.group(1)) != m.group(1):
-                found += 1
-        for m in anon._email_re.finditer(text):
-            anon.anon_email(m.group(1), m.group(2))
-        for m in _HOSTNAME_PHRASE_RE.finditer(text):
-            if _looks_like_device_name(m.group(1)):
-                anon.register_fqdn(m.group(1))
+
+    def _apply(i: int, findings: list[tuple]) -> None:
+        nonlocal found
+        found += _register_findings(anon, findings)
         if i % 25 == 0 or i == len(paths):
-            progress("prescan-text", i, len(paths), f"{len(anon.user_map)} users, {len(anon.email_map)} e-mails")
+            progress("prescan-text", i, len(paths),
+                     f"{len(anon.user_map)} users, {len(anon.email_map)} e-mails, "
+                     f"{len(anon.ip_map)} IPs")
+
+    if workers > 1 and len(paths) > 1:
+        # forkserver, not fork: this runs on a worker thread of a live server,
+        # and forking a threaded process inherits locks held by other threads.
+        ctx = multiprocessing.get_context("forkserver")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
+            for i, findings in enumerate(
+                    pool.map(_detect_in_file, map(str, paths), chunksize=1), 1):
+                _apply(i, findings)
+    else:
+        for i, p in enumerate(paths, 1):
+            _apply(i, _detect_in_file(p))
     return found
 
 
+# One frozen Anonymizer per rewrite worker, built by the initializer:
+# compiling the tries over the full mapping is the expensive part, and it
+# must be paid once per worker, not once per file.
+_REWRITE_STATE: tuple[Anonymizer, Path] | None = None
+
+
+def _init_rewrite_worker(mapping: dict, tree: str, redact_binaries: bool) -> None:
+    global _REWRITE_STATE
+    worker_anon = Anonymizer.from_mapping(mapping)
+    worker_anon.frozen = True
+    worker_anon.redact_binaries = redact_binaries
+    _REWRITE_STATE = (worker_anon, Path(tree))
+
+
+def _process_in_worker(rel: str) -> FileOutcome:
+    worker_anon, tree = _REWRITE_STATE
+    try:
+        return process_file(tree / rel, worker_anon, rel)
+    except Exception as e:  # a worker crash must cost one file, not the run
+        return FileOutcome(rel, "error", error=f"rewrite worker failed: {e}")
+
+
+def _tally(report: AnonymizeReport, outcome: FileOutcome) -> None:
+    report.files.append(outcome)
+    if outcome.warnings:
+        logger.warning("%s: frozen rewrite left %d undetected identifier(s) unreplaced: %s",
+                       outcome.path, len(outcome.warnings), outcome.warnings[:10])
+    if outcome.action == "modified":
+        report.modified += 1
+        for k, v in outcome.replacements.items():
+            report.replacements[k] = report.replacements.get(k, 0) + v
+    elif outcome.action == "unchanged":
+        report.unchanged += 1
+    elif outcome.action in ("binary", "gz_binary"):
+        report.binary += 1
+    elif outcome.action == "redacted":
+        report.redacted += 1
+    else:
+        report.errors += 1
+        if outcome.error:
+            logger.warning("%s: %s", outcome.path, outcome.error)
+
+
 def anonymize_tree(tree: Path, anon: Anonymizer, report: AnonymizeReport,
-                   progress: ProgressFn = _noop_progress) -> None:
+                   progress: ProgressFn = _noop_progress, workers: int = 1) -> None:
+    """Rewrite every file under `tree`. With the tables frozen the rewrite is
+    a pure lookup, so `workers` > 1 spreads it over processes — outcomes are
+    collected back in path order and the result does not depend on scheduling.
+    The un-frozen sequential path is kept for direct API use."""
     paths = [p for p in sorted(tree.rglob("*")) if p.is_file()]
     report.files_total = len(paths)
-    for i, p in enumerate(paths, 1):
-        rel = str(p.relative_to(tree))
-        outcome = process_file(p, anon, rel)
-        report.files.append(outcome)
-        if outcome.action == "modified":
-            report.modified += 1
-            for k, v in outcome.replacements.items():
-                report.replacements[k] = report.replacements.get(k, 0) + v
-        elif outcome.action == "unchanged":
-            report.unchanged += 1
-        elif outcome.action in ("binary", "gz_binary"):
-            report.binary += 1
-        else:
-            report.errors += 1
-        if i % 25 == 0 or i == len(paths):
-            progress("anonymize", i, len(paths), rel)
+    if workers > 1 and len(paths) > 1 and anon.frozen:
+        rels = [str(p.relative_to(tree)) for p in paths]
+        ctx = multiprocessing.get_context("forkserver")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx,
+                                 initializer=_init_rewrite_worker,
+                                 initargs=(anon.get_mapping(), str(tree),
+                                           anon.redact_binaries)) as pool:
+            for i, outcome in enumerate(pool.map(_process_in_worker, rels, chunksize=1), 1):
+                _tally(report, outcome)
+                if i % 25 == 0 or i == len(paths):
+                    progress("anonymize", i, len(paths), outcome.path)
+    else:
+        for i, p in enumerate(paths, 1):
+            rel = str(p.relative_to(tree))
+            _tally(report, process_file(p, anon, rel))
+            if i % 25 == 0 or i == len(paths):
+                progress("anonymize", i, len(paths), rel)
     report.mapping_sizes = {k: len(v) for k, v in anon.get_mapping().items()}
 
 
@@ -1097,12 +1488,18 @@ def anonymize_tsf(
     work_root: Optional[Path] = None,
     keep_trees: bool = False,
     progress: ProgressFn = _noop_progress,
+    workers: int = 1,
+    redact_binaries: bool = False,
 ) -> tuple[AnonymizeReport, dict]:
     """Anonymize an archive.
 
     With ``work_root`` and ``keep_trees=True`` the original tree stays at
     ``work_root/orig`` and the anonymized one at ``work_root/anon`` so the
     compare mode can run over them without re-extracting.
+
+    ``workers`` > 1 spreads the text prescan and the rewrite over processes.
+    The mapping and the output are the same whatever the count: detection
+    feeds allocation in path order, and the rewrite runs with frozen tables.
     """
     import shutil
 
@@ -1118,36 +1515,53 @@ def anonymize_tsf(
         orig_dir = root / "orig"
         anon_dir = root / "anon"
 
-        progress("extract", 0, 1, f"Extracting {input_tgz.name}")
-        members, skipped = extract_archive(input_tgz, orig_dir)
+        # Reading the member list decompresses the whole archive once, before a
+        # single file is written: it is part of the wait, so it says so.
+        progress("extract", 0, 1, f"Reading {input_tgz.name}")
+        members, skipped = extract_archive(input_tgz, orig_dir, progress=progress)
         report.members_skipped = skipped
-        progress("extract", 1, 1, f"{len(members)} members")
 
-        progress("copy", 0, 1, "Preparing working copy")
+        files = sum(1 for m in members if m.isfile())
+        progress("copy", 0, files, "Preparing working copy")
         if anon_dir.exists():
             shutil.rmtree(anon_dir)
-        shutil.copytree(orig_dir, anon_dir, symlinks=False)
-        progress("copy", 1, 1, "")
+        copied, step = [0], max(1, files // 100)
+
+        def _copy_one(src, dst):
+            shutil.copy2(src, dst)
+            copied[0] += 1
+            if copied[0] % step == 0:
+                progress("copy", copied[0], files, "")
+
+        # copytree still creates the tree; the hook only counts the payloads it
+        # writes, which is where the ~1.5 GB of a real TSF goes.
+        shutil.copytree(orig_dir, anon_dir, symlinks=False, copy_function=_copy_one)
+        progress("copy", files, files, "")
 
         report.config_files_scanned = prescan_tree(anon_dir, anon, progress)
-        prescan_text_identities(anon_dir, anon, progress)
+        prescan_text_identities(anon_dir, anon, progress, workers=workers)
         anon.build_patterns()
+        # Every identity is now on the table; freeze them so the rewrite is a
+        # pure lookup — allocation during the rewrite would make the mapping
+        # depend on scheduling, which is the one thing it must never do.
+        anon.frozen = True
+        anon.redact_binaries = redact_binaries
 
         if mapping_only:
             report.duration_s = time.monotonic() - t0
             return report, anon.get_mapping()
 
-        anonymize_tree(anon_dir, anon, report, progress)
+        anonymize_tree(anon_dir, anon, report, progress, workers=workers)
 
         if output_tgz is not None:
-            progress("repack", 0, 1, f"Repacking → {output_tgz.name}")
+            progress("repack", 0, len(members), f"Repacking → {output_tgz.name}")
             output_tgz.parent.mkdir(parents=True, exist_ok=True)
-            repack_archive(members, anon_dir, output_tgz)
+            repack_archive(members, anon_dir, output_tgz, progress=progress)
             mapping_path = mapping_sidecar_path(output_tgz)
             mapping_path.write_text(
                 json.dumps(anon.get_mapping(), indent=2, ensure_ascii=False), encoding="utf-8"
             )
-            progress("repack", 1, 1, "")
+            progress("repack", len(members), len(members), "")
 
         if not keep_trees and work_root is not None:
             shutil.rmtree(orig_dir, ignore_errors=True)

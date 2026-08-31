@@ -99,7 +99,9 @@ def create_app(data_dir: Optional[Path] = None, *,
     def health():
         usage = shutil.disk_usage(data_dir)
         return {"ok": True, "version": __version__, "data_dir": str(data_dir),
-                "disk_free_bytes": usage.free, "jobs": len(store.list())}
+                "disk_free_bytes": usage.free, "jobs": len(store.list()),
+                "workers": store.workers, "compare_workers": store.compare_workers,
+                "anon_workers": store.anon_workers}
 
     # -- jobs ---------------------------------------------------------------
 
@@ -118,15 +120,32 @@ def create_app(data_dir: Optional[Path] = None, *,
     async def create_anonymize(file: UploadFile = File(...),
                                seed_mapping: Optional[UploadFile] = File(None),
                                delete_original: bool = Form(True),
+                               redact_binaries: bool = Form(False),
                                batch: Optional[str] = Form(None),
+                               group: Optional[str] = Form(None),
                                seed_from_job: Optional[str] = Form(None)):
+        """Queue one archive.
+
+        `group` names the device the TSF comes from, and is what decides which
+        mapping this job continues: without an explicit `seed_from_job` the
+        server chains it to the latest job of the same group. Several firewalls
+        uploaded together are several groups, hence several independent
+        mappings; the same firewall — in this batch or next month — is one
+        group, hence one growing mapping. No group at all means a fresh
+        mapping.
+        """
         if seed_from_job and store.get(seed_from_job) is None:
             raise HTTPException(404, f"no job {seed_from_job} to seed from")
         job = store.new("anonymize")
         d = store.job_dir(job.id)
         job.delete_original = delete_original
+        job.redact_binaries = redact_binaries
         job.batch = _safe_filename(batch, "")[:40] or None if batch else None
+        job.group = _safe_filename(group, "")[:40] or None if group else None
         job.seed_from = seed_from_job or None
+        if not job.seed_from and job.group:
+            previous = store.latest_in_group(job.group, exclude=job.id)
+            job.seed_from = previous.id if previous else None
         job.input_name = _safe_filename(file.filename, "input.tgz")
         size = await _save_upload(file, d / "input" / job.input_name)
         if size == 0:
@@ -199,6 +218,15 @@ def create_app(data_dir: Optional[Path] = None, *,
             raise HTTPException(409, "job still running")
         store.delete_original(job)
         return {"original_deleted": job_id}
+
+    @app.post("/api/jobs/{job_id}/requeue")
+    def requeue(job_id: str):
+        """Run a job again from the upload already on disk — what a restart in
+        the middle of a batch leaves behind, without re-uploading anything."""
+        job = _job(job_id)
+        if not store.requeue(job):
+            raise HTTPException(409, "cannot requeue: the job is running, or its upload is gone")
+        return job.to_dict()
 
     @app.post("/api/jobs/{job_id}/purge-trees")
     def purge_trees(job_id: str):
