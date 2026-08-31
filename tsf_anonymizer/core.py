@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import copy
 import gzip
+import hashlib
 import ipaddress
 import json
 import logging
 import multiprocessing
 import re
+import secrets
 import tarfile
 import tempfile
 import time
@@ -306,6 +308,15 @@ def _valid_ipv4_octets(ip: str) -> bool:
     return all(p.isdigit() and 0 <= int(p) <= 255 for p in ip.split("."))
 
 
+# Address classes whose pseudonyms stay inside the class itself (RFC 1918 and
+# CGNAT), as (value of the class prefix, prefix length) — see _tree_fake.
+_TREE_CLASSES = tuple(
+    (int(ipaddress.ip_network(c).network_address) >> (32 - ipaddress.ip_network(c).prefixlen),
+     ipaddress.ip_network(c).prefixlen)
+    for c in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10")
+)
+
+
 # ---------------------------------------------------------------------------
 # Anonymizer state
 # ---------------------------------------------------------------------------
@@ -366,6 +377,16 @@ class Anonymizer:
         self.redact_binaries = False
         self._redaction_scanner: list[re.Pattern] | None = None
 
+        # Prefix-preserving IP tree (see _tree_fake). Keyed per run; the key
+        # rides in the mapping sidecar (`ip_seed`) so a second TSF seeded
+        # from the same mapping keeps whole subnets coherent, not only the
+        # addresses both archives happen to share.
+        self.ip_seed: bytes = secrets.token_bytes(16)
+        self._flip_cache: dict[str, int] = {}
+        self._pub24: dict[int, int] = {}       # real /24 (int >> 8) -> fake /24 index
+        self._pub24_next = 0
+        self._pub_perm_cache: dict[int, list[int]] = {}
+
         self._ip_re = _IP_RE
         self._user_re = _USER_PHRASE_RE
         self._serial_re = _SERIAL_FALLBACK_RE
@@ -373,6 +394,60 @@ class Anonymizer:
 
     # -- IP anonymization ---------------------------------------------------
 
+    def _flip(self, path: str) -> int:
+        """Keyed PRF bit for one node of the prefix tree."""
+        f = self._flip_cache.get(path)
+        if f is None:
+            f = hashlib.blake2b(path.encode(), key=self.ip_seed,
+                                digest_size=1).digest()[0] & 1
+            self._flip_cache[path] = f
+        return f
+
+    def _pub_host_perm(self, p24: int) -> list[int]:
+        """Deterministic host-octet permutation for one public /24 (pure
+        function of the seed — no random module, stable across versions)."""
+        perm = self._pub_perm_cache.get(p24)
+        if perm is None:
+            perm = sorted(range(256), key=lambda v: hashlib.blake2b(
+                b"%d:%d" % (p24, v), key=self.ip_seed, digest_size=8).digest())
+            self._pub_perm_cache[p24] = perm
+        return perm
+
+    def _tree_fake(self, a: int) -> str:
+        """Prefix-preserving pseudonym: same real prefix -> same fake prefix,
+        so subnets, route destinations (static or learned mid-log), LSDB
+        entries and nexthops stay mutually coherent — across files, and
+        across TSFs seeded from the same mapping.
+
+        RFC 1918 / CGNAT addresses stay inside their own class: the bits
+        between the class prefix and the host octet are flipped by a keyed
+        PRF per tree node (the root node is always flipped, so an address
+        never maps to itself), the host octet is kept — /25…/32 relations
+        are exact, /8…/24 relations survive the permutation. Every other
+        address maps into 240.0.0.0/4 (class E — never routable, never a
+        real third party): one fake /24 per real /24 in first-seen order,
+        host octet permuted per /24."""
+        for prefix, plen in _TREE_CLASSES:
+            if a >> (32 - plen) == prefix:
+                out = prefix << (32 - plen)
+                path = str(plen)
+                for bit in range(plen, 24):
+                    real = (a >> (31 - bit)) & 1
+                    flip = 1 if bit == plen else self._flip(path)
+                    out |= (real ^ flip) << (31 - bit)
+                    path += "01"[real]
+                return str(ipaddress.ip_address(out | (a & 0xFF)))
+        p24 = a >> 8
+        idx = self._pub24.get(p24)
+        if idx is None:
+            idx = self._pub24_next
+            self._pub24[p24] = idx
+            self._pub24_next += 1
+        host = self._pub_host_perm(p24)[a & 0xFF]
+        return str(ipaddress.ip_address(0xF0000000 | ((idx & 0x000F_FFFF) << 8) | host))
+
+    # Last-resort sequential generators — used only when the prefix tree's
+    # /24 probe finds no free host (see anon_ip); injective by construction.
     def _fake_private_ip(self) -> str:
         self._priv_counter += 1
         n = self._priv_counter - 1
@@ -414,15 +489,26 @@ class Anonymizer:
                 if ip_str not in self._fakes:
                     self.frozen_misses.add(ip_str)
                 return ip_str
-            gen = self._fake_private_ip if addr.is_private else self._fake_public_ip
-            fake = gen()
-            # A customer may use our fake ranges (100.64/10 is a common GP
-            # pool). Never hand out a fake that is also an original we know —
-            # nor one already handed out: the mapping must stay injective
-            # (distinct originals never share a pseudonym), and the compare
-            # checks that it is.
-            while fake in self.ip_map or fake in self._fakes:
-                fake = gen()
+            fake = self._tree_fake(int(addr))
+            # The tree is a bijection, but a structural fake can still repeat
+            # a value already used (an original we know, or a pseudonym kept
+            # from an old-format seeded mapping): probe within the same /24 —
+            # every prefix relation survives — then fall back to the
+            # sequential generators. The mapping stays injective either way,
+            # and the compare checks that it is.
+            if fake in self.ip_map or fake in self._fakes:
+                base = int(ipaddress.ip_address(fake))
+                for step in range(1, 256):
+                    cand = str(ipaddress.ip_address((base & ~0xFF) | ((base + step) & 0xFF)))
+                    if cand not in self.ip_map and cand not in self._fakes:
+                        fake = cand
+                        break
+                else:
+                    private = any(int(addr) >> (32 - p) == n for n, p in _TREE_CLASSES)
+                    gen = self._fake_private_ip if private else self._fake_public_ip
+                    fake = gen()
+                    while fake in self.ip_map or fake in self._fakes:
+                        fake = gen()
         except ValueError:
             return ip_str
         if ip_str in self._fakes:
@@ -806,6 +892,7 @@ class Anonymizer:
             "emails":         dict(self.email_map),
             "named_objects":  dict(self.named_obj_map),
             "serial_numbers": dict(self.serial_map),
+            "ip_seed":        self.ip_seed.hex(),
         }
 
     @classmethod
@@ -821,6 +908,24 @@ class Anonymizer:
         anon.email_map.update({k.lower(): v for k, v in mapping.get("emails", {}).items()})
         anon.named_obj_map.update(mapping.get("named_objects", {}))
         anon.serial_map.update(mapping.get("serial_numbers", {}))
+        seed = mapping.get("ip_seed")
+        if isinstance(seed, str) and len(seed) == 32:
+            try:
+                anon.ip_seed = bytes.fromhex(seed)
+            except ValueError:
+                pass  # unusable seed: keep the fresh one, pairs still apply
+        # Rebuild the public /24 allocation from the pairs so a new address
+        # in a known real /24 lands in the same fake /24.
+        for orig, fake in anon.ip_map.items():
+            try:
+                fi = int(ipaddress.ip_address(fake))
+                oi = int(ipaddress.ip_address(orig))
+            except ValueError:
+                continue
+            if fi >> 28 == 0xF:
+                idx = (fi >> 8) & 0x000F_FFFF
+                anon._pub24.setdefault(oi >> 8, idx)
+                anon._pub24_next = max(anon._pub24_next, idx + 1)
         anon._priv_counter = sum(1 for v in anon.ip_map.values() if v.startswith("100."))
         anon._pub_counter = len(anon.ip_map) - anon._priv_counter
         anon._user_counter = len(anon.user_map)
@@ -1612,7 +1717,8 @@ def anonymize_tree(tree: Path, anon: Anonymizer, report: AnonymizeReport,
             _tally(report, process_file(p, anon, rel))
             if i % 25 == 0 or i == len(paths):
                 progress("anonymize", i, len(paths), rel)
-    report.mapping_sizes = {k: len(v) for k, v in anon.get_mapping().items()}
+    report.mapping_sizes = {k: len(v) for k, v in anon.get_mapping().items()
+                            if isinstance(v, dict)}
 
 
 def anonymize_tsf(

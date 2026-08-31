@@ -54,8 +54,8 @@ file (rotated `.gz` logs included) with consistent pseudonyms:
 
 | class | original | replacement |
 |---|---|---|
-| private IPv4 | `10.1.2.3` | `100.64.x.y` (RFC 6598, never a real internal range) |
-| public IPv4 | `8.8.8.8` | `192.0.2.x` / `198.51.100.x` / `203.0.113.x` (RFC 5737), then `240.x.y.z` (class E) once those 762 are used |
+| private IPv4 | `10.1.2.3` | `10.x.y.3` — same class, same last octet; same real subnet → same fake subnet |
+| public IPv4 | `8.8.8.8` | `240.x.y.z` (class E, never routable) — one fake `/24` per real `/24` |
 | FQDN / hostname | `fw01.acme.local` | `host007.anon.internal` |
 | e-mail | `j.dupont@acme.fr` | `user003@host002.anon.internal` |
 | named object | `Zone-Prod-DMZ` | `ZONE-0012` (category prefix kept) |
@@ -291,9 +291,11 @@ as invariants in [.claude/rules/anonymizer-invariants.md](.claude/rules/anonymiz
 - **Free text is not scanned.** Rule descriptions, comments, login banners
   can carry a company name that nothing matches. `<contact>` / `<full-name>`
   are anonymized.
-- **A customer address inside our fake ranges (100.64/10, RFC 5737) is a
-  collision.** It is still replaced, but the same string then also appears as
-  somebody else's pseudonym; the report lists these under *mapping collisions*.
+- **A pseudonym can coincide with a real address.** Private pseudonyms live
+  in the same RFC 1918 class as their originals — that is what keeps subnets
+  and routes coherent — so a fake can equal an address the customer also
+  uses (~0.1 % measured). It is still replaced; the report lists these under
+  *mapping collisions*: ambiguous in the output, not leaked.
 - **Binary files are not rewritten.** `rule-hit-count.bin`, sqlite databases
   or core dumps may embed rule names or IPs; the compare report lists which
   ones. Remove them from the archive if that matters.

@@ -7,6 +7,20 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+### Changed
+- IP pseudonyms now preserve prefix structure (minor: changes what fakes
+  look like). Private addresses stay inside their own RFC 1918/CGNAT class
+  with the host octet kept (`10.1.2.3` → `10.x.y.3`), driven by a keyed PRF
+  prefix tree whose key travels in the mapping sidecar as `ip_seed`; every
+  other address maps into 240.0.0.0/4 (class E), one fake /24 per real /24.
+  Same real prefix → same fake prefix: subnets, static and dynamically
+  learned route destinations, LSDB entries and nexthops stay mutually
+  coherent — across files and across TSFs seeded from the same mapping. An
+  address can no longer map to itself; a structural fake that would repeat
+  a used value probes within its /24. The compare now **applies** mapping
+  keys that collide with pseudonym values instead of dropping them (they
+  are still excluded from the leak scan and reported as collisions).
+
 ### Fixed
 - The fake-IP generators are injective again: the private one merged `.0`/`.1`
   host octets every 256th allocation and the public one cycled over the 762
