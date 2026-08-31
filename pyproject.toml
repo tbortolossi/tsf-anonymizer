@@ -1,13 +1,40 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "tsf-anonymizer"
+# Single source of truth for the version: `uv version --bump patch|minor|major`
+# updates it here and in uv.lock; the package reads it back through
+# importlib.metadata (see tsf_anonymizer/__init__.py). Never edit by hand.
 version = "0.2.3"
 description = "Anonymize PAN-OS tech support files (TSF) without losing debugging value, and prove it with a compare mode."
+readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Thomas Bortolossi" }]
+keywords = [
+    "palo-alto-networks", "pan-os", "panos", "tech-support-file", "techsupport",
+    "anonymization", "pseudonymization", "redaction", "data-privacy", "gdpr",
+    "firewall", "logs", "security",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: System :: Logging",
+    "Topic :: System :: Networking :: Firewalls",
+    "Topic :: Utilities",
+]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -15,15 +42,28 @@ dependencies = [
     "jinja2>=3.1",
 ]
 
-[project.optional-dependencies]
+[project.urls]
+Homepage = "https://github.com/tbortolossi/tsf-anonymizer"
+Documentation = "https://github.com/tbortolossi/tsf-anonymizer/tree/master/docs"
+Changelog = "https://github.com/tbortolossi/tsf-anonymizer/blob/master/CHANGELOG.md"
+Issues = "https://github.com/tbortolossi/tsf-anonymizer/issues"
+Security = "https://github.com/tbortolossi/tsf-anonymizer/blob/master/SECURITY.md"
+
+[project.scripts]
+tsf-anonymizer = "tsf_anonymizer.cli:main"
+
+# PEP 735 dependency groups: `uv sync` installs `dev` by default;
+# `uv sync --group docs` adds what the screenshot generator needs.
+[dependency-groups]
 dev = [
     "pytest>=7.4",
     "httpx>=0.27",
     "ruff>=0.4",
+    "pre-commit>=3.7",
 ]
-
-[project.scripts]
-tsf-anonymizer = "tsf_anonymizer.cli:main"
+docs = [
+    "playwright>=1.45",
+]
 
 [tool.setuptools.packages.find]
 include = ["tsf_anonymizer*"]
@@ -33,9 +73,25 @@ include = ["tsf_anonymizer*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-q"
 
 [tool.ruff]
 line-length = 100
+target-version = "py311"
+extend-exclude = ["data", "certs", "docs/private"]
 
 [tool.ruff.lint]
-select = ["F", "E9"]
+# F/E9: real bugs. I: import order. UP: modern syntax for the supported
+# Pythons. B: bugbear's likely-mistakes. W: whitespace hygiene.
+# E501/E702 are deliberately left out: the code is written with long
+# explanatory comments and a few one-line `a = 1; b = 2` pairs, and `ruff
+# format` is not imposed either -- the style of this codebase is the
+# prose in it, not a formatter's.
+select = ["F", "E9", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's `File(...)` / `Form(...)` defaults are the framework's idiom.
+extend-immutable-calls = ["fastapi.File", "fastapi.Form", "fastapi.Query", "fastapi.Depends"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tsf_anonymizer"]

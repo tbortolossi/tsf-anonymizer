@@ -11,7 +11,19 @@ Two halves, deliberately independent of each other:
   intact.
 """
 
-from .core import Anonymizer, AnonymizeReport, anonymize_tsf  # noqa: F401
 from .compare import CompareReport, compare_archives, compare_trees  # noqa: F401
+from .core import Anonymizer, AnonymizeReport, anonymize_tsf  # noqa: F401
 
-__version__ = "0.2.3"
+
+def _version() -> str:
+    # pyproject.toml is the single source of the version (`uv version --bump`);
+    # the fallback covers a checkout imported without being installed.
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("tsf-anonymizer")
+    except PackageNotFoundError:
+        return "0+unknown"
+
+
+__version__ = _version()

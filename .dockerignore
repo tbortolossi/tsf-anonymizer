@@ -1,9 +1,8 @@
-.git
-.venv
-data
-__pycache__
-*.pyc
-*.egg-info
-*.tgz
-*.tar.gz
-tests
+# Allow-list: the image needs the lockfile, the metadata and the package.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!tsf_anonymizer/
+tsf_anonymizer/**/__pycache__/

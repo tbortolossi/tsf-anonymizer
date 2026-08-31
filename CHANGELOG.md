@@ -1,0 +1,88 @@
+# Changelog
+
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
+adheres to [Semantic Versioning](https://semver.org/) (`0.x`: a minor bump may
+change what is mapped, a patch bump only fixes).
+
+## [Unreleased]
+
+### Added
+- `tsf-anonymizer mock-tsf`: a deterministic synthetic TSF (fictional company,
+  reserved address ranges) to try the tool on, reproduce bugs and generate the
+  documentation — real archives are customer material and never enter the repo.
+- `docs/user-guide.md` and `docs/architecture.md`; screenshots of the web UI
+  generated automatically from the mock archive (`make screenshots`,
+  `scripts/docs-screenshots.py`, Playwright).
+- Project files for public release: Apache-2.0 `LICENSE`, `SECURITY.md`,
+  `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, issue and pull request templates,
+  `CODEOWNERS`, Dependabot.
+- GitHub Actions: lint + tests on Python 3.11/3.12/3.13 + Docker build + UI
+  smoke test on every PR; CodeQL; a release workflow on `v*` tags that builds
+  the wheel, publishes the GitHub release from this file and pushes the image
+  to GHCR.
+- `Makefile` with the everyday targets and `.pre-commit-config.yaml`.
+
+### Changed
+- Tooling moves to **uv**: `uv.lock`, PEP 735 dependency groups (`dev`, `docs`),
+  `.python-version`; the Dockerfile builds from the lockfile in two stages.
+- The version lives in `pyproject.toml` only (`uv version --bump …`);
+  `tsf_anonymizer.__version__` reads it from the installed metadata.
+- Ruff now also enforces import order, modern syntax and bugbear checks.
+
+## [0.2.3] - 2026-08-31
+
+### Fixed
+- Member renaming touches file names only, never directories: a username `cli`
+  once turned `tmp/cli/` into `tmp/user83115/` for 347 members.
+
+## [0.2.2] - 2026-08-31
+
+### Fixed
+- A hyphenated compound built on the device's hostname (`adm-<hostname>`, the
+  admin UI's DNS name in nginx logs; `<hostname>-PBP-ALERTE`) names the same
+  device and is anonymized as such, in the anonymizer and the compare alike.
+
+## [0.2.1] - 2026-08-31
+
+### Fixed
+- The last identifier families the first parallel batch of real TSFs
+  surfaced: one trie for objects and usernames (longest key wins whatever the
+  category), sysd `interface@vlan` keys are not e-mails, `vsys<n>_` is the one
+  underscore that separates an object name, a trailing `$` is the
+  machine-account marker rather than part of the username, the device's own
+  name wherever PAN-OS puts it.
+
+## [0.2.0] - 2026-08-31
+
+### Added
+- Parallel processing: several archives at once (`TSF_WORKERS`), each job's
+  heavy passes spread over worker processes (`TSF_ANON_WORKERS`,
+  `TSF_COMPARE_WORKERS`) with a detect-then-freeze design that keeps the
+  mapping independent of the worker count.
+- Batches in the web UI: drag-and-drop several TSFs with one shared mapping,
+  one mapping per firewall, or one per archive; a firewall's mapping outlives
+  the batch.
+- Per-job run log (`output/job.log`) shown in the UI, phase durations, live
+  progress for the long phases, *quiet for N min* detection.
+- `--redact-binaries`: replace binary payloads that embed identifiers with a
+  marker, verified by the compare against the original.
+- The `read-tsf` agent skill and `docs/TSF-GUIDE.md`.
+
+### Security
+- HTTP Basic auth on every route, fail-closed TLS, loopback bind by default,
+  container running as the host user.
+
+## [0.1.0] - 2026-08-30
+
+### Added
+- Initial standalone release, seeded from TAC-MAN's anonymizer library:
+  anonymize, compare, web UI, Docker image; the first twelve real-TSF
+  invariants recorded in CLAUDE.md.
+
+[Unreleased]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/tbortolossi/tsf-anonymizer/releases/tag/v0.1.0

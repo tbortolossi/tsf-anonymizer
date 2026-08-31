@@ -1,11 +1,38 @@
 # TSF Anonymizer
 
-Anonymize PAN-OS tech support files (TSF) before sharing them, **without losing
-what makes them useful for troubleshooting** — and prove it with a compare mode.
+[![CI](https://github.com/tbortolossi/tsf-anonymizer/actions/workflows/ci.yml/badge.svg)](https://github.com/tbortolossi/tsf-anonymizer/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/tbortolossi/tsf-anonymizer/actions/workflows/codeql.yml/badge.svg)](https://github.com/tbortolossi/tsf-anonymizer/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/tbortolossi/tsf-anonymizer?include_prereleases&sort=semver)](https://github.com/tbortolossi/tsf-anonymizer/releases)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 
-Standalone: one Python package, one container, no external service. Derived
-from the anonymizer lib in TAC-MAN, duplicated on purpose so this project has no
-dependency on that repository.
+**Anonymize Palo Alto Networks PAN-OS tech support files (TSF) before
+sharing them — without losing what makes them useful for troubleshooting —
+and prove it with an independent compare mode.**
+
+A tech support file is the archive a PAN-OS firewall or Panorama produces
+for a support case: every config, every daemon log, the command dump. It
+names the customer on every line — hostnames, internal and public IPs, LDAP
+domains, usernames, e-mail recipients, serial numbers, rule and object
+names. This tool replaces all of that with **consistent pseudonyms** (same
+original → same fake everywhere, so VPN peers, users and rules still
+correlate across logs and config), keeps everything else byte for byte
+(timestamps, counters, line numbers, interface names, binary files, archive
+order and metadata), and then **verifies its own output** with a second,
+independent implementation that re-derives every change from the mapping.
+
+Standalone: one Python package, one container, a web UI and a CLI, no
+external service, nothing leaves your machine.
+
+![Job page: the flow from upload to verdict, and the integrity summary](docs/screenshots/03-job-verdict.png)
+
+- [What it does](#what-it-does)
+- [Run it](#run-it) · [Docker Compose](#docker-compose-recommended) · [Try it without a real TSF](#try-it-without-a-real-tsf) · [Batches](#batches)
+- [Measured on a real TSF](#measured-on-a-real-tsf)
+- [Known limitations](#known-limitations)
+- [Docs](docs/user-guide.md): [user guide](docs/user-guide.md) · [architecture](docs/architecture.md) · [what a TSF contains](docs/TSF-GUIDE.md)
+- [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md) · [Changelog](CHANGELOG.md)
 
 ## What it does
 
@@ -65,9 +92,13 @@ it once you have looked. CLI: `--verify --delete-original`.
 
 New to TSFs? [docs/TSF-GUIDE.md](docs/TSF-GUIDE.md) explains what a tech
 support file contains, where each kind of information lives, which daemon
-log to read for which problem, and how to read an anonymized one.
+log to read for which problem, and how to read an anonymized one. The
+[user guide](docs/user-guide.md) walks through the UI screen by screen;
+[architecture.md](docs/architecture.md) explains the pipeline.
 
 ## Run it
+
+### Docker Compose (recommended)
 
 ```bash
 cat > .env <<EOF          # gitignored; compose reads it automatically
@@ -107,6 +138,17 @@ docker compose up -d --force-recreate
 
 Note that publishing on a LAN address means the port is *only* on that
 address: use `https://<that address>:8096` from the host too.
+
+### Try it without a real TSF
+
+```bash
+tsf-anonymizer mock-tsf              # writes fw-paris-01_20260407_1000_techsupport.tgz
+```
+
+A small, complete, entirely fictional archive — configs, rotated daemon
+logs, the command dump, binaries that embed identifiers — that runs through
+anonymize and verify in a second. Drop it on the UI, or pass it to the CLI
+below. It is also what every screenshot in the docs was taken from.
 
 ### Where the archives live
 
@@ -195,7 +237,8 @@ the chain.
 CLI (same code, no container):
 
 ```bash
-pip install -e ".[dev]"
+uv tool install git+https://github.com/tbortolossi/tsf-anonymizer   # or pipx
+tsf-anonymizer mock-tsf                                               # a synthetic TSF to try it on
 tsf-anonymizer anonymize in.tgz --verify --report integrity.json [--delete-original]
 tsf-anonymizer compare in.tgz in_anon.tgz --mapping in_anon.mapping.json
 tsf-anonymizer anonymize second.tgz --seed-mapping in_anon.mapping.json   # same customer, same pseudonyms
@@ -258,8 +301,13 @@ as invariants in [CLAUDE.md](CLAUDE.md).
   machines where you imported it — a browser warning you click through
   proves nothing about who answered.
 
-## Tests
+## Contributing, security, licence
 
-```bash
-pytest
-```
+Bug reports and feature requests go through the
+[issue templates](https://github.com/tbortolossi/tsf-anonymizer/issues/new/choose);
+**never attach a real TSF or a mapping** — extend the mock archive instead.
+An identifier that survives anonymization is a
+[security report](SECURITY.md), handled privately. Development setup,
+workflow and release process are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Licensed under [Apache-2.0](LICENSE).

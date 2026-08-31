@@ -33,10 +33,10 @@ import tarfile
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -337,11 +337,11 @@ class Anonymizer:
         self._fqdn_counter = 0
         self._email_counter = 0
 
-        self._obj_re: Optional[re.Pattern] = None
+        self._obj_re: re.Pattern | None = None
         self._cs_table: dict[str, str] = {}   # objects + usernames behind _obj_re
-        self._fqdn_re: Optional[re.Pattern] = None
-        self._known_serial_re: Optional[re.Pattern] = None
-        self._user_trie_re: Optional[re.Pattern] = None
+        self._fqdn_re: re.Pattern | None = None
+        self._known_serial_re: re.Pattern | None = None
+        self._user_trie_re: re.Pattern | None = None
         self._built_for: tuple = ()
         # Every fake value ever produced. A later pass must never treat one as
         # an original (user 'Zone-A' → user 'OBJ-0002' → user001 chained two
@@ -364,7 +364,7 @@ class Anonymizer:
         # logs carried ~27 000 identifiers per file on a real TSF). Off by
         # default: it deliberately loses data, so it is the operator's call.
         self.redact_binaries = False
-        self._redaction_scanner: Optional[list[re.Pattern]] = None
+        self._redaction_scanner: list[re.Pattern] | None = None
 
         self._ip_re = _IP_RE
         self._user_re = _USER_PHRASE_RE
@@ -776,7 +776,7 @@ class Anonymizer:
         }
 
     @classmethod
-    def from_mapping(cls, mapping: dict) -> "Anonymizer":
+    def from_mapping(cls, mapping: dict) -> Anonymizer:
         """Rebuild an anonymizer whose tables are pre-filled — used to
         anonymize a second TSF from the same customer consistently."""
         anon = cls()
@@ -916,7 +916,7 @@ _DOMAIN_USER_NAME_RE = re.compile(
 )
 
 
-def _register_entry_name(name_attr: Optional[str], parent_tag: str, anon: Anonymizer) -> None:
+def _register_entry_name(name_attr: str | None, parent_tag: str, anon: Anonymizer) -> None:
     if not (name_attr and len(name_attr) >= 2 and name_attr.lower() not in BUILTIN_OBJECTS
             and not _is_vocabulary(name_attr, parent_tag)):
         return
@@ -1082,7 +1082,7 @@ class FileOutcome:
     path: str
     action: str  # modified | unchanged | binary | gz_binary | redacted | error
     replacements: dict[str, int] = field(default_factory=dict)
-    error: Optional[str] = None
+    error: str | None = None
     # Identifiers the frozen rewrite would have had to allocate a pseudonym
     # for — the detection prescan should make this impossible, so anything
     # here is a bug to surface, not to hide.
@@ -1097,7 +1097,7 @@ def _encode(text: str) -> bytes:
     return text.encode("utf-8", errors="surrogateescape")
 
 
-def anonymize_bytes(raw: bytes, anon: Anonymizer) -> Optional[bytes]:
+def anonymize_bytes(raw: bytes, anon: Anonymizer) -> bytes | None:
     """Anonymize a text payload. Returns None when nothing changed."""
     original = _decode(raw)
     anonymized = anon.anonymize_text(original)
@@ -1249,7 +1249,7 @@ def extract_archive(archive: Path, work_dir: Path, *,
 
 def repack_archive(members: Iterable[tarfile.TarInfo], tree: Path, output: Path, *,
                    progress: ProgressFn = _noop_progress,
-                   rename: Optional[Callable[[str], str]] = None) -> int:
+                   rename: Callable[[str], str] | None = None) -> int:
     """Write `output` with the same member order and metadata as the input,
     swapping in the payload found under `tree`. Returns members written.
 
@@ -1298,7 +1298,7 @@ CONFIG_GLOBS = (
 @dataclass
 class AnonymizeReport:
     input_name: str
-    output_name: Optional[str]
+    output_name: str | None
     files_total: int = 0
     modified: int = 0
     unchanged: int = 0
@@ -1584,10 +1584,10 @@ def anonymize_tree(tree: Path, anon: Anonymizer, report: AnonymizeReport,
 
 def anonymize_tsf(
     input_tgz: Path,
-    output_tgz: Optional[Path],
+    output_tgz: Path | None,
     mapping_only: bool = False,
-    seed_mapping: Optional[dict] = None,
-    work_root: Optional[Path] = None,
+    seed_mapping: dict | None = None,
+    work_root: Path | None = None,
     keep_trees: bool = False,
     progress: ProgressFn = _noop_progress,
     workers: int = 1,

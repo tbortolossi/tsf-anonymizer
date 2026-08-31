@@ -8,12 +8,17 @@ import json
 from pathlib import Path
 
 import pytest
-
-from tsf_anonymizer.core import anonymize_tsf
-from tsf_anonymizer.compare import (
-    MappingIndex, compare_archives, compare_members, compare_trees, explain_line, file_diff,
-)
 from conftest import build_tsf
+
+from tsf_anonymizer.compare import (
+    MappingIndex,
+    compare_archives,
+    compare_members,
+    compare_trees,
+    explain_line,
+    file_diff,
+)
+from tsf_anonymizer.core import anonymize_tsf
 
 MAPPING = {
     "ip_addresses": {"10.0.0.5": "100.64.0.1", "8.8.8.8": "192.0.2.1"},
@@ -275,6 +280,7 @@ class TestCollisionsAndLongLines:
 
     def test_long_line_is_diffed_by_token_quickly(self):
         import time
+
         from tsf_anonymizer.compare import _changed_spans
         a = " ".join(f"<entry name='obj{i}'><ip>10.0.0.{i%250}</ip></entry>" for i in range(1500))
         b = a.replace("10.0.0.7<", "100.64.0.1<")

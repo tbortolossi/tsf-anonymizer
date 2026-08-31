@@ -131,7 +131,7 @@ def build_tsf(tmp_path: Path, name: str = "in.tgz") -> Path:
 def _latin(s: str) -> bytes:
     """LOG_SAMPLE holds an `é`: write it as a single Latin-1 byte (0xE9), the
     way a PAN-OS log that is not UTF-8 would."""
-    return s.encode("utf-8").replace("\xe9".encode("utf-8"), b"\xe9")
+    return s.encode("utf-8").replace("\xe9".encode(), b"\xe9")
 
 
 @pytest.fixture

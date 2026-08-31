@@ -34,14 +34,19 @@ import re
 import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
 
 from .core import (
-    BINARY_EXTENSIONS, MAPPING_CATEGORIES, REDACTED_PAYLOAD, extract_archive,
-    is_binary_bytes, mapped_member_name, trie_regex,
+    BINARY_EXTENSIONS,
+    MAPPING_CATEGORIES,
+    REDACTED_PAYLOAD,
+    extract_archive,
+    is_binary_bytes,
+    mapped_member_name,
+    trie_regex,
 )
 
 ProgressFn = Callable[[str, int, int, str], None]
@@ -130,7 +135,7 @@ class MappingIndex:
         # false-positive rate makes the report useless.
         self.min_leak_len = 3
 
-    def lookup(self, token: str) -> Optional[str]:
+    def lookup(self, token: str) -> str | None:
         fake = self.forward.get(token)
         if fake is not None:
             return fake
@@ -207,8 +212,8 @@ class FileReport:
     timestamps_anon: int = 0
     numeric_orig: int = 0
     numeric_anon: int = 0
-    xml_structure: Optional[str] = None  # preserved | changed | unparseable
-    binary_identical: Optional[bool] = None
+    xml_structure: str | None = None  # preserved | changed | unparseable
+    binary_identical: bool | None = None
     redacted: bool = False
     notes: list[str] = field(default_factory=list)
 
@@ -302,7 +307,7 @@ def analyze_text_pair(rel: str, orig_raw: bytes, anon_raw: bytes, kind: str,
     if rep.lines_orig != rep.lines_anon:
         rep.status = "error"
         rep.notes.append(f"line count changed: {rep.lines_orig} → {rep.lines_anon}")
-        rep.changed_lines = sum(1 for o, a in zip(o_lines, a_lines) if o != a)
+        rep.changed_lines = sum(1 for o, a in zip(o_lines, a_lines, strict=False) if o != a)
         return rep
 
     if o_text != a_text:
@@ -311,7 +316,7 @@ def analyze_text_pair(rel: str, orig_raw: bytes, anon_raw: bytes, kind: str,
         # through the per-line span analysis.
         e_lines = _split_lines(index.apply(o_text))
         unexplained_pairs: list[tuple[int, str, str]] = []
-        for n, (o, a, e) in enumerate(zip(o_lines, a_lines, e_lines), 1):
+        for n, (o, a, e) in enumerate(zip(o_lines, a_lines, e_lines, strict=False), 1):
             if o == a:
                 continue
             rep.changed_lines += 1
@@ -479,7 +484,7 @@ def compare_trees(orig_dir: Path, anon_dir: Path, mapping: dict,
     # so the anonymized side is looked up under the *mapped* name first — the
     # same mapping, applied to the path — and under the original name second
     # (an anonymize job's working trees keep the original names on disk).
-    a_rel_of: dict[str, Optional[str]] = {}
+    a_rel_of: dict[str, str | None] = {}
     for rel in o_files:
         mapped = mapped_member_name(index.apply, rel)
         a_rel_of[rel] = mapped if mapped in a_files else (rel if rel in a_files else None)
@@ -510,7 +515,7 @@ def compare_trees(orig_dir: Path, anon_dir: Path, mapping: dict,
                                  initializer=_init_worker,
                                  initargs=(mapping, str(orig_dir), str(anon_dir))) as pool:
             for i, ((rel, _), rep) in enumerate(
-                    zip(pairs, pool.map(_analyze_in_worker, pairs, chunksize=4)), 1):
+                    zip(pairs, pool.map(_analyze_in_worker, pairs, chunksize=4), strict=True), 1):
                 done[rel] = rep
                 if i % 25 == 0 or i == len(pairs):
                     progress("compare", i, total, rel)
@@ -574,7 +579,7 @@ def summarize(files: list[FileReport]) -> dict:
 
 
 def compare_members(orig_tgz: Path, anon_tgz: Path,
-                    progress: ProgressFn = _noop, mapping: Optional[dict] = None) -> dict:
+                    progress: ProgressFn = _noop, mapping: dict | None = None) -> dict:
     """Archive-level check: same members, same order, same metadata.
 
     Member names are compared through the mapping: a name that carries an
@@ -608,7 +613,7 @@ def compare_members(orig_tgz: Path, anon_tgz: Path,
             mismatches.append("member order differs")
     a_by = {m.name.lstrip("/"): m for m in a}
     meta_diff = 0
-    for m, expected in zip(o, o_names):
+    for m, expected in zip(o, o_names, strict=True):
         n = a_by.get(expected)
         if n is None:
             continue
@@ -618,7 +623,7 @@ def compare_members(orig_tgz: Path, anon_tgz: Path,
         mismatches.append(f"{meta_diff} member(s) with different metadata (mode/uid/gid/mtime)")
     return {
         "members_orig": len(o), "members_anon": len(a),
-        "members_renamed": sum(1 for m, e in zip(o, o_names) if m.name.lstrip("/") != e),
+        "members_renamed": sum(1 for m, e in zip(o, o_names, strict=True) if m.name.lstrip("/") != e),
         "order_preserved": o_names == a_names,
         "metadata_differences": meta_diff,
         "mismatches": mismatches,
@@ -626,7 +631,7 @@ def compare_members(orig_tgz: Path, anon_tgz: Path,
 
 
 def compare_archives(orig_tgz: Path, anon_tgz: Path, mapping: dict,
-                     work_root: Optional[Path] = None, keep_trees: bool = False,
+                     work_root: Path | None = None, keep_trees: bool = False,
                      progress: ProgressFn = _noop, workers: int = 1) -> CompareReport:
     import shutil
 
@@ -714,7 +719,7 @@ def file_diff(orig_dir: Path, anon_dir: Path, rel: str, mapping: dict,
             "changed_lines": len(changed_idx), "hunks": hunks, "truncated": truncated}
 
 
-def _clip(s: Optional[str]) -> Optional[str]:
+def _clip(s: str | None) -> str | None:
     """Display form of a line: clipped, and with the lone surrogates that
     ``surrogateescape`` produces for non-UTF-8 bytes replaced by U+FFFD — JSON
     cannot carry them. Display only; payloads on disk are never touched."""

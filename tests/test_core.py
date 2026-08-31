@@ -8,12 +8,17 @@ import json
 import tarfile
 
 import pytest
+from conftest import BINARY_PAYLOAD, CONFIG_XML, IDENTIFIERS, PRESERVED, read_member
 
 from tsf_anonymizer.core import (
-    Anonymizer, anonymize_tsf, is_binary_file, mapping_sidecar_path, process_file,
-    prescan_config_xml, _is_panos_interface,
+    Anonymizer,
+    _is_panos_interface,
+    anonymize_tsf,
+    is_binary_file,
+    mapping_sidecar_path,
+    prescan_config_xml,
+    process_file,
 )
-from conftest import CONFIG_XML, IDENTIFIERS, PRESERVED, BINARY_PAYLOAD, read_member
 
 
 @pytest.fixture
@@ -241,7 +246,7 @@ class TestAnonymizeTsf:
         # device comes out renamed, exactly as the text would.
         from tsf_anonymizer.core import mapped_member_name
         assert [mapped_member_name(idx.apply, m.name) for m in ma] == [m.name for m in mb]
-        for x, y in zip(ma, mb):
+        for x, y in zip(ma, mb, strict=True):
             assert (x.mode, x.uid, x.gid, x.uname, x.mtime, x.type) == (y.mode, y.uid, y.gid, y.uname, y.mtime, y.type)
 
     def test_mode_0000_file_is_anonymized_and_keeps_its_mode(self, output):
@@ -729,8 +734,8 @@ class TestRedactBinaries:
     warning — verified against the original, never trusted."""
 
     def test_binary_with_identifiers_is_redacted_and_compare_is_clean(self, tmp_path, tsf):
-        from tsf_anonymizer.core import REDACTED_PAYLOAD
         from tsf_anonymizer.compare import compare_archives
+        from tsf_anonymizer.core import REDACTED_PAYLOAD
         out = tmp_path / "out.tgz"
         report, mapping = anonymize_tsf(tsf, out, redact_binaries=True)
         assert report.redacted >= 2  # rule-hit-count.bin and core.1.gz both embed Zone-Prod-DMZ
@@ -749,8 +754,8 @@ class TestRedactBinaries:
         assert read_member(out, "./var/log/pan/rule-hit-count.bin") == BINARY_PAYLOAD
 
     def test_unwarranted_redaction_is_a_warning(self, tmp_path):
+        from tsf_anonymizer.compare import MappingIndex, compare_one
         from tsf_anonymizer.core import REDACTED_PAYLOAD
-        from tsf_anonymizer.compare import compare_one, MappingIndex
         (tmp_path / "o").mkdir(); (tmp_path / "a").mkdir()
         (tmp_path / "o/x.bin").write_bytes(b"\x00\x01 nothing identifying \xff")
         (tmp_path / "a/x.bin").write_bytes(REDACTED_PAYLOAD)
@@ -930,6 +935,7 @@ class TestBinaryHeuristic:
 
     def test_compressed_stream_is_binary(self):
         import random
+
         from tsf_anonymizer.core import is_binary_bytes
         random.seed(3)
         chunk = bytes(random.randrange(256) for _ in range(4096))

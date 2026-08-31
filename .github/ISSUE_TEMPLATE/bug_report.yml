@@ -1,0 +1,47 @@
+name: Bug report
+description: Something is wrong — a crash, an unexpected result, a wrong verdict.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never attach a real tech support file, a mapping or an excerpt of one.** Describe the *pattern* with made-up values, or extend the synthetic archive from `tsf-anonymizer mock-tsf`. An identifier that survives anonymization is a [security report](https://github.com/tbortolossi/tsf-anonymizer/security/advisories/new), not an issue.
+  - type: checkboxes
+    id: no-customer-data
+    attributes:
+      label: Nothing in this report comes from a real TSF
+      options:
+        - label: Every hostname, IP, serial, user and company name below is fictional or from the mock archive.
+          required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got. Paste the relevant lines of `output/job.log` (job page → *run log*) or the CLI output.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproducer
+      description: The shortest synthetic input that shows it — a log line, an XML snippet, a member name — and the command or UI action.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`tsf-anonymizer --version`, the footer of the web UI, or the image tag."
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How it runs
+      options: [Docker Compose, CLI (uv / pip), other]
+    validations:
+      required: true
+  - type: input
+    id: panos
+    attributes:
+      label: PAN-OS version and platform of the archive
+      placeholder: "11.1.4, PA-440 — model and version only"

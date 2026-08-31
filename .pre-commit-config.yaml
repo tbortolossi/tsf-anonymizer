@@ -1,0 +1,22 @@
+# `uv run pre-commit install` once; then every commit runs these.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.5
+    hooks:
+      - id: ruff
+        args: [--fix]
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.12.7
+    hooks:
+      - id: uv-lock        # uv.lock follows pyproject.toml
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: [--maxkb=1500]   # a TSF is never small; a screenshot never this big
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        exclude: \.md$
+      - id: check-merge-conflict

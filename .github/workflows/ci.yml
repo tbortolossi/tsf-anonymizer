@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"   # every uv command uses uv.lock as is; a drift fails `uv lock --check`
+
+jobs:
+  lint:
+    name: Lint & lockfile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --group dev
+      - run: uv lock --check
+      - run: uv run ruff check --output-format=github .
+
+  test:
+    name: Tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+      - run: uv sync --group dev
+      - run: uv run pytest
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: tsf-anonymizer:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # The image must run the tool end to end, not only start.
+      - name: Smoke test
+        run: |
+          mkdir -p smoke   # created here, not by Docker (which would make it root's)
+          docker run --rm -v "$PWD/smoke:/work" -w /work --user "$(id -u):$(id -g)" \
+            tsf-anonymizer:ci sh -c 'tsf-anonymizer mock-tsf -o mock.tgz --lines 200 \
+              && tsf-anonymizer anonymize mock.tgz --verify'
+
+  ui-smoke:
+    name: Web UI smoke test & screenshots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --group dev --group docs
+      - run: uv run playwright install --with-deps chromium
+      # Drives the real server with the mock archive and produces the
+      # documentation screenshots; a broken page fails the job.
+      - run: uv run python scripts/docs-screenshots.py --out screenshots-ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: screenshots-ci/
+          retention-days: 14

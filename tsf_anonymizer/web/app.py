@@ -17,12 +17,11 @@ import base64
 import binascii
 import json
 import os
-from contextlib import asynccontextmanager
 import re
 import secrets
 import shutil
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -31,7 +30,7 @@ from fastapi.templating import Jinja2Templates
 
 from .. import __version__
 from ..compare import file_diff
-from ..jobs import JobStore, LOG_NAME
+from ..jobs import LOG_NAME, JobStore
 
 HERE = Path(__file__).parent
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._\-]+")
@@ -62,9 +61,9 @@ def _credentials_ok(header: str, username: str, password: str) -> bool:
     return ok_user and ok_password
 
 
-def create_app(data_dir: Optional[Path] = None, *,
-               username: Optional[str] = None,
-               password: Optional[str] = None) -> FastAPI:
+def create_app(data_dir: Path | None = None, *,
+               username: str | None = None,
+               password: str | None = None) -> FastAPI:
     data_dir = Path(data_dir or os.getenv("TSF_DATA_DIR", "/data"))
     username = username if username is not None else os.getenv("TSF_USERNAME", "admin")
     password = password if password is not None else os.getenv("TSF_PASSWORD", "")
@@ -118,12 +117,12 @@ def create_app(data_dir: Optional[Path] = None, *,
 
     @app.post("/api/jobs/anonymize")
     async def create_anonymize(file: UploadFile = File(...),
-                               seed_mapping: Optional[UploadFile] = File(None),
+                               seed_mapping: UploadFile | None = File(None),
                                delete_original: bool = Form(True),
                                redact_binaries: bool = Form(False),
-                               batch: Optional[str] = Form(None),
-                               group: Optional[str] = Form(None),
-                               seed_from_job: Optional[str] = Form(None)):
+                               batch: str | None = Form(None),
+                               group: str | None = Form(None),
+                               seed_from_job: str | None = Form(None)):
         """Queue one archive.
 
         `group` names the device the TSF comes from, and is what decides which
@@ -157,7 +156,7 @@ def create_app(data_dir: Optional[Path] = None, *,
                 json.loads(raw)
             except ValueError:
                 store.delete(job.id)
-                raise HTTPException(400, "seed mapping is not valid JSON")
+                raise HTTPException(400, "seed mapping is not valid JSON") from None
             (d / "input" / "seed.mapping.json").write_bytes(raw)
         store._save(job)
         store.submit(job)
@@ -165,7 +164,7 @@ def create_app(data_dir: Optional[Path] = None, *,
 
     @app.post("/api/jobs/compare")
     async def create_compare(original: UploadFile = File(...), anonymized: UploadFile = File(...),
-                             mapping: Optional[UploadFile] = File(None),
+                             mapping: UploadFile | None = File(None),
                              delete_original: bool = Form(False)):
         job = store.new("compare")
         d = store.job_dir(job.id)
@@ -185,7 +184,7 @@ def create_app(data_dir: Optional[Path] = None, *,
                 json.loads(raw)
             except ValueError:
                 store.delete(job.id)
-                raise HTTPException(400, "mapping is not valid JSON")
+                raise HTTPException(400, "mapping is not valid JSON") from None
             (d / "input" / "mapping.json").write_bytes(raw)
         store._save(job)
         store.submit(job)
@@ -235,7 +234,7 @@ def create_app(data_dir: Optional[Path] = None, *,
         return {"purged": job_id}
 
     @app.get("/api/jobs/{job_id}/report")
-    def integrity_report(job_id: str, status: Optional[str] = None, q: Optional[str] = None,
+    def integrity_report(job_id: str, status: str | None = None, q: str | None = None,
                          offset: int = 0, limit: int = 500):
         job = _job(job_id)
         p = store.job_dir(job.id) / "output" / "integrity-report.json"

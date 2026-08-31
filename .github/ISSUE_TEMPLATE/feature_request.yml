@@ -1,0 +1,32 @@
+name: Feature request
+description: Something the tool should do, or do differently.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do and what gets in the way. Who has this problem (a TAC engineer, an MSSP, a customer sharing a TSF)?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: The behaviour you expect — a flag, a UI element, a new identifier class, a check the compare should make.
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Example
+      description: A genericized before/after. For a new identifier class, the *shape* of the value and where in a TSF it appears (file, log phrasing) — never a real value.
+      render: text
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I looked at the *Known limitations* in the README and this is not one of the documented ones — or it is, and I am proposing how to lift it.
+        - label: Nothing in this request comes from a real TSF.
+          required: true

@@ -27,12 +27,11 @@ import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
 
+from .compare import compare_archives, compare_members, compare_trees
 from .core import anonymize_tsf, default_output_path, mapping_sidecar_path
-from .compare import compare_archives, compare_trees, compare_members
 
 logger = logging.getLogger(__name__)
 
@@ -105,45 +104,45 @@ class Job:
     kind: str                      # anonymize | compare
     status: str = "queued"
     created_at: float = field(default_factory=time.time)
-    started_at: Optional[float] = None
-    finished_at: Optional[float] = None
+    started_at: float | None = None
+    finished_at: float | None = None
     # When the run last said anything. A phase that reports no movement for
     # minutes is the one thing a status of "running" cannot express, and it is
     # exactly what a watcher needs to tell a slow job from a stuck one.
-    updated_at: Optional[float] = None
+    updated_at: float | None = None
     input_name: str = ""
     anon_input_name: str = ""
     phase: str = ""
     progress_done: int = 0
     progress_total: int = 0
     message: str = ""
-    error: Optional[str] = None
+    error: str | None = None
     # The one-line reason is what the UI shows; the traceback is what fixes the
     # code, so it is kept with the job instead of only in the container's stderr.
-    error_detail: Optional[str] = None
-    anonymize_summary: Optional[dict] = None
-    compare_summary: Optional[dict] = None
-    archive_check: Optional[dict] = None
+    error_detail: str | None = None
+    anonymize_summary: dict | None = None
+    compare_summary: dict | None = None
+    archive_check: dict | None = None
     outputs: dict = field(default_factory=dict)   # name → relative path under output/
     trees_kept: bool = False
     seed_mapping: bool = False
     # A batch is several TSFs dropped together. `seed_from` chains a job to the
     # previous one of its batch, so the whole batch shares one growing mapping
     # and the same customer keeps the same pseudonyms across archives.
-    batch: Optional[str] = None
+    batch: str | None = None
     # The device the archive comes from. Chaining follows the group, not the
     # batch: several firewalls dropped together are several chains, and a TSF
     # taken next month under the same group name continues its firewall's own
     # mapping instead of starting a new one.
-    group: Optional[str] = None
-    seed_from: Optional[str] = None
+    group: str | None = None
+    seed_from: str | None = None
     seed_source: str = ""
     # Delete the un-anonymized upload once the integrity check is clean. When
     # the check finds problems the original is kept so a human can review the
     # diff, and `original_kept_reason` says so.
     delete_original: bool = False
     original_deleted: bool = False
-    original_kept_reason: Optional[str] = None
+    original_kept_reason: str | None = None
     # Replace binary payloads that embed mapping identifiers with a sentinel
     # instead of shipping them untouched. Deliberate data loss — operator's
     # choice, verified (not trusted) by the compare.
@@ -157,8 +156,8 @@ class Job:
         return asdict(self)
 
 
-def _worker_counts(workers: Optional[int], compare_workers: Optional[int],
-                   anon_workers: Optional[int] = None) -> tuple[int, int, int]:
+def _worker_counts(workers: int | None, compare_workers: int | None,
+                   anon_workers: int | None = None) -> tuple[int, int, int]:
     """How many archives at a time, and how many processes each one's heavy
     passes may use.
 
@@ -183,9 +182,9 @@ def _worker_counts(workers: Optional[int], compare_workers: Optional[int],
 
 
 class JobStore:
-    def __init__(self, data_dir: Path, workers: Optional[int] = None,
-                 compare_workers: Optional[int] = None,
-                 anon_workers: Optional[int] = None) -> None:
+    def __init__(self, data_dir: Path, workers: int | None = None,
+                 compare_workers: int | None = None,
+                 anon_workers: int | None = None) -> None:
         self.data_dir = Path(data_dir)
         self.jobs_dir = self.data_dir / "jobs"
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -235,11 +234,11 @@ class JobStore:
         with self._lock:
             return sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
 
-    def get(self, job_id: str) -> Optional[Job]:
+    def get(self, job_id: str) -> Job | None:
         with self._lock:
             return self._jobs.get(job_id)
 
-    def latest_in_group(self, group: str, exclude: Optional[str] = None) -> Optional[Job]:
+    def latest_in_group(self, group: str, exclude: str | None = None) -> Job | None:
         """Head of a device group's chain: its most recently *created* job.
 
         Created, not finished: inside one batch the next upload arrives while
@@ -485,7 +484,7 @@ class JobStore:
         job.archive_check = cmp.archive
         self._maybe_delete_original(job, cmp.summary, cmp.archive)
 
-    def _seed_ancestor(self, job: Job) -> tuple[Optional[Job], Optional[dict]]:
+    def _seed_ancestor(self, job: Job) -> tuple[Job | None, dict | None]:
         """Nearest ancestor in the batch chain that produced a mapping.
 
         Walking back matters: a job that failed produced nothing to be

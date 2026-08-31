@@ -9,11 +9,11 @@ import tarfile
 import time
 
 import pytest
+from conftest import CONFIG_XML, IDENTIFIERS, LOG_SAMPLE, build_tsf
 from fastapi.testclient import TestClient
 
 from tsf_anonymizer.jobs import JobStore
 from tsf_anonymizer.web.app import create_app
-from conftest import CONFIG_XML, LOG_SAMPLE, build_tsf, IDENTIFIERS
 
 
 @pytest.fixture
@@ -457,9 +457,10 @@ def test_the_log_of_a_clean_run_is_kept_too(client, tmp_path):
 
 
 def test_no_log_for_a_job_that_never_ran(tmp_path):
+    from fastapi.testclient import TestClient
+
     from tsf_anonymizer.jobs import JobStore
     from tsf_anonymizer.web.app import create_app
-    from fastapi.testclient import TestClient
     store = JobStore(tmp_path / "data")
     job = store.new("anonymize")
     with TestClient(create_app(tmp_path / "data", password="")) as c:

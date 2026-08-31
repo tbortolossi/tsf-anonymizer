@@ -33,8 +33,63 @@ tests/           pytest; test_core.py, test_compare.py, test_web.py
 Dockerfile, docker-compose.yml
 ```
 
-Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
-`docker compose up -d --build` (UI on http://127.0.0.1:8096).
+Also: `mock.py` (the synthetic TSF the docs, screenshots and a first try run
+on), `scripts/docs-screenshots.py` (Playwright, drives the real UI on the
+mock and writes `docs/screenshots/`), `docs/user-guide.md`,
+`docs/architecture.md`, `.github/` (CI, release, CodeQL, templates).
+
+Commands — **uv, never pip/venv/requirements.txt**: `uv sync --all-groups` ·
+`uv run pytest` · `uv run ruff check .` · `make check` (lint + tests +
+`uv lock --check`, what CI runs) · `make screenshots` · `make docker`
+(`docker compose up -d --build`, UI on https://127.0.0.1:8096) · `make help`
+for the rest.
+
+## How work happens here
+
+The human-facing version is CONTRIBUTING.md; this is the operational one.
+
+- **Environment: uv.** `uv sync` builds `.venv` from `uv.lock`; every command
+  runs as `uv run …`; a dependency is added with `uv add` (`--group dev` or
+  `--group docs`), which updates the lockfile — commit `uv.lock` with
+  `pyproject.toml`, `uv lock --check` fails CI when they drift. Python 3.11 is
+  the floor (`.python-version`); CI runs 3.11/3.12/3.13. The Dockerfile
+  installs from the lockfile too (`uv sync --frozen --no-dev`).
+- **Version: one place.** `pyproject.toml` only; `__version__` reads it from
+  the installed metadata. Bump with `uv version --bump patch|minor|major`
+  (never edit by hand), move the *Unreleased* section of CHANGELOG.md under
+  the new version, commit `chore: release vX.Y.Z`, tag `vX.Y.Z`, push the tag:
+  `release.yml` checks the tag matches, builds, publishes the GitHub release
+  from the changelog section and pushes the image to GHCR. SemVer with the
+  `0.x` reading: minor may change what is mapped, patch only fixes.
+- **Branch → PR → squash.** Never commit on `master`. Branch names say the
+  intent: `feat/`, `fix/`, `docs/`, `chore/`, `refactor/`. Commits are
+  Conventional Commits (`fix(compare): …`), subject = what changed and why it
+  matters, body = the reasoning a diff cannot show. One topic per branch. A PR
+  is squash-merged with its title as subject, branch deleted. CI must be
+  green: `lint`, `test` ×3, `docker` (builds and runs the tool end to end),
+  `ui-smoke` (the screenshot script against the real server).
+- **Every change to a boundary touches both halves and CLAUDE.md.** The
+  invariants below are the reason the tool works on real archives; a fix in
+  `core.py` without its mirror in `compare.py` shows up as an "unexplained"
+  or "leak" line — that is the design, not a nuisance. Add the invariant
+  paragraph, the test, a line under *Unreleased* in CHANGELOG.md.
+- **Docs follow the code in the same PR.** A flag, an env variable, a default,
+  a UI element that changes updates README.md / `docs/user-guide.md`; a UI
+  change reruns `make screenshots` and commits the PNGs (they are the smoke
+  test's output — a control that moved fails CI before it fails a reader).
+- **Clean and rebuild.** `make clean` removes caches and build output and
+  never touches `data/` or `certs/`; `make distclean` also drops `.venv`;
+  `make docker-rebuild` builds the image with `--no-cache` and recreates the
+  container (after a base-image or lockfile change). `pre-commit` (installed
+  by `make setup`) runs ruff, the lockfile check and the large-file guard
+  (1.5 MB — a TSF never fits, a screenshot never needs to) on every commit.
+- **Public repository hygiene.** LICENSE (Apache-2.0), SECURITY.md (what
+  counts as a vulnerability, private reporting), CODE_OF_CONDUCT.md, issue
+  and PR templates that ask for genericized reproducers, CODEOWNERS,
+  Dependabot (uv, actions, docker), CodeQL. An identifier that survives
+  anonymization is a *security* report, not an issue. Nothing from a real
+  TSF ever enters an issue, a commit, a test or a doc — the mock archive is
+  the reproducer to extend.
 
 ## Invariants — what must stay true
 

@@ -9,8 +9,8 @@ import os
 import sys
 from pathlib import Path
 
-from .core import anonymize_tsf, default_output_path, mapping_sidecar_path
 from .compare import compare_archives
+from .core import anonymize_tsf, default_output_path, mapping_sidecar_path
 
 
 def _progress(phase: str, done: int, total: int, message: str) -> None:
@@ -76,7 +76,9 @@ _LOOPBACK = ("127.0.0.1", "::1", "localhost")
 
 def cmd_serve(args: argparse.Namespace) -> int:
     import os
+
     import uvicorn
+
     from .web.app import create_app
 
     log = logging.getLogger(__name__)
@@ -141,9 +143,23 @@ def cmd_healthcheck(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_mock_tsf(args: argparse.Namespace) -> int:
+    """Write a synthetic TSF: the archive the docs, the screenshots and a
+    first try of the tool run on, since real ones are customer material."""
+    from .mock import build_mock_tsf, default_mock_name
+
+    out = Path(args.output) if args.output else Path(default_mock_name())
+    build_mock_tsf(out, lines=args.lines, seed=args.seed)
+    print(f"mock TSF: {out} ({out.stat().st_size:,} bytes)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    from . import __version__
+
     p = argparse.ArgumentParser(prog="tsf-anonymizer")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     a = sub.add_parser("anonymize", help="anonymize a TSF archive")
@@ -179,6 +195,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--ssl-keyfile", default=os.getenv("TSF_TLS_KEY", ""),
                    help="private key for --ssl-certfile (env TSF_TLS_KEY)")
     s.set_defaults(fn=cmd_serve)
+
+    m = sub.add_parser("mock-tsf", help="write a synthetic TSF to try the tool on (no customer data)")
+    m.add_argument("-o", "--output", help="archive path (default: a PAN-OS-like name in the cwd)")
+    m.add_argument("--lines", type=int, default=400, help="lines per log file (default 400)")
+    m.add_argument("--seed", type=int, default=7, help="RNG seed: same seed, same archive")
+    m.set_defaults(fn=cmd_mock_tsf)
 
     h = sub.add_parser("healthcheck", help="probe a local instance (container HEALTHCHECK)")
     h.add_argument("--port", type=int, default=8090)
