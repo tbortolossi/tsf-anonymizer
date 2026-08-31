@@ -943,3 +943,15 @@ class TestBinaryHeuristic:
 def test_brute_force_word_port_is_not_a_username(anon):
     line = "failed authentication for user 'port'.  Reason: Invalid username/password."
     assert anon.anonymize_text(line) == line
+
+
+def test_hostname_inside_a_hyphenated_compound_is_still_the_device(anon):
+    """adm-<hostname> (the admin UI's DNS name) and <hostname>-PBP-ALERTE
+    survived a real run: the hyphen rule is for objects, not hostnames."""
+    anon.register_fqdn("fw-dc1")
+    anon.register_named_object("web", "addr")
+    anon.build_patterns()
+    out = anon.anonymize_text('host: "adm-fw-dc1", referrer: "https://adm-fw-dc1/" profile fw-dc1-PBP-ALERTE web-server-1')
+    assert "fw-dc1" not in out
+    assert "adm-host001" in out and "host001-PBP-ALERTE" in out
+    assert "web-server-1" in out            # objects keep the hyphenated-compound rule

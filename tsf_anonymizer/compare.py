@@ -122,8 +122,8 @@ class MappingIndex:
         # device name with underscores in techsupport_<name>_<date>.txt) —
         # mirrors the core's boundaries exactly.
         self._ci_re = (re.compile(
-            r"(?<![A-Za-z0-9\-<])(?<!<\/)" + trie_regex(self.forward_ci)
-            + r"(?:(?![A-Za-z0-9\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)",
+            r"(?<![A-Za-z0-9<])(?<!<\/)" + trie_regex(self.forward_ci)
+            + r"(?:(?![A-Za-z0-9=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)",
             re.IGNORECASE)
             if self.forward_ci else None)
         # Minimum key length that the leak scan will bother with. Below 3 the
@@ -152,8 +152,14 @@ class MappingIndex:
         applying the IP first would destroy that key and leave 11 000 real
         lines "unexplained"."""
         if self._ci_re is not None:
-            text = self._ci_re.sub(
-                lambda m: self.forward_ci.get(m.group(0).lower(), m.group(0)), text)
+            src = text
+
+            def ci(m: re.Match) -> str:
+                # mirrors the core: `-key>` is an XML tag name, not a hostname
+                if m.start() and src[m.start() - 1] == "-" and src[m.end():m.end() + 1] == ">":
+                    return m.group(0)
+                return self.forward_ci.get(m.group(0).lower(), m.group(0))
+            text = self._ci_re.sub(ci, text)
         if self._cs_re is not None:
             text = self._cs_re.sub(lambda m: self.forward.get(m.group(0), m.group(0)), text)
         if self._num_re is not None:

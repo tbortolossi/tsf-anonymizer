@@ -544,13 +544,16 @@ class Anonymizer:
             # must be rewritten when only the apex is known. A longer key
             # still wins — the scan is leftmost, so igw.home-lab.example is
             # matched at "igw" before the apex is ever tried.
-            # "_" is a separator here, not a word character: a hostname cannot
-            # contain one, and PAN-OS glues the device name with underscores
-            # (techsupport_<devicename>_<date>.txt, in the member name and in
-            # the text) — the one place the name survived a real run.
+            # "_" and "-" are separators here, unlike for objects: a hostname
+            # cannot contain "_", PAN-OS glues the device name with underscores
+            # (techsupport_<devicename>_<date>.txt), and a hyphenated compound
+            # built on a hostname names the same device — `adm-<hostname>`
+            # (the admin UI's DNS name, 1 379 nginx lines) and
+            # `<hostname>-PBP-ALERTE` survived a real run under the object
+            # rule "never inside a hyphenated compound".
             self._fqdn_re = re.compile(
-                r"(?<![A-Za-z0-9\-<])(?<!<\/)" + trie_regex(self.fqdn_map)
-                + r"(?:(?![A-Za-z0-9\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)",
+                r"(?<![A-Za-z0-9<])(?<!<\/)" + trie_regex(self.fqdn_map)
+                + r"(?:(?![A-Za-z0-9=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)",
                 re.IGNORECASE,
             )
         else:
@@ -696,6 +699,10 @@ class Anonymizer:
         def replace_match(m: re.Match) -> str:
             fake = self.fqdn_map.get(m.group(0).lower())
             if fake is None:
+                return m.group(0)
+            # "-" is a separator for hostnames (adm-<host>), with one
+            # exception: `-key>` is the tail of an XML tag name (<equal-to>).
+            if m.start() and text[m.start() - 1] == "-" and text[m.end():m.end() + 1] == ">":
                 return m.group(0)
             self._count("fqdns")
             return fake

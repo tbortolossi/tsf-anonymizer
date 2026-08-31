@@ -143,9 +143,13 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   hostname, devicename, domain and serial. `_prescan_system_info` registers
   them authoritatively — a name without a digit or hyphen fails the
   `hostname X` heuristic, and went out in clear on three of four real TSFs,
-  in the member name and in the text. For FQDNs `_` is a separator (a
-  hostname cannot contain one, and PAN-OS glues the name with underscores),
-  in the anonymizer and in the compare alike. `repack_archive` renames
+  in the member name and in the text. For FQDNs `_` **and `-`** are
+  separators (a hostname cannot contain an underscore, PAN-OS glues the name
+  with underscores, and a hyphenated compound built on a hostname —
+  `adm-<hostname>`, the admin UI's DNS name, 1 379 nginx lines;
+  `<hostname>-PBP-ALERTE` — names the same device), in the anonymizer and in
+  the compare alike. Objects keep the "never inside a hyphenated compound"
+  rule: `web` must not rewrite `web-server-1`. `repack_archive` renames
   members through the same frozen tables; the compare pairs files and
   members by the *mapped* name, so "output = input with payloads swapped"
   holds through the mapping, not literally.
