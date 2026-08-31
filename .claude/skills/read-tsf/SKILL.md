@@ -16,6 +16,12 @@ hundred `show`/`debug` commands captured at generation time. The full layout
 and per-file map is in [TSF-GUIDE.md](TSF-GUIDE.md); this
 skill is the working method.
 
+Every path and grep below was re-checked against ten real TSFs — PA-440,
+PA-1420, PA-3220 (×2), PA-3410, PA-5250 (×2), PA-5430, PA-7050, PA-7080, on
+PAN-OS 10.2.9 → 12.1.4. Where a file exists only on some of them the
+qualifier says so (`12.x`, `PA-3200 family`, `chassis`); an unqualified path
+was present on all ten.
+
 ## Step 0 — extract and anchor yourself
 
 ```bash
@@ -38,10 +44,16 @@ Anchor on three facts before anything else:
 
 Real TSFs ship files in mode `0000` — hence the `chmod`. Files may hold
 Latin-1 bytes; add `-a` to grep or decode with `errors="surrogateescape"`.
-The command dump is named after the **device** (hostname or devicename as
-the customer set it), never the model — verified on four real TSFs; the
-model is on the `model:` line of `show system info`. If the command dump is
-truncated or missing, `var/log/pan/content_telemetry.log` opens with a full
+The command dump is named after the **device** (hostname as the customer set
+it), never the model — verified on ten real TSFs; the model is on the
+`model:` line of `show system info`. Two wrinkles: PAN-OS may **drop a
+hyphen** from the hostname when it builds the name (`fw-dc1` →
+`techsupport_fwdc1_…`, seen on three of ten), so glob `techsupport_*.txt`
+and read the hostname from `show system info`, never from the file name; and
+a hostname left at its default *is* the model name (`PA-440` →
+`techsupport_PA440_…`), which only looks like the exception. If the command
+dump is truncated or missing, `var/log/pan/content_telemetry.log` (present
+on nine of ten — not on a PA-5250 11.2) opens with a full
 `--- show system info ---` block — a second copy of the device's identity
 and versions.
 
@@ -54,10 +66,20 @@ says so as plainly.
 ## Step 1 — the reading order that works
 
 1. `show system info` → version, uptime, HA.
-2. Crash evidence: `var/log/pan/crashinfo/*.info` (the crash instant is in the
-   **filename** — `configd-20260305145809-….info` — never the mtime, which
-   extraction rewrites), `grep -A15 "^> show system files" tmp/cli/techsupport_*.txt`,
-   `opt/panrepo/logs/reboot.log` (reason + timestamp per reboot).
+2. Crash evidence: `var/cores/crashinfo/*.info` — **not** under
+   `var/log/pan/`; the directory exists only once something crashed (an
+   empty `var/cores/` = no MP crash), and on a chassis each dataplane has its
+   own: `opt/var/s<slot>/dp<n>/cores/crashinfo/` (PA-7000),
+   `opt/var.dp<n>/cores/` (PA-5200). The crash instant and the process are
+   in the **filename** — `routed-20260109122837-11.1.10-h1.info`,
+   `all_pktproc_3-<stamp>-<version>.info` for a DP packet-processor crash —
+   never the mtime, which extraction rewrites. Then
+   `grep -A15 "^> show system files" tmp/cli/techsupport_*.txt` (it lists
+   `/opt/panlogs/cores/` and `/var/cores/` as seen on the box) and
+   `opt/panrepo/logs/reboot.log` (reason + timestamp per reboot — `SYSTEM
+   REBOOT [CLI Initiated at …]`, `[external power cycle …]`, `[md initiated
+   dataplane restarts exhausted …]`; absent on one 10.2 PA-7050). `bios.log`,
+   `history.log` and `swm.log` (software manager) sit next to it.
 3. `tmp/cli/logs/show_log_system.txt` around the failure minute — the
    cross-daemon timeline. When you don't know where to look, this names the
    daemon that complained.
@@ -78,8 +100,10 @@ says so as plainly.
 **Some daemons have two log names and the newest is the live one.** On
 PAN-OS 11.1+ IKE writes `ikemgr-ng.log` while the legacy `ikemgr.log` stays
 present and idle — reading only the legacy name reports "no IKE errors" about
-a firewall whose tunnels are down. Pairs: `ikemgr`/`ikemgr-ng`,
-`keymgr`/`keymgr-ng`, `dnsproxyd`/`dnsproxy_go`/`dns-go-agent`. Always:
+a firewall whose tunnels are down. Pairs: `ikemgr`/`ikemgr-ng` and
+`keymgr`/`keymgr-ng` (11.1+; on 10.2 only the legacy names exist and they
+are live, in PAN standard format), `dnsproxyd`/`dnsproxy_go`/`dns-go-agent`
+(the `go` pair appears on 11.2+; 11.1 has `dnsproxyd.log` alone). Always:
 
 ```bash
 ls var/log/pan/ | grep -E "^ikemgr|^keymgr|^dnsproxy"   # see what exists, read -ng first
@@ -110,12 +134,12 @@ pick the right grep):
 | family | example | files |
 |---|---|---|
 | PAN standard: `YYYY-MM-DD HH:MM:SS.mmm +ZZZZ` | `2026-04-05 05:57:32.225 +0200 Error: pan_cfg…(file.c:647): msg` | most of `var/log/pan/`: configd, authd, sysd, useridd, routed, mprelay, devsrv, ha_agent… The `func(file.c:line):` prefix is grep-able and names the code path. |
-| ikemgr-ng: `YYYY:MM:DDTHH:MM:SS.mmm+ZZ:ZZ` | `2026:03:01T15:13:18.024+01:00 [4371-4442] [INFO]: …` | `ikemgr-ng.log`, `keymgr-ng.log` — **colons in the date**: a `2026-03-01` grep finds nothing here. `[pid-tid]` follows. |
+| ikemgr-ng: `YYYY:MM:DDTHH:MM:SS.mmm+ZZ:ZZ` | `2026:03:01T15:13:18.024+01:00 [4371-4442] [INFO]: …` | `ikemgr-ng.log`, `keymgr-ng.log` — **colons in the date**: a `2026-03-01` grep finds nothing here. `[pid-tid]` follows. (10.2's `ikemgr.log` is PAN standard.) |
 | JSON lines | `{"level":"info","time":"2026-03-01T15:13:17.65+01:00","message":"…"}` | `gpsvc.log`, `wifgo*.log`, `gp_broker` parts, `logging-services*.log` — use `jq -r` or grep the `"message"` value; `"level":"error"` filters. |
-| syslog, **yearless** | `Mar  1 06:12:39 400 kernel: […] msg` | `var/log/messages`, `show_log_journal.txt` — no year: infer it from the TSF window; day-of-month is space-padded (`Mar  1` = two spaces). |
+| syslog, **yearless** | `Mar  1 06:12:39 <host> kernel: […] msg` | `var/log/messages`, `tmp/cli/logs/show_log_journal.txt` (12.x only) — no year: infer it from the TSF window; day-of-month is space-padded (`Mar  1` = two spaces). |
 | audit key=value, **epoch** | `type=USER_AUTH msg=audit(1774665326.812:16547): … acct="x" exe="/usr/bin/su"` | `var/log/audit/audit.log*` — the only time is the epoch inside `audit(…)`: `date -d @1774665326`. |
-| nginx access | `IP - - [01/Mar/2026:15:20:33 +0100] "GET /x" 200 …` | `var/log/nginx/*`, `sslvpn-access.log`(text ones), `mgmt_httpd_access.log`. |
-| bracketed | `[2026-03-30 00:00:00.001 INF] msg` | plugin logs (`opt/plugins/var/log/pan/plugin-*`). |
+| nginx access | `IP - - [01/Mar/2026:15:20:33 +0100] "GET /x" 200 …` | `var/log/nginx/{access,error,api_metrics,l3svc_access}.log`. Two look-alikes with their own shape: `mgmt_httpd_access.log` is **status-first, no client IP** — `200 [01/Mar/2026:15:14:17 +0100] 0 26 /robots.txt "python-requests/2.25.1"`; `sslvpn-access/sslvpn-access.log` (a *directory*, present only when GP is configured) is `IP   [2026-03-01 15:47:36.311249739 +0100 CET] POST /global-protect/prelogin.esp HTTP/1.1 153 200 595, taskid 1`. |
+| bracketed | `[2026-03-30 00:00:00.001 INF] msg` | dated plugin logs (`opt/plugins/var/log/pan/plugin-adem-YYYYMMDD.log`); `plugin_dlp.log` / `plugin_client.log` next to them are PAN standard. |
 | periodic dump | a timestamp line, then a raw command dump (netstat, counters), repeated | `md_out.log` (netstat every few min, records glued without separators), `evtmgr_*_snapshot` (counter tables, few timestamps), `req_stats.log`. Diff two dumps rather than reading one. |
 
 **The monitor logs are the TSF's time machine — sectioned snapshots, not a
@@ -123,13 +147,18 @@ stream.** Every ~2–5 min, `mp-monitor.log` and `dp-monitor.log` append blocks
 of the form `<timestamp>  --- <section>`:
 
 - `mp-monitor.log` sections: `cpu` (incl. load avg), `memory`,
-  `memory_detail`, `processes`/`top_summary`/`pidstat` (per-PID — **a PID
-  change between snapshots = daemon restart with no reboot**), `filesystem`,
-  `diskstats`, `swapusage`, `conntrack`, `netstat`, `logging_status`,
-  `logrcvr_statistics`, `health_check`, `smart`, `env` (temperatures)…
-- `dp-monitor.log` sections: `cpu`, `memory`, `processes`, `panio` (DP
-  message latency histograms — the congestion evidence), `netstat`,
-  `filesystem`, `smart`…
+  `memory_detail`, `processes`/`top_summary`/`top`/`pidstat` (per-PID — **a
+  PID change between snapshots = daemon restart with no reboot**),
+  `filesystem`, `diskstats`, `swapusage`, `conntrack`, `netstat`,
+  `netstat_stats`, `logging_status`, `logrcvr_statistics`, `smart`, `env`
+  (temperatures), `fast_logrotate`, `userid_opcmd_stats`, `health_check`
+  (12.x)… The most frequent block by far is `fvif_stats` (interface
+  counters, several per snapshot) — exclude it when counting snapshots.
+- `dp-monitor.log` sections: `cpu`, `memory`, `processes`, `top`, `panio`
+  (DP message latency histograms — the congestion evidence) and
+  `panio_infreq`, `bcm_g_cntr_stats` / `dpc_nica_stats` (switch-chip and NIC
+  counters), `logrcvr_statistics`, `netstat`, `netstat_stats`, `filesystem`,
+  `smart`… Same set on a PA-440, a PA-3220 and a PA-7080 dataplane.
 
 Carve one section's history, or one instant, like this:
 
@@ -144,10 +173,16 @@ gets answered from a snapshot archive — compare the sections across
 timestamps instead of reading one block.
 
 **Multi-DP and CP — chassis platforms have more than one of everything.**
-A PA-400/800/1400/3200 or VM has one MP and one DP: `var/log/pan/dp-monitor.log`
+A PA-400/800/1400/3400 or VM has one MP and one DP: `var/log/pan/dp-monitor.log`
 is *the* dataplane — and so does a **PA-5400** (5410–5450, family `5400f`),
-verified on a real PA-5430: no `opt/var.dp*` at all. PA-5200/PA-7000 (and
-older 5000) do not:
+verified on a real PA-5430: no `opt/var.dp*` at all. The **PA-3200 family**
+(3220/3250/3260) is single-DP too but keeps that dataplane's logs under
+**`opt/dpfs/var/log/pan/`** — `dp-monitor.log` and eight rotations,
+`bcm.log`, `brdagent.log`, `bfd.log`, `pan_task_<n>.log`, `md_out.log`
+(~57 files) — and has **no** `var/log/pan/dp-monitor.log` at all (two real
+PA-3220, 11.1.6 and 11.1.14); its DP serial console is
+`var/log/pan/dataplane-console-output.log`. PA-5200/PA-7000 (and older 5000)
+have several planes:
 
 - **Each dataplane logs under its own root**: `opt/var.dp0/log/pan/dp-monitor.log`,
   `opt/var.dp1/…`, `opt/var.dp2/…` on a PA-5200. A PA-7000 chassis nests the
@@ -162,7 +197,7 @@ older 5000) do not:
   `syslog-ng.log` (150 MB seen), `lfp-monitor.log` (same sectioned-snapshot
   format as `dp-monitor.log`), `evtmgr_logrcvr_lfp<n>_snapshot`. On a
   chassis, a log-forwarding or log-receiver problem lives *there*, not in
-  `var/log/pan/logrcvr.log`. Always `ls -d opt/var.dp* opt/var/s*/dp* opt/var/s*/lfp*` first, and
+  `var/log/pan/logrcvr.log`. Always `ls -d opt/dpfs opt/var.dp* opt/var/s*/dp* opt/var/s*/lfp*` first, and
   analyse **per plane, never the aggregate** — on a PA-7000 the classic
   finding is one line card at 90 % while the others idle (traffic imbalance),
   invisible in any average. Do not assume which planes exist from the model:
@@ -171,18 +206,37 @@ older 5000) do not:
   each: `dp-monitor.log` + rotations, `dp-sessperf_mon.log`, `brdagent.log`,
   `bfd.log`, `cgroups*.log`). `ls -d opt/var.dp*` is the only reliable answer;
   an empty plane directory is still worth a look before calling it normal.
-- **`cp-monitor.log`** (`opt/var.cp/log/pan/` or `var/log/pan/`) exists only
-  on platforms with a dedicated control-plane processor (PA-5000/5200/7000).
-  Same sectioned-snapshot format; it tracks the MP↔DP plumbing: `netmsg`
-  stats vs **errors** (ARP/MAC sync between MP and DP — `arp_delete` errors ≫
-  stats = MP/DP desync; `arp_update` errors = DP ARP table full), `ifconfig`
-  TX/RX errors on the internal CP interfaces (config-push and sync failures).
+- **`cp-monitor.log`** exists only on platforms with a dedicated
+  control-plane processor: `opt/var.cp/log/pan/cp-monitor.log` on a
+  PA-5200, **one per slot** at `opt/var/s<slot>/cp/log/pan/cp-monitor.log`
+  on a PA-7000 — never under `var/log/pan/`. Same sectioned-snapshot format
+  (`cpu`, `memory`, `processes`, `cp_stats`, `fabric_traffic_stats`,
+  `bcm_shcmd_stats`, `pci_dma`, `softnet`, `ifconfig`…); it tracks the MP↔DP
+  plumbing: the `cp_stats` block (`sw.mprelay.s1.cp.platform: { netmsg: {
+  errors: { acl_delete, arp_delete, arp_update, … }`) is `netmsg` stats vs
+  **errors** (ARP/MAC sync between MP and DP — `arp_delete` errors ≫ stats =
+  MP/DP desync; `arp_update` errors = DP ARP table full), `ifconfig` TX/RX
+  errors on the internal CP interfaces (config-push and sync failures).
   Absent on single-chip platforms by design — not a gap. The CP root also
   holds the switch-fabric logs (`bcm.log`, `bcm_cmd.log` — Broadcom ASIC
-  commands and errors) and `dataplane<n>-console-output.log`, the serial
-  console of each DP as seen from the CP; `var/log/pan/
-  controlplane-console-output.log` is the CP's own (`N0.LMC1 Configuration
-  Completed: 4096 MB` = memory init at boot).
+  commands and errors), `cp-telemetry.log`, and
+  `dataplane<n>-console-output.log`, the serial console of each DP as seen
+  from the CP. The MP side keeps the console of the whole card:
+  `var/log/pan/controlplane-console-output.log` on a PA-5200 (`N0.LMC1
+  Configuration Completed: 4096 MB` = memory init at boot),
+  `var/log/pan/slot<n>-console-output.log` and `fpp-console-output.log`
+  (the fabric card) on a PA-7000. Single-chip platforms have no console log
+  except the PA-3200's `dataplane-console-output.log`.
+- **The command dump repeats every dataplane command per DP.** On a chassis
+  each per-DP block opens with `> set system setting target-dp s<slot>dp<n>`
+  — 98 blocks on a PA-7050/7080, 12 on a PA-5250 — so `grep -c "^> show
+  session info"` returning 49 is the layout, not a corrupt file. Index the
+  blocks with `grep -n "^> set system setting target-dp" tmp/cli/techsupport_*.txt`
+  and read the one for the plane you care about; `> show running
+  resource-monitor` is a single header whose output carries `DP s1dp0:`
+  sub-blocks instead. The `packet descriptor (on-chip)` rows appear on the
+  ASIC-fronted families only (PA-3200, 5200, 7000) — their absence on a
+  400/1400/3400/5400 is normal.
 - `sysd.log` names components per plane (`s1.dp0`, `s1.mp`), and
   `show running resource-monitor` in the techsupport txt repeats its blocks
   per slot/DP on a chassis — check which DP a block belongs to before
@@ -202,19 +256,19 @@ its own state is" without parsing anything. Then, per domain (P0 files first
 |---|---|---|---|
 | **VPN site-à-site** | `ikemgr-ng.log`* | `keymgr*.log`, `> show vpn ike-sa / ipsec-sa / flow` | `failed to get sainfo`=Phase2 proxy-ID mismatch · `no proposal chosen`=no common crypto · `AUTHENTICATION_FAILED`=PSK (case-sensitive!) or cert · `TS_UNACCEPTABLE`=IKEv2 selector mismatch · SPI mismatch=peer rebooted, stale SA · `DPD: peer dead`=connectivity, NOT negotiation. Phase 1 must establish before any Phase 2 diagnosis. |
 | **HA / failover** | `ha_agent.log`, `> show high-availability all` | `path-monitoring`, `state-synchronization`, `brdagent.log`; `saved-configs/.ha-remote-rc.xml` = the **peer's** running config, for a config-sync mismatch (`diff <(xmllint --format running-config.xml) <(xmllint --format .ha-remote-rc.xml)`) | Classify the cause: heartbeat_loss (HA1 flap/peer down) · link_monitoring (NIC → check failure-condition any/all) · path_monitoring · **commit within 120 s of failover = spurious** (commits pause heartbeats 5–15 s) · process_restart. Preemption disabled = no auto-failback. |
-| **GlobalProtect** | `gpsvc.log`, `show_log_globalprotect.txt` (one row per portal/gateway event — columns: time, gateway/portal, status, event, region, `domain\user`; can be the biggest text file of the TSF, 64 MB seen: grep it by user or by status, never open it), `gp_broker.log` | `sslvpn-access.log`, `sslvpn_ngx_error.log`, `rasmgr.log` | Split by WHERE the client stops: portal (config fetch) → auth → gateway (tunnel) → data. `Authentication failed` in gpsvc = **not a GP problem**, pivot to authd. Portal-vs-gateway auth-profile mismatch = auth OK then fails seconds later. |
+| **GlobalProtect** | `gpsvc.log`, `show_log_globalprotect.txt` (one row per portal/gateway event — columns: time, gateway/portal, status, event, region, `domain\user`; can be the biggest text file of the TSF, 64 MB seen: grep it by user or by status, never open it), `gp_broker.log` | `sslvpn-access/sslvpn-access.log` (+ `.N.gz` rotations — a **directory** that exists only when a portal/gateway is configured; the `sslvpn-task.log*` beside it are binary), `sslvpn_ngx_error.log`, `rasmgr.log` | Split by WHERE the client stops: portal (config fetch) → auth → gateway (tunnel) → data. `Authentication failed` in gpsvc = **not a GP problem**, pivot to authd. Portal-vs-gateway auth-profile mismatch = auth OK then fails seconds later. |
 | **Auth** | `authd.log`, `useridd.log` | `show_log_system.txt`, `sslmgr.log` (certs) | LDAP `rc=49`=bad bind credentials; RADIUS timeouts; SAML clock skew. **An exposed GP portal is brute-forced**: `grep -c "failed authentication for user" tmp/cli/logs/show_log_system.txt` then `grep -o "for user '[^']*'" … \| sort \| uniq -c \| sort -rn \| head` — guessed names (`error`, `request`, `port`, `cli`, `usr`, `test`, `admin`) and one source IP per burst are a scanner, not a customer problem; the `From:` IP of the same lines in `authd.log` says where it comes from. Real users fail with their real names, a few times, from a few IPs. |
 | **User-ID** | `useridd.log`, `distributord.log` | `> show user ip-user-mapping-mp all` (the MP's table), `> show user user-id-agent statistics` | Identification ≠ authentication: nobody fails a login, policy just mis-applies / user shows `unknown`. A login failing = auth domain instead. |
-| **Crash / reboot** | `crashinfo/`, `reboot.log`, `sysd.log` | `messages`, `mce.log`, `bios.log`, `history.log` | `grep -E "panic|oops|segfault|watchdog|Killed process"`. PID change in `mp-monitor.log` = daemon restart without reboot. **After any upgrade, check for crashes even if the symptom isn't crash-shaped.** |
+| **Crash / reboot** | `var/cores/crashinfo/` (per DP on a chassis, step 1), `opt/panrepo/logs/reboot.log`, `sysd.log` | `messages`, `mce.log` (not on every model), `opt/panrepo/logs/{bios,history,swm}.log`, the console logs (step 2b) | `grep -E "panic|oops|segfault|watchdog|Killed process"`. PID change in `mp-monitor.log` = daemon restart without reboot. **After any upgrade, check for crashes even if the symptom isn't crash-shaped.** |
 | **CPU** | `dp-monitor.log`, `mp-monitor.log`, `> show running resource-monitor` | `var/log/sa/sar*` (31-day history) | DP CPU = traffic-side (sessions, decryption, App-ID); MP CPU = reports/logging/configd. DP > 80 % sustained 3+ snapshots = critical. Correlate spikes with commits/content updates. |
-| **Memory** | `mp-monitor.log`, `> show system resources` | `grep -E "Out of memory|oom-killer"` | Growth across 3+ snapshots is the signal, never one reading. Linux cache ≠ pressure. LEAK (one RSS rising) vs LOAD (tracks sessions/tunnels) vs steady-high (benign). A leaking daemon is a future-crashing daemon. |
+| **Memory** | `mp-monitor.log` (`memory`, `memory_detail`, `top_summary`/`pidstat` per PID) | `grep -E "Out of memory\|oom-killer" var/log/messages*` — `> show system resources` is **not** in the command dump on any of ten TSFs (10.2 → 12.1); it is a live-device command, the monitor log is its history | Growth across 3+ snapshots is the signal, never one reading. Linux cache ≠ pressure. LEAK (one RSS rising) vs LOAD (tracks sessions/tunnels) vs steady-high (benign). A leaking daemon is a future-crashing daemon. |
 | **Drops / perf / buffers** | `> show counter global filter delta yes`, `> show running resource-monitor` | `dp-monitor.log`, `> show session info`, `> debug dataplane pool statistics`, `> show zone-protection` | See the buffers/PBP/counters section below. Read `drop`/`error` severities first; the **delta** section says what happens now. `flow_policy_deny`+`tcp_rst_from_self`=policy RST · `flow_fwd_mtu_exceeded`+`ip_df_drop`=MTU in tunnel path (big packets fail, ping works) · `flow_tcp_non_syn` right after failover is EXPECTED. Depleted DP pools drop silently. |
 | **Interfaces** | `> show interface all`, `pan_ifmgr.log` | `brdagent.log` (port/ASIC), `l2ctrld.log`, `> show system environmentals` (temperature, fans, PSU — a port that flaps with a failed fan or PSU is a hardware case) | Physical first — it invalidates every higher-layer diagnosis on the path. CRC/FCS on one port=cable/SFP · late collisions=duplex mismatch · `dot1q_tag_err`=VLAN arriving on a port not carrying it. |
 | **Disk** | `> show system disk-space`, `> show system logdb-quota` (per-log-type quota vs usage — a log type at 100 % is purging by design, not full) | `logpurger.log`, `messages` | WHICH partition decides the cause: /var/log=logrotate stuck (du≠df = deleted-fd) or forgotten debug level · /opt/panrepo=old images (safe cleanup) · /opt/panlogs=at quota by design, only purge *errors* matter · root full=the dangerous one (commits fail). Cores on disk = pivot to crash, don't delete them. |
-| **Routing** | `routed.log` or `frr_export.log`+`var/log/pan/frr/`+`etc/frr/` | `> show routing route` / `> show advanced-routing …`, `bfd.log` | Advanced-routing engine = FRR (`advanced-routing: on` in `show system info`; its daemons log under `var/log/pan/frr/`); legacy = routed. Check which one owns the config. |
-| **Commit / config** | `configd.log`, `commit_stats.log`, `show_log_config.txt` | `cfg-audit.xml,v` | `commit_stats.log` has per-phase durations (Jobid/Start/Fin blocks). |
+| **Routing** | `routed.log` or `var/log/pan/frr/` + `etc/frr/` | `> show routing route` / `> show advanced-routing …`, `bfd.log` | Advanced-routing engine = FRR (`advanced-routing: on` in `show system info`); legacy = routed. Check which one owns the config. `var/log/pan/frr/frr_export.log` exists on every box (even with ARE off); with ARE **on** there is one `ns<N>_frr_export.log` / `ns<N>_frr_reload.log` per logical router (header `#LR:<name> (<n>)`, then FRR-style `YYYY/MM/DD HH:MM:SS ZEBRA: …` lines) plus `are_migration.log`. |
+| **Commit / config** | `configd.log`, `show_log_config.txt`, `commit_stats.log` (12.x only) | `cfg-audit.xml,v`, `> show jobs processed` | `commit_stats.log` has per-phase durations (Jobid/Start/Fin blocks); on 10.2–11.2 the durations are in `show jobs processed` and `configd.log` only. |
 | **Content / AV updates** | `paninstaller_content.log`, `contentd.log` | `opt/pancfg/mgmt/global/*info.xml` | Correlate the update **time** with the symptom start before blaming it. |
-| **Panorama** | `devsrv.log`, `ms.log` | `opt/pancfg/mgmt/tmp/panorama_pushed/` | `running-config.xml` alone is incomplete on managed devices — use `.merged-running-config.xml`. |
+| **Panorama** | `devsrv.log`, `ms.log` | `opt/pancfg/mgmt/tmp/panorama_pushed/` (`lastsp.xml`, `newsp.xml`, `mergesp.xml`, `predefined.xml`, `pushsp.xml`, `sp-push-request.xml`, `tpl-push-request.xml`; `before|after-sp-imported.xml` on 12.x) | `running-config.xml` alone is incomplete on managed devices — use `.merged-running-config.xml`. |
 
 \* alias rule of step 2 applies.
 
@@ -292,7 +346,8 @@ grep the same name in the raw section for its description column.
 
 `opt/pancfg/mgmt/saved-configs/running-config.xml` is the config in force
 (`.merged-running-config.xml` if Panorama-managed; the raw push sits in
-`panorama_pushed/before|after-sp-imported.xml`). Structure and grep entry
+`panorama_pushed/` — `newsp.xml`/`lastsp.xml`/`mergesp.xml` on 10.2–11.2,
+`before|after-sp-imported.xml` as well on 12.x). Structure and grep entry
 points: `TSF-GUIDE.md` §5. Two specifics:
 
 - `opt/pancfg/mgmt/devices/*/platform.xml` = the limits PAN-OS **enforces**
@@ -314,7 +369,7 @@ points: `TSF-GUIDE.md` §5. Two specifics:
 - **Huge vendor files** — `updates/*/global.xml` (37 MB App-ID DB),
   `regip/reg_ips.xml`, `*.dat`, `fs_manifest.txt`, `req_stats.log`,
   `tmp/cli/logs/sysd_objects_meta.xml` (the whole sysd tree as XML, 100 MB on
-  a chassis — `sdb.txt` is the same data as grep-able dotted keys),
+  a chassis; absent on 10.2 — `sdb.txt` is the same data as grep-able dotted keys),
   `last-candidatecfg-audit.xml,v` (RCS history of every *candidate*, tens of
   MB — `cfg-audit.xml,v` is the one with the commits) — are almost never the
   answer; don't burn context reading them.

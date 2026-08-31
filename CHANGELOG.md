@@ -15,6 +15,15 @@ change what is mapped, a patch bump only fixes).
   pre-commit hook, into `make lint` and into CI.
 
 ### Changed
+- `read-tsf` skill and `TSF-GUIDE.md` re-verified against ten real TSFs
+  (PA-440 to PA-7080, PAN-OS 10.2.9 to 12.1.4): crash sidecars live in
+  `var/cores/crashinfo/` (per DP on a chassis), the PA-3200 family logs its
+  dataplane under `opt/dpfs/var/log/pan/`, chassis command dumps repeat every
+  DP command per `target-dp` block, `sslvpn-access/` and `frr/` are
+  directories, `cp-monitor.log` is per slot on a PA-7000; version-scoped
+  files marked (`commit_stats.log`, `show_log_journal.txt`,
+  `before|after-sp-imported.xml` are 12.x); `show system resources` removed —
+  it is not in the dump on any of them.
 - Agent guidance split: `CLAUDE.md` keeps the doctrine and the working rules;
   the per-incident invariants moved to `.claude/rules/` as path-scoped rules
   (`anonymizer-invariants.md` for `core.py`/`compare.py`,
