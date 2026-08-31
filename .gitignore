@@ -10,3 +10,4 @@ data/
 .ruff_cache/
 .env
 certs/
+docs/private/
