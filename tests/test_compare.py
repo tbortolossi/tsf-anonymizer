@@ -265,6 +265,52 @@ class TestDottedTokens:
         assert idx.apply("dc01.acme.local") == "host001.anon.internal"
 
 
+class TestRoutingCoherence:
+    """The relations only a prefix-preserving mapping keeps: any injective
+    mapping explains every line, so this is the check that fails if prefix
+    preservation ever regresses."""
+
+    @pytest.fixture()
+    def trees(self, tmp_path):
+        from tsf_anonymizer.mock import build_mock_tsf
+        src = build_mock_tsf(tmp_path / "in.tgz", lines=20)
+        work = tmp_path / "work"
+        _, mapping = anonymize_tsf(src, tmp_path / "out.tgz",
+                                   work_root=work, keep_trees=True)
+        return work, mapping
+
+    def test_mock_routing_is_coherent(self, trees):
+        work, mapping = trees
+        r = compare_trees(work / "orig", work / "anon", mapping).summary["routing"]
+        assert r["checked"] and r["ok"]
+        assert r["routes"] >= 5 and r["connected"] >= 2
+
+    def test_a_nexthop_moved_out_of_its_subnet_is_reported(self, trees):
+        work, mapping = trees
+        cfg = work / "anon" / "opt/pancfg/mgmt/saved-configs/running-config.xml"
+        moved = mapping["ip_addresses"]["10.20.40.254"]  # SR-Branch-Lyon nexthop
+        cfg.write_bytes(cfg.read_bytes().replace(moved.encode(), b"10.77.77.77"))
+        r = compare_trees(work / "orig", work / "anon", mapping).summary["routing"]
+        assert r["checked"] and not r["ok"]
+        assert any("nexthop" in m for m in r["mismatches"])
+
+    def test_a_broken_mask_is_reported(self, trees):
+        work, mapping = trees
+        cfg = work / "anon" / "opt/pancfg/mgmt/saved-configs/running-config.xml"
+        dest = mapping["ip_addresses"]["10.99.0.0"]
+        cfg.write_bytes(cfg.read_bytes().replace(
+            (dest + "/16").encode(), (dest + "/12").encode()))
+        r = compare_trees(work / "orig", work / "anon", mapping).summary["routing"]
+        assert not r["ok"] and any("prefix length" in m or "containment" in m
+                                   for m in r["mismatches"])
+
+    def test_a_tree_without_config_is_not_checked(self, tmp_path):
+        (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+        (tmp_path / "a/f.log").write_text("x\n"); (tmp_path / "b/f.log").write_text("x\n")
+        rep = compare_trees(tmp_path / "a", tmp_path / "b", {"ip_addresses": {}})
+        assert rep.summary["routing"] == {"checked": False}
+
+
 class TestCollisionsAndLongLines:
     def test_key_that_is_also_a_fake_is_a_collision_not_a_leak(self):
         m = {"ip_addresses": {"100.64.0.3": "192.0.2.1", "10.0.0.1": "100.64.0.3"}}

@@ -53,6 +53,13 @@ def _print_compare(rep, report_path: str | None) -> None:
     print(f"changed lines: {s['changed_lines']}  explained: {s['explained_lines']}  "
           f"unexplained: {s['unexplained_lines']}  leaks: {s['leaks_total']}  "
           f"binary files with identifiers: {s['binary_files_with_identifiers']}")
+    r = s.get("routing") or {}
+    if r.get("checked"):
+        line = (f"routing coherence: {'OK' if r.get('ok') else 'BROKEN'} "
+                f"({r.get('routes', 0)} routes, {r.get('connected', 0)} connected networks)")
+        if not r.get("ok"):
+            line += "  " + "; ".join(r.get("mismatches", []))
+        print(line)
     if rep.archive:
         print("archive:", json.dumps(rep.archive))
     for f in rep.files:

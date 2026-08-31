@@ -304,6 +304,13 @@ as invariants in [.claude/rules/anonymizer-invariants.md](.claude/rules/anonymiz
   objects.
 - IPv6 is not anonymized; neither are addresses rendered as byte arrays in
   Go debug output (`[0 0 … 255 255 10 0 0 254]`).
+- **Routing coherence is checked structurally.** The compare re-parses the
+  config and both RIB formats on each side and verifies that every
+  structural relation — a nexthop inside a connected subnet, a route
+  containing another route or a connected network, every prefix length —
+  holds on the anonymized tree *iff* it holds on the original. Any
+  injective mapping explains every line; only a prefix-preserving one
+  keeps these relations.
 - **The compare mode only knows the mapping.** It proves every change is
   mapping-driven and that no mapped value survives; it cannot know that a
   string it never mapped is the customer's name. A raw `grep` of the

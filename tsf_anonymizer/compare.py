@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import difflib
 import gzip
+import ipaddress
+import itertools
 import multiprocessing
 import re
 import tarfile
@@ -479,6 +481,102 @@ def _analyze_in_worker(pair: tuple[str, str]) -> FileReport:
         return FileReport(rel, "text", "error", notes=[f"comparison failed: {e}"])
 
 
+_RIB_ROW_RE = re.compile(
+    r"^\s*(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\s+(?:\S+\s+)?(\d{1,3}(?:\.\d{1,3}){3})?")
+
+
+def _routing_view(tree: Path) -> dict | None:
+    """One side's routing topology, re-derived from that tree alone: the
+    connected networks (config layer3 IPs), and the routes of the config's
+    static-route entries plus the RIB rows of both `show routing route`
+    formats (classic and advanced-routing). The same code runs on the
+    original and on the anonymized tree — no mapping, no anonymizer."""
+    cfgs = sorted(tree.rglob("running-config.xml"))
+    if not cfgs:
+        return None
+    try:
+        root = ET.parse(cfgs[0]).getroot()
+    except ET.ParseError:
+        return None
+    connected: list = []
+    for lay in root.iter("layer3"):
+        for ip_el in lay.iter("ip"):
+            for e in ip_el.findall("entry"):
+                name = e.get("name") or ""
+                if "/" in name:
+                    try:
+                        connected.append(ipaddress.ip_network(name, strict=False))
+                    except ValueError:
+                        pass
+    routes: list = []  # (network, nexthop | None)
+    for sr in root.iter("static-route"):
+        for e in sr.findall(".//entry"):
+            dest = e.findtext("destination")
+            if not dest:
+                continue
+            nh = e.findtext("nexthop/ip-address")
+            try:
+                routes.append((ipaddress.ip_network(dest, strict=False),
+                               ipaddress.ip_address(nh) if nh else None))
+            except ValueError:
+                continue
+    for ts in sorted((tree / "tmp" / "cli").glob("techsupport_*.txt")):
+        try:
+            text = ts.read_bytes().decode("utf-8", "surrogateescape")
+        except OSError:
+            continue
+        for m in re.finditer(r"^> show (?:advanced-)?routing route.*?(?=^> |\Z)",
+                             text, re.S | re.M):
+            for line in m.group(0).splitlines()[1:]:
+                rm = _RIB_ROW_RE.match(line)
+                if not rm:
+                    continue
+                try:
+                    dest_net = ipaddress.ip_network(rm.group(1), strict=False)
+                    nh_addr = ipaddress.ip_address(rm.group(2)) if rm.group(2) else None
+                except ValueError:
+                    continue
+                routes.append((dest_net, nh_addr))
+    return {
+        "routes": len(routes),
+        "connected": len(connected),
+        "prefixlens": [d.prefixlen for d, _ in routes] + [c.prefixlen for c in connected],
+        "nexthop_in_connected": [nh is not None and any(nh in c for c in connected)
+                                 for _, nh in routes],
+        "containment": [(d1.subnet_of(d2), d2.subnet_of(d1)) for (d1, _), (d2, _)
+                        in itertools.combinations(routes, 2)],
+        "connected_in_route": [c.subnet_of(d) for c in connected for d, _ in routes],
+    }
+
+
+def check_routing_coherence(orig_dir: Path, anon_dir: Path) -> dict:
+    """Every structural relation must hold on the anonymized tree iff it
+    holds on the original. Any injective mapping explains every *line*; only
+    a prefix-preserving one keeps these *relations* — this is the check that
+    fails if prefix preservation ever regresses."""
+    o, a = _routing_view(orig_dir), _routing_view(anon_dir)
+    out: dict = {"checked": False}
+    if o is None or a is None:
+        return out
+    out.update(checked=True, routes=o["routes"], connected=o["connected"])
+    mismatches: list[str] = []
+    if o["routes"] != a["routes"] or o["connected"] != a["connected"]:
+        mismatches.append(
+            f"structure differs: {o['routes']} routes / {o['connected']} connected"
+            f" vs {a['routes']} / {a['connected']}")
+    else:
+        for key, label in (("prefixlens", "prefix length"),
+                           ("nexthop_in_connected", "nexthop-in-connected-subnet"),
+                           ("containment", "route-containment"),
+                           ("connected_in_route", "connected-network-in-route")):
+            bad = sum(1 for x, y in zip(o[key], a[key], strict=True) if x != y)
+            if bad:
+                mismatches.append(f"{bad} {label} relation(s) hold on one side only")
+    out["mismatches"] = mismatches
+    out["ok"] = not mismatches
+    return out
+
+
 def compare_trees(orig_dir: Path, anon_dir: Path, mapping: dict,
                   progress: ProgressFn = _noop, workers: int = 1) -> CompareReport:
     """Compare two extracted trees.
@@ -543,6 +641,7 @@ def compare_trees(orig_dir: Path, anon_dir: Path, mapping: dict,
     report.summary["mapping_collision_sample"] = index.collisions[:20]
     report.summary["mapping_duplicate_pseudonyms"] = len(index.duplicate_pseudonyms)
     report.summary["mapping_duplicate_sample"] = index.duplicate_pseudonyms[:20]
+    report.summary["routing"] = check_routing_coherence(orig_dir, anon_dir)
     return report
 
 

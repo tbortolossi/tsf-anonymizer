@@ -95,6 +95,17 @@ the compare reports *duplicate pseudonyms* if it ever is not; a fake that
 coincides with a real customer address is reported as a *collision*,
 separately from leaks.
 
+## Routing coherence
+
+`_routing_view` re-derives, from one tree alone, the connected networks
+(config layer3 IPs) and the routes (config static routes + both RIB
+formats of the techsupport txt); `check_routing_coherence` requires every
+structural relation — nexthop ∈ connected subnet, route ⊆ route,
+connected ⊆ route, prefix lengths — to hold on the anonymized side iff it
+holds on the original. No mapping involved: this is the check that fails
+if prefix preservation ever regresses, which per-line explanation cannot
+see. Summary key `routing`, one line in the CLI output, a KPI in the UI.
+
 ## The mapping sidecar
 
 `<name>.mapping.json` is a JSON object with one map per class
