@@ -85,6 +85,22 @@ _CONFIG = """<?xml version="1.0"?>
           <entry name="ethernet1/1"><layer3><ip><entry name="10.20.30.1/24"/></ip></layer3></entry>
           <entry name="ethernet1/2"><layer3><ip><entry name="10.20.40.1/24"/></ip></layer3></entry>
         </ethernet></interface>
+        <virtual-router>
+          <entry name="VR-Main">
+            <interface><member>ethernet1/1</member><member>ethernet1/2</member></interface>
+            <routing-table><ip><static-route>
+              <entry name="SR-Default"><destination>0.0.0.0/0</destination><nexthop><ip-address>10.20.30.254</ip-address></nexthop><interface>ethernet1/1</interface><metric>10</metric></entry>
+              <entry name="SR-Branch-Lyon"><destination>10.99.0.0/16</destination><nexthop><ip-address>10.20.40.254</ip-address></nexthop><interface>ethernet1/2</interface><metric>10</metric></entry>
+            </static-route></ip></routing-table>
+          </entry>
+        </virtual-router>
+        <logical-router>
+          <entry name="LR-Edge">
+            <vrf><entry name="default">
+              <static-route><ip-address-family><entry name="SR-Peering"><destination>198.18.9.0/24</destination><nexthop><ip-address>10.20.30.254</ip-address></nexthop></entry></ip-address-family></static-route>
+            </entry></vrf>
+          </entry>
+        </logical-router>
         <ike><gateway>
 {gateways}
         </gateway></ike>
@@ -129,10 +145,23 @@ name                    id    speed/duplex/state        mac address
 ethernet1/1             16    1000/full/up              00:1b:17:00:00:10
 ethernet1/2             17    1000/full/up              00:1b:17:00:00:11
 > show routing route
-destination        nexthop            metric flags  interface
-0.0.0.0/0          172.16.4.254       10     A S    ethernet1/1
-10.20.30.0/24      10.20.30.1         0      A C    ethernet1/1
-10.20.40.0/24      10.20.40.1         0      A C    ethernet1/2
+flags: A:active, C:connect, S:static, O:ospf, B:bgp, Oi:ospf intra-area
+destination        nexthop            metric flags     age   interface
+0.0.0.0/0          10.20.30.254       10     A S             ethernet1/1
+10.20.30.0/24      10.20.30.1         0      A C             ethernet1/1
+10.20.40.0/24      10.20.40.1         0      A C             ethernet1/2
+10.99.5.0/24       10.20.40.77        30     A Oi      2036  ethernet1/2
+198.18.9.0/24      198.18.7.7         20     A B       387   ethernet1/1
+> show advanced-routing route
+Logical Router: LR-Edge
+flags: A:active, E:ecmp
+destination        protocol   nexthop        distance metric flag age      interface
+198.18.9.0/24      bgp        198.18.7.7     20       0      A    00:06:27 ethernet1/1
+10.20.30.0/24      connected                 0        0      A    01:03:07 ethernet1/1
+> show routing protocol ospf dumplsdb
+ VR Area ID    Orig RTR ID   LS ID          LSA Type          Age
+  1 0.0.0.0    10.20.40.1    10.99.5.0/24   type-3 (Summary)  1322
+      Mask 255.255.255.0, metric: 30
 > show high-availability state
 Group 1:
   Mode: Active-Passive
@@ -220,6 +249,22 @@ def render_logs(rng: random.Random, lines: int) -> dict[str, str]:
     }
 
 
+def render_routed_log() -> str:
+    """Dated dynamic-routing events: an SPF run, then the learned route of
+    the RIB flaps (monitor Down -> delete -> Up -> add). The fixture for
+    "one pseudonym across a route's whole dated sequence"."""
+    rows = [
+        ("09:12:01", "TM_SPF: start full SPF calculation rid 10.20.40.1"),
+        ("09:12:01", "TM_SPF: full routing calculation finished rid 10.20.40.1"),
+        ("09:14:02", "MON: status update monitor(vr VR-Main: 10.20.40.254 > 10.99.5.9) Down"),
+        ("09:14:03", "routed: delete route 10.99.5.0/24 nexthop 10.20.40.77 interface ethernet1/2"),
+        ("09:17:05", "MON: status update monitor(vr VR-Main: 10.20.40.254 > 10.99.5.9) Up"),
+        ("09:17:06", "routed: add route 10.99.5.0/24 nexthop 10.20.40.77 interface ethernet1/2"),
+        ("09:18:00", "TM_SPF: start full SPF calculation rid 10.20.40.1"),
+    ]
+    return "".join(f"2026-04-07 {t}.000 +0200 {msg}\n" for t, msg in rows)
+
+
 def techsupport_name(device: str = DEVICE) -> str:
     return f"techsupport_{device}_20260407_1000.txt"
 
@@ -263,6 +308,7 @@ def build_mock_tsf(output: Path, *, lines: int = 400, seed: int = 7) -> Path:
     add("var/log/pan/rule-hit-count.bin",
         b"\x00\x01\x00\x10" + b"\x00".join(r.encode() for r in RULES) + b"\xff\xfe\x00\x00" * 64)
     add("var/log/wtmp", (b"\x07\x00\x00\x00" + b"\x00" * 60 + MGMT_IP.encode() + b"\x00" * 300) * 12)
+    add("var/log/pan/routed.log", render_routed_log())
     add("var/log/pan/untouched.txt", "nothing identifying here\n")
 
     output = Path(output)

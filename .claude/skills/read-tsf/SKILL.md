@@ -236,7 +236,38 @@ have several planes:
   resource-monitor` is a single header whose output carries `DP s1dp0:`
   sub-blocks instead. The `packet descriptor (on-chip)` rows appear on the
   ASIC-fronted families only (PA-3200, 5200, 7000) — their absence on a
-  400/1400/3400/5400 is normal.
+  400/1400/3400/5400 is normal, and row *presence* is a self-maintaining
+  platform test. Analyse buffer/descriptor rows per DP: the classic chassis
+  finding is one DP at 90 %+ while the chassis median idles below 10 % (a
+  session pinned to a DP), invisible in any pooled view —
+  `> show session distribution statistics` is the one-call per-DP
+  session-count denominator that separates per-session weight from
+  distribution failure. On a PA-7000, `> show chassis status` maps card
+  types and the `Traffic enabled slots` line says which slots are real:
+  per-slot directories exist for **all** slots regardless, the dump carries
+  `target-dp` blocks for nonexistent DPs too, and **targeting an unpopulated
+  DP silently returns another plane's data** (identical counter values
+  across empty slots) — never read a per-DP block for a slot that is not
+  traffic-enabled. `> show counter global` on a chassis returns the
+  near-identical chassis aggregate in every `target-dp` block, and
+  `> show session info` prints a single `target-dp: *.*` aggregate; per-DP
+  attribution comes from resource-monitor and pool statistics, not from
+  those two. `hwbuf-*.raw` present in a DP's `memdump/` marks that DP as
+  having had a hardware-buffer stall event. More existence wrinkles: a
+  PA-5430 TSF can ship an **empty `opt/dpfs/` directory skeleton** (check
+  for files before rerouting the analysis), and a PA-5250 on 11.2 can run
+  only dp0/dp1 — `target-dp s1dp2` answers `Server error : target-dp
+  invalid` while `opt/var.dp2` exists with an empty `log/pan/`; trust the
+  error, not the directory. On the PA-1400, `dpc_nica_stats` prints `NICA
+  FPGA not available`, `bcm_g_cntr_stats` is broken and mp-monitor
+  `fvif_stats` is empty — per-interface history on that family exists only
+  in `> show counter interface all` at snapshot time. On the PA-3200,
+  `pan_task_*.log` at debug level rotates in ~1–2 minutes (70k lines/min
+  seen; the live file can span < 30 s) — for proxy/timer/policy-lookup
+  warnings grep all `pan_task_*.log*` and treat an empty result before the
+  last rotation as "window lost", never "no errors";
+  `opt/dpfs/var/log/pan/packetbuffer.log.log` names every pool with
+  sizes/thresholds at boot.
 - `sysd.log` names components per plane (`s1.dp0`, `s1.mp`), and
   `show running resource-monitor` in the techsupport txt repeats its blocks
   per slot/DP on a chassis — check which DP a block belongs to before
@@ -295,15 +326,67 @@ grep -A5 "^packet buffer (maximum):" tmp/cli/techsupport_*.txt
 grep -A5 "descriptor (maximum):" tmp/cli/techsupport_*.txt
 ```
 
-Interpretation: descriptor near 100 % with modest CPU = ingress congestion —
-packets are dropped at the wire while every core looks idle; packet buffer
-sustained > 80 % = imminent PBP/RED; a **baseline** > 40 % at peak = the
-platform is undersized, not an incident. `> debug dataplane pool statistics`
-gives the instant view: `Packet Buffers : free/total` against
-`Low free buffer limit` (free approaching the limit = exhaustion), and a
-non-zero `Depleted` column in the segment table.
+The blocks read **newest-first**, left to right. Interpretation: descriptor
+near 100 % with modest CPU = ingress congestion — packets are dropped at the
+wire while every core looks idle; packet buffer sustained > 80 % = imminent
+PBP/RED; a **baseline** > 40 % at peak = the platform is undersized, not an
+incident. `> debug dataplane pool statistics` gives the instant view:
+`Packet Buffers : free/total` against `Low free buffer limit` (free
+approaching the limit = exhaustion), and a non-zero `Depleted` column in the
+segment table — but that exact shape is the single-chip one. On the PA-3200
+the resource-monitor `packet buffer` row is backed by hardware pool
+`[29] PKI POOL DFLT` (53,248 buffers); on the PA-5200/PA-7000 there is **no
+`Packet Buffers` row at all** — the congestion-relevant pool is
+`PKI POOL DFLT : free/total` under `Hardware Pools` (per DP), software
+buffers appear as `software packet buffer 0..4` with multi-column rows, and
+extra hardware rows worth reading are `Timer Pool` (proxy timers) and the
+AURA table (`Packet QOS n Allocated` — buffers parked in a QoS queue).
+Proxy-load gauges live in the software-pool user rows: `proxy_flow`,
+`ssl_st`, `fptcp_seg` (Cur./Max./Total-Alloc, per DP).
 
-**Packet Buffer Protection (PBP)** — two phases, three counters:
+**Leak vs burst — the reading that decides most buffer cases.** Compare
+`packet buffer (average)` against `session (average)` across the hour/day/
+week blocks: a buffer average that ratchets up (or holds ≥ 50 %) through
+hours or days where sessions sit at idle single digits = buffers **held**,
+not congested — a leak, and it resets only at reboot (`reboot.log`). A burst
+shows the opposite: `maximum` spiking while the same minute's `average` stays
+low, with full recovery between events. Two time machines recover the slope
+when the day/week buckets were reset by a reboot:
+
+- `Packet buffer congestion (utilization) is X/Y (P%)` lines in
+  `tmp/cli/logs/show_log_system.txt` — one per minute above the alert
+  threshold, spanning weeks, surviving reboots, present even when PBP is
+  monitor-only (when threat logs and PBP counters are all zero). **The
+  denominator Y names the measured pool** and is platform-dependent:
+  the software packet-buffer pool total on single-chip x86 families
+  (1400/3400/5400), the on-chip `PKI POOL DFLT` total on ASIC families
+  (3200/5200/7000). An hour-of-day histogram of these lines
+  (`awk '{print substr($2,1,2)}' | sort | uniq -c`) that clusters in one
+  clock window across days = a scheduled job (backups), not an attack.
+- `dp-monitor.log*` snapshots: each embeds the pool-statistics table
+  (grep `PKI POOL DFLT` or `Packet Buffers` across rotations for a
+  timestamped free-count series every ~10 min), and each `--- panio` section
+  embeds a **full resource-monitor dump** including per-second
+  `packet buffer` / `packet descriptor (on-chip)` rows — the pre-reboot
+  history.
+
+**Packet Buffer Protection (PBP)** — two phases, three counters — but the
+counter *names* below exist on some releases only: on 10.2 and 11.x (and
+always in latency mode) the live family is `flow_dos_pbp_drop` ("Dropped by
+packet buffer protection RED"), `flow_dos_pbp_ifp_zone`,
+`flow_dos_pbp_block_host`, plus `flow_dos_drop_ip_blocked` (packets dropped
+while a source sits in the block table — the collateral-damage magnitude),
+and `pkt_buf_protect_*` may be entirely absent. Grep both families before
+concluding "PBP never fired". A large `flow_dos_pbp_ifp_zone` means PBP fell
+back to the ingress **interface's** zone id — the zone named in PBP Packet
+Drop threat logs is then not the session's true zone; don't attribute by it.
+PBP's config has two modes: utilization thresholds, and latency mode
+(`packet-buffer-protection-latency-*` under `deviceconfig/setting/session`,
+plus `…-monitor-only`); `pbp_buf_latency` is **not a global counter** — it
+lives only in `> debug dataplane pow performance all` (+ per-core form) as a
+POW group row (max-us / avg-us + a `(func)` histogram). A max several orders
+of magnitude above the average = long-tail descriptor starvation (leak
+class); max and avg rising together = burst.
 
 - `pkt_buf_protect_red` — Phase 1 (global): RED applied to the offending
   session as the buffer crosses the Activate threshold. Any non-zero rate =
@@ -315,10 +398,14 @@ non-zero `Depleted` column in the segment table.
   (default 3600 s), silently. **The classic escalation: the blocked source is
   a NAT device (site router, proxy) → the whole site loses everything, with
   zero log evidence.** On "everyone in the office lost internet at once",
-  check this counter before anything else. Live-device follow-ups (usually
-  NOT captured in the TSF): `show session packet-buffer-protection`,
-  `show running resource-monitor ingress-backlogs` (sessions holding ≥ 2 % of
-  on-chip descriptors), `clear session packet-buffer-protection`.
+  check this counter before anything else. Live-device follow-ups: `show
+  session packet-buffer-protection`, `show running resource-monitor
+  ingress-backlogs` (sessions holding ≥ 2 % of on-chip descriptors), `clear
+  session packet-buffer-protection` — on eight real PBP-case TSFs
+  (10.2 → 11.2) **none of these appears in the command dump**, threat logs
+  are not exported, and `debug dataplane show dos block-table` is momentary:
+  a TSF taken between bursts cannot say *which* hosts PBP blocked. Only a
+  live capture during the incident can.
 
 Buffer-exhaustion counters when PBP is off or overwhelmed:
 `pkt_alloc_fail*`, `buf_alloc_fail`, `hw_buf_alloc_fail`, `flow_rcv_err_pkt`,
@@ -326,9 +413,26 @@ Buffer-exhaustion counters when PBP is off or overwhelmed:
 deep — DP overload even at moderate CPU). Random, flow-unmappable loss is the
 tell.
 
+**L2 / ARP storm — the flood PBP cannot touch.** Buffer pegged while session
+count, session-table utilization and cps stay flat, no PBP offenders, and a
+reboot changes nothing = the flood is not session traffic. Proof pattern:
+`flow_arp_pkt_rcv` in the raw counters at a rate no session accounts for
+(with `flow_arp_rcv_gratuitous / flow_arp_pkt_rcv ≈ 1` ⇒ gratuitous-ARP
+storm), the `flow_ctrl` CPU group at 99 % on one core while average DP CPU
+idles, and in `> show counter interface all` one interface (or one AE group
+summed over members — fold members via `> show interface all`) whose
+`rx-broadcast + rx-multicast` dwarfs every other interface *and* its own
+`rx-unicast`. That names the ingress port; the fix is at L2, not on the
+firewall. `> show arp all`'s header (`total ARP entries` vs `maximum`)
+separates a gratuitous storm (table normal) from table exhaustion.
+
 **Zone protection** — `> show zone-protection` lists, per zone and mechanism,
 `enabled: yes/no` and `packet dropped: N`. Non-zero drops here are silent by
-design. `tcp-reject-non-syn` drops are routine after a failover (unsynced
+design. Two traps: a zone whose profile has a flood mechanism disabled prints
+**no line at all** for it (absence = disabled, not zero) — a flood reaching
+PBP with the ingress zone's flood lines missing means PBP is doing zone
+protection's job; and the per-zone `pbp-drop:` line repeats a global counter
+in every zone block. `tcp-reject-non-syn` drops are routine after a failover (unsynced
 sessions) — sustained means asymmetric routing. Flood/recon counters firing:
 decide legitimate burst (internal scanner, backups → raise threshold or use a
 classified rule) vs attack (block the source) before touching thresholds.
@@ -340,7 +444,19 @@ is the live signal). Sort by severity `drop`/`error` first, then read pairs:
 dropped; `tcp_drop_packet` + `tcp_exceed_flow_seg_limit` = out-of-order queue
 overflow (asymmetry/reordering upstream); `flow_dos_*` = zone/DoS protection
 acting (see above). A counter name is not self-explanatory — when unsure,
-grep the same name in the raw section for its description column.
+grep the same name in the raw section for its description column. The delta
+sample can be as short as 0.2 s — low-rate decisive counters
+(`flow_dos_pbp_block_host` at a cumulative 14) essentially never surface in
+it; the raw section carries both the cumulative value and its own live rate
+column, so read both. When a reboot happened mid-incident and the symptom
+outlived it, since-boot counters divided by uptime are clean per-incident
+rates. Root-cause families worth a targeted grep in the raw section during
+any buffer case: `flow_ipfrag_recv/merge` (ratio > ~4 = heavy fragmentation)
+with `flow_ipfrag_pkt_alloc_err`/`pkt_alloc_failure` tying frags to buffer
+exhaustion; `tcp_fptcp_rxmt`/`tcp_fptcp_fast_retransmit` (proxied-TCP
+retransmit pressure — descriptor exhaustion with decryption); and
+`tcp_exceed_flow_seg_limit`/`tcp_drop_packet`/`tcp_out_of_sync` (out-of-order
+queues held by one-way/TAP feeds).
 
 ## Step 4 — the config
 
@@ -364,6 +480,14 @@ points: `TSF-GUIDE.md` §5. Two specifics:
 - **An absent file ≠ a healthy subsystem**; an empty grep ≠ nothing happened
   (the window may be rotated away, or that daemon logs elsewhere).
 - **Counters are since-boot** unless the section says delta.
+- **`show_log_config.txt` has no xpaths** — the object each commit touched is
+  in `configd.log` as `New xpath is …` lines at the same timestamps.
+- **The upgrade timeline** is `grep "Firstboot: CHANGE" opt/panrepo/logs/swm.log`
+  (authoritative version ladder with timestamps); `history.log` beside it has
+  the operator's install/load sequence. A symptom starting hours after a
+  `CHANGE` line is a post-upgrade onset — check known issues for that release.
+- **`show_log_threat.txt` is not guaranteed** to be exported; its absence
+  says nothing about threat activity.
 - **mtime is meaningless** post-extraction; dates live in filenames and line
   content.
 - **Huge vendor files** — `updates/*/global.xml` (37 MB App-ID DB),
@@ -401,6 +525,17 @@ where" use `show_log_system.txt` (`grep -i "logged in\|auth"`) and
 `authd.log`. The original is gone from the archive, not hidden. The
 `*.mapping.json` sidecar reverses it all and must never travel with the
 anonymized archive.
+
+Known over-anonymization (observed on real archives; reported to the
+anonymizer repo): common English words can be replaced even inside command
+echoes and free text (`> show chassis inventory` → `> show chassis
+user72321`, `Connection status: up` → `user51283`, the `install` verb in
+`opt/panrepo/logs/history.log`), and interface names inside zone `<member>`
+elements may be pseudonymized despite the preserve-interfaces rule. Layout
+and numbers survive, so analysis works — but **prefer structural greps
+(section markers, counter names, `X/Y` fractions) over long fixed English
+strings**, and treat an empty fixed-string grep on an anonymized TSF as
+possibly mangled, not absent.
 
 ## Before you finish — feed this file
 

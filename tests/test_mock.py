@@ -55,6 +55,26 @@ def test_mock_anonymizes_clean(tmp_path):
         assert tar.getmember("./opt/pancfg/mgmt/global/.hcr_metadata.json").mode == 0
 
 
+def test_routing_fixtures_stay_coherent_after_anonymization(tmp_path):
+    src = build_mock_tsf(tmp_path / "in.tgz", lines=30)
+    out = tmp_path / "out.tgz"
+    _, mapping = anonymize_tsf(src, out)
+    ips = mapping["ip_addresses"]
+    p24 = lambda ip: ip.rsplit(".", 1)[0]  # noqa: E731
+    text = _text_of(out)
+    # the OSPF-learned destination keeps one pseudonym across the RIB, the
+    # LSDB, and both dated routed.log events (delete at 09:14, add at 09:17)
+    dest = ips["10.99.5.0"]
+    assert "10.99.5.0" not in text
+    assert text.count(dest + "/24") >= 4
+    # the nexthop stays inside the fake subnet of its interface...
+    assert p24(ips["10.20.40.77"]) == p24(ips["10.20.40.1"])
+    # ...the monitored IP shares the destination's fake /24...
+    assert p24(ips["10.99.5.9"]) == p24(dest)
+    # ...and the /16 static route still contains its learned /24
+    assert ips["10.99.0.0"].split(".")[:2] == dest.split(".")[:2]
+
+
 def test_mock_tsf_cli(tmp_path, capsys):
     out = tmp_path / "demo.tgz"
     assert main(["mock-tsf", "-o", str(out), "--lines", "20"]) == 0
