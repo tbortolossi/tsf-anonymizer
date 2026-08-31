@@ -41,7 +41,7 @@ from typing import Callable, Optional
 
 from .core import (
     BINARY_EXTENSIONS, MAPPING_CATEGORIES, REDACTED_PAYLOAD, extract_archive,
-    is_binary_bytes, trie_regex,
+    is_binary_bytes, mapped_member_name, trie_regex,
 )
 
 ProgressFn = Callable[[str, int, int, str], None]
@@ -481,7 +481,7 @@ def compare_trees(orig_dir: Path, anon_dir: Path, mapping: dict,
     # (an anonymize job's working trees keep the original names on disk).
     a_rel_of: dict[str, Optional[str]] = {}
     for rel in o_files:
-        mapped = index.apply(rel)
+        mapped = mapped_member_name(index.apply, rel)
         a_rel_of[rel] = mapped if mapped in a_files else (rel if rel in a_files else None)
     matched = {v for v in a_rel_of.values() if v}
     renamed = sum(1 for rel, a_rel in a_rel_of.items() if a_rel and a_rel != rel)
@@ -595,7 +595,7 @@ def compare_members(orig_tgz: Path, anon_tgz: Path,
     progress("verify", 2, 2, "")
     index = MappingIndex(mapping or {})
     mismatches: list[str] = []
-    o_names = [index.apply(m.name.lstrip("/")) for m in o]
+    o_names = [mapped_member_name(index.apply, m.name.lstrip("/")) for m in o]
     a_names = [m.name.lstrip("/") for m in a]
     if o_names != a_names:
         missing = sorted(set(o_names) - set(a_names))
@@ -663,7 +663,7 @@ def file_diff(orig_dir: Path, anon_dir: Path, rel: str, mapping: dict,
     """
     o_path, a_path = orig_dir / rel, anon_dir / rel
     if not a_path.is_file():
-        a_path = anon_dir / MappingIndex(mapping).apply(rel)  # a renamed member
+        a_path = anon_dir / mapped_member_name(MappingIndex(mapping).apply, rel)  # renamed
     if not o_path.is_file() or not a_path.is_file():
         return {"path": rel, "error": "file missing on one side"}
     o_raw, o_kind = _read_payload(o_path)

@@ -239,7 +239,8 @@ class TestAnonymizeTsf:
             ma, mb = a.getmembers(), b.getmembers()
         # Names are preserved *through the mapping*: a member named after the
         # device comes out renamed, exactly as the text would.
-        assert [idx.apply(m.name) for m in ma] == [m.name for m in mb]
+        from tsf_anonymizer.core import mapped_member_name
+        assert [mapped_member_name(idx.apply, m.name) for m in ma] == [m.name for m in mb]
         for x, y in zip(ma, mb):
             assert (x.mode, x.uid, x.gid, x.uname, x.mtime, x.type) == (y.mode, y.uid, y.gid, y.uname, y.mtime, y.type)
 
@@ -955,3 +956,12 @@ def test_hostname_inside_a_hyphenated_compound_is_still_the_device(anon):
     assert "fw-dc1" not in out
     assert "adm-host001" in out and "host001-PBP-ALERTE" in out
     assert "web-server-1" in out            # objects keep the hyphenated-compound rule
+
+
+def test_member_renaming_never_touches_directories(tmp_path, tsf):
+    """A user named `cli` renamed tmp/cli/ to tmp/user83115/ on a real run."""
+    from tsf_anonymizer.core import mapped_member_name
+    assert mapped_member_name(lambda s: s.replace("cli", "user001"), "./tmp/cli/cli_netstat.txt") \
+        == "./tmp/cli/user001_netstat.txt"
+    assert mapped_member_name(lambda s: "X", ".") == "."
+    assert mapped_member_name(lambda s: "X", "./tmp/cli") == "./tmp/X"   # only the last component

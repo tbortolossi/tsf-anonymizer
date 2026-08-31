@@ -117,8 +117,11 @@ BUILTIN_OBJECTS = {
 # *everywhere* rewrote every standalone "error" in every log — 60 571
 # unexplained lines. A word that identifies nobody needs no pseudonym.
 _USER_STOPWORDS = {
-    # seen as brute-force guesses on real TSFs
-    "error", "request", "block", "usr", "port",
+    # seen as brute-force guesses or service names on real TSFs
+    "error", "request", "block", "usr", "port", "cli",
+    # PAN-OS access paths and protocols, never a person
+    "api", "gui", "console", "shell", "sync", "cron", "ntp", "snmp", "syslog",
+    "radius", "ldap", "tacacs", "saml", "kerberos", "local", "panorama",
     # log vocabulary
     "user", "username", "login", "logout", "unknown", "invalid", "failed",
     "success", "warning", "info", "debug", "password", "session", "service",
@@ -1658,8 +1661,7 @@ def anonymize_tsf(
             renamed = [0]
 
             def _rename(name: str) -> str:
-                # Same frozen tables, same passes: a member name is text too.
-                new = anon.anonymize_text(name)
+                new = mapped_member_name(anon.anonymize_text, name)
                 if new != name:
                     renamed[0] += 1
                 return new
@@ -1681,6 +1683,21 @@ def anonymize_tsf(
 
     report.duration_s = time.monotonic() - t0
     return report, anon.get_mapping()
+
+
+def mapped_member_name(rewrite: Callable[[str], str], name: str) -> str:
+    """A member's name with `rewrite` applied to its *file name only*.
+
+    Directories in a TSF are PAN-OS layout (tmp/cli, opt/var/s8/cp/log/pan),
+    never customer identifiers — a username `cli` renamed `tmp/cli/` to
+    `tmp/user83115/` on a real run and moved 347 members out of the layout
+    every reader relies on. The same rule serves the compare, which pairs
+    files and members by the mapped name.
+    """
+    head, sep, base = name.rpartition("/")
+    if not base or base in (".", ".."):
+        return name
+    return head + sep + rewrite(base)
 
 
 def mapping_sidecar_path(output_tgz: Path) -> Path:
