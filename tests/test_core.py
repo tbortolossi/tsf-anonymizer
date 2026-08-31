@@ -868,3 +868,13 @@ def test_machine_account_marker_is_not_part_of_the_username(tmp_path, anon):
     anon.build_patterns()
     out = anon.anonymize_text('<entry name="acme\\pc01std$"/>')
     assert "pc01std" not in out and out.endswith('$"/>')
+
+
+def test_edl_cache_file_name_glued_to_its_vsys_is_rewritten(anon):
+    """opt/pancfg/mgmt/devices/*/vsys1_<EDL name>.ebl: PAN-OS glues the object
+    name to the vsys with an underscore — the only underscore that separates."""
+    anon.register_named_object("ThreatFeed-Partner", "obj")
+    anon.build_patterns()
+    out = anon.anonymize_text("cache vsys1_ThreatFeed-Partner.ebl and my_ThreatFeed-Partner_x")
+    assert "vsys1_OBJ-0001.ebl" in out
+    assert "my_ThreatFeed-Partner_x" in out   # inside another identifier: untouched

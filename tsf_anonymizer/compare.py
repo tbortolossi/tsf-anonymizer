@@ -80,7 +80,8 @@ class MappingIndex:
     # whole token; never right after "<" / "</" (an XML tag), never before "="
     # (an attribute) or "://" (a URL scheme). "@" and "/" before are fine —
     # "@Mail.Ru", "https://vpn.acme.fr/".
-    _BEFORE = r"(?<![\w.\-<])(?<!<\/)(?<!\/\/)"
+    # "vsys<n>_" is the one underscore that separates (vsys1_<EDL>.ebl).
+    _BEFORE = r"(?:(?<![\w.\-<])|(?<=vsys\d_))(?<!<\/)(?<!\/\/)"
     _AFTER = r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)"
 
     def __init__(self, mapping: dict) -> None:

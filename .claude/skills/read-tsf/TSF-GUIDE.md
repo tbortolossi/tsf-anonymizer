@@ -53,6 +53,7 @@ Two dates matter and they are not the same:
     candidatecfg.<n>.xml, last-candidatecfg.xml
     rule-hit-count-db.txt, rule-hit-count.bin
     global-external-list.xml               ← EDL contents
+    vsys<n>_<EDL name>.ebl                 ← per-EDL binary cache (IP lists; spaces in the name become #)
 ./opt/pancfg/mgmt/tmp/panorama_pushed/     ← what Panorama sent (before/after import)
 ./opt/pancfg/mgmt/audit/cfg-audit.xml,v    ← RCS history of every commit
 ./opt/pancfg/mgmt/global/                  ← content/AV version info, report configs
@@ -114,7 +115,7 @@ writes `ikemgr-ng.log` while `ikemgr.log` stays present and idle; same for
 | problem | read | then |
 |---|---|---|
 | commit failed / slow | `configd.log`, `commit_stats.log`, `show_log_config.txt` | `mgmt_httpd_error.log`, `cfg-audit.xml,v` for what changed |
-| reboot / crash | `crashinfo/*.info`, `sysd.log`, `messages`, `opt/panrepo/logs/reboot.log` | `show system files`; `mp-monitor.log` for memory before the crash |
+| reboot / crash | `crashinfo/*.info`, `sysd.log`, `messages`, `opt/panrepo/logs/reboot.log` | `show system files`; `mp-monitor.log` for memory before the crash; `dataplane-console-output.log` = the DP serial console (`Welcome to the PanOS Bootloader…`, timestamped) — the boot sequence and any panic text the kernel printed on the way down |
 | HA failover | `ha_agent.log`, `show_log_system.txt` (filter `ha`) | `show high-availability all`; path/link monitoring config in `running-config.xml` |
 | site-to-site VPN | `ikemgr-ng.log` (or `ikemgr.log`), `keymgr*.log` | `> debug ike stat …`, `show vpn ike-sa`, `show vpn ipsec-sa`; the peer's proposals in the config |
 | GlobalProtect | `gpsvc.log`, `sslvpn-access.log`, `sslvpn_ngx_error.log`, `show_log_globalprotect.txt` (can be the biggest text file of the TSF — 64 MB seen; one row per portal/gateway event, columns: time, gateway/portal, status, event, region, `domain\user`) | `rasmgr.log`, `authd.log`, `sslmgr.log` (certs); `var/log/pan/sslvpn-access/sslvpn-task.log*.gz` are **binary** per-request records (`strings`/`grep -a`) |
@@ -130,7 +131,7 @@ writes `ikemgr-ng.log` while `ikemgr.log` stays present and idle; same for
 | SSL decryption / certificates | `sslmgr.log`, `device_certgen.log`, `uia_tsa_cert.log` | `> show device-certificate status`, `debug sslmgr statistics` |
 | DHCP / DNS proxy | `pan_dhcpd.log`, `dhclient_debug.log`, `dnsproxy_go.log` | |
 | Panorama connectivity | `devsrv.log`, `ms.log`, `configd.log` | `> show panorama-status` |
-| web UI / API | `mgmt_httpd_access.log`, `mgmt_httpd_error.log`, `appweb3-panmodule.log`, `php.debug.log` | |
+| web UI / API | `mgmt_httpd_access.log`, `mgmt_httpd_error.log`, `appweb3-panmodule.log`, `php.debug.log` | `dagger.log`: every operational command dispatched (`OPCMD: handler "session"` / `finish handler …`, timestamped) — what was run from CLI/API, and when |
 | disk | `logdb_dirs_gen.log`, `panlogs-partition.log`, `messages` | `> show system disk-space` |
 | telemetry / cloud services | `device_telemetry*.log`, `lcaas_agent.log`, `envoy_broker.log` | |
 
