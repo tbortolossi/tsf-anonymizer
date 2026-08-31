@@ -2,8 +2,10 @@
 
 A practical guide to what a TSF contains, where to look, and in which order —
 written for someone who has one on disk and a problem to explain.
-The layout below is what a PAN-OS 12.x PA-440 produces; older releases and
-Panorama differ in details, not in shape.
+The layout below was checked against ten real TSFs — PA-440, PA-1420,
+PA-3220, PA-3410, PA-5250, PA-5430, PA-7050, PA-7080, PAN-OS 10.2.9 to
+12.1.4; a path marked `12.x` or `chassis` exists only there, an unmarked one
+was on all of them. Panorama differs in details, not in shape.
 
 ## 1. What a TSF is
 
@@ -36,13 +38,15 @@ Two dates matter and they are not the same:
 ## 2. Layout
 
 ```
-./tmp/cli/techsupport_<devicename>_<YYYYMMDD>_<HHMM>.txt   ← START HERE: all show/debug output
-                                           (named after the device, never the model)
+./tmp/cli/techsupport_<hostname>_<YYYYMMDD>_<HHMM>.txt   ← START HERE: all show/debug output
+                                           (named after the device, never the model;
+                                            a hyphen of the hostname may be dropped — glob it)
 ./tmp/cli/logs/                            ← a few big command outputs kept apart
     show_log_system.txt, show_log_config.txt, show_log_globalprotect.txt,
-    show_log_alarm.txt, show_log_journal.txt, show_log_systemd.txt,
-    cli_netstat.txt, fs_manifest.txt, sdb.txt, pdt.txt, pmap_mgmtsrvr.txt,
-    online_diags_run_log.txt, cpld_dumps.txt, scheduled_report_listing.txt
+    show_log_alarm.txt, sdb.txt, sysd_objects_meta.xml (11.x+), cli_netstat.txt,
+    pdt.txt, pmap_mgmtsrvr.txt, online_diags_run_log.txt, cpld_dumps.txt,
+    scheduled_report_listing.txt; 12.x adds show_log_journal.txt,
+    show_log_systemd.txt, fs_manifest.txt
 ./opt/pancfg/mgmt/saved-configs/
     running-config.xml                     ← the config in force
     techsupport-saved-currcfg.xml          ← candidate at generation time
@@ -54,15 +58,20 @@ Two dates matter and they are not the same:
     rule-hit-count-db.txt, rule-hit-count.bin
     global-external-list.xml               ← EDL contents
     vsys<n>_<EDL name>.ebl                 ← per-EDL binary cache (IP lists; spaces in the name become #)
-./opt/pancfg/mgmt/tmp/panorama_pushed/     ← what Panorama sent (before/after import)
+./opt/pancfg/mgmt/tmp/panorama_pushed/     ← what Panorama sent: newsp/lastsp/mergesp.xml,
+                                              pushsp.xml, *-push-request.xml; before/after-sp-imported.xml on 12.x
 ./opt/pancfg/mgmt/audit/cfg-audit.xml,v    ← RCS history of every commit
 ./opt/pancfg/mgmt/global/                  ← content/AV version info, report configs
-./opt/pancfg/mgmt/healthchecks/            ← periodic health snapshots (.cli, .xml)
+./opt/pancfg/mgmt/healthchecks/            ← periodic health snapshots (.cli, .xml) — 12.x
 ./opt/pancfg/mgmt/updates/{cur,old}content/global/global.xml  ← the App-ID/Threat DB (37 MB, ignore)
-./var/log/pan/                             ← DAEMON LOGS (see §4)
-./opt/var.dp<n>/log/pan/                   ← per-dataplane logs (PA-5200); opt/var.cp/ = control plane
-./opt/var/s<slot>/{dp<n>,cp,lfp<n>}/log/pan/  ← PA-7000: per slot — dataplanes, card CP, log processing cards
-./var/log/pan/crashinfo/                   ← *.info sidecars, one per crash (absent = no crash)
+./var/log/pan/                             ← DAEMON LOGS (see §4); dp-monitor.log here on PA-400/1400/3400/5400/VM
+./opt/dpfs/var/log/pan/                    ← the dataplane's logs on the PA-3200 family (dp-monitor.log, bcm.log, pan_task_<n>.log)
+./opt/var.dp<n>/{log/pan,cores}/           ← per-dataplane logs (PA-5200); opt/var.cp/log/pan/ = control plane (cp-monitor.log)
+./opt/var/s<slot>/{dp<n>,cp,lfp<n>}/log/pan/  ← PA-7000: per slot — dataplanes, card CP (cp-monitor.log), log processing cards
+./var/cores/crashinfo/                     ← *.info sidecars, one per crash (directory absent or empty = no MP crash);
+                                              chassis: opt/var/s<slot>/dp<n>/cores/crashinfo/ per dataplane
+./var/log/pan/sslvpn-access/               ← GlobalProtect access log (text) + sslvpn-task.log* (binary) — only when GP is configured
+./var/log/pan/frr/                         ← frr_export.log; with advanced routing on, ns<N>_frr_export.log per logical router
 ./var/log/{messages,audit/,nginx/,ntpstats/,sa/}  ← Linux side: kernel, auth, web, NTP, sar
 ./opt/panrepo/logs/                        ← boot history: bios.log, reboot.log, swm.log, history.log
 ./etc/frr/                                 ← routing daemon config (advanced routing engine)
@@ -77,15 +86,16 @@ rotations before concluding "nothing in the log".
 
 ## 3. Where to start: the techsupport txt
 
-`tmp/cli/techsupport_<devicename>_<date>.txt` is ~20 000 lines of `> command`
-headers followed by output. Search for the `> ` prefix to navigate. The
-sections worth reading on every case, in order:
+`tmp/cli/techsupport_<hostname>_<date>.txt` is ~20 000 lines of `> command`
+headers followed by output (150 000+ on a chassis: every dataplane command is
+repeated per DP, each block opened by `> set system setting target-dp
+s<slot>dp<n>` — index those first). Search for the `> ` prefix to navigate.
+The sections worth reading on every case, in order:
 
 | section | tells you |
 |---|---|
 | `> show system info` | model, serial, **PAN-OS version**, content/AV/threat versions, uptime, HA, mgmt IP |
 | `> show clock` | device time and timezone (see §1) |
-| `> show system resources` | CPU/memory on the management plane, top processes |
 | `> show running resource-monitor` | dataplane CPU per core, and `Resource utilization (%)`: session, **packet buffer, packet descriptor (on-chip)** — read the *(maximum)* rows; descriptor saturation drops packets while CPU looks idle |
 | `> show session info` | sessions in use vs. the limit, packet rate, throughput, timeouts |
 | `> show counter global filter delta yes` | dataplane drop counters — **read the `drop` and `error` severities first** |
@@ -106,6 +116,8 @@ sections worth reading on every case, in order:
 
 `> show counter global` appears twice: once raw and once as a delta over a
 few seconds. The delta is the one that says what is happening *now*.
+`> show system resources` is **not** in the dump (checked on ten TSFs, 10.2
+to 12.1): management-plane CPU and memory history is `mp-monitor.log` (§4).
 
 ## 4. Daemon logs — which file for which problem
 
@@ -116,16 +128,16 @@ writes `ikemgr-ng.log` while `ikemgr.log` stays present and idle; same for
 
 | problem | read | then |
 |---|---|---|
-| commit failed / slow | `configd.log`, `commit_stats.log`, `show_log_config.txt` | `mgmt_httpd_error.log`, `cfg-audit.xml,v` for what changed |
-| reboot / crash | `crashinfo/*.info`, `sysd.log`, `messages`, `opt/panrepo/logs/reboot.log` | `show system files`; `mp-monitor.log` for memory before the crash; `dataplane-console-output.log` (chassis: `controlplane-console-output.log` and `opt/var.cp/log/pan/dataplane<n>-console-output.log`) = the serial console (`Welcome to the PanOS Bootloader…`, timestamped) — the boot sequence and any panic text the kernel printed on the way down |
+| commit failed / slow | `configd.log`, `show_log_config.txt`, `commit_stats.log` (12.x) | `mgmt_httpd_error.log`, `cfg-audit.xml,v` for what changed |
+| reboot / crash | `var/cores/crashinfo/*.info` (per DP on a chassis), `sysd.log`, `messages`, `opt/panrepo/logs/reboot.log` | `show system files`; `mp-monitor.log` for memory before the crash; the serial console (`Welcome to the PanOS Bootloader…`, timestamped — the boot sequence and any panic text the kernel printed on the way down): `dataplane-console-output.log` (PA-3200), `controlplane-console-output.log` + `opt/var.cp/log/pan/dataplane<n>-console-output.log` (PA-5200), `slot<n>-console-output.log` + `fpp-console-output.log` + `opt/var/s<slot>/cp/log/pan/dataplane<n>-console-output.log` (PA-7000); none on 400/1400/3400/5400 |
 | HA failover | `ha_agent.log`, `show_log_system.txt` (filter `ha`) | `show high-availability all`; path/link monitoring config in `running-config.xml` |
 | site-to-site VPN | `ikemgr-ng.log` (or `ikemgr.log`), `keymgr*.log` | `> debug ike stat …`, `show vpn ike-sa`, `show vpn ipsec-sa`; the peer's proposals in the config |
-| GlobalProtect | `gpsvc.log`, `sslvpn-access.log`, `sslvpn_ngx_error.log`, `show_log_globalprotect.txt` (can be the biggest text file of the TSF — 64 MB seen; one row per portal/gateway event, columns: time, gateway/portal, status, event, region, `domain\user`) | `rasmgr.log`, `authd.log`, `sslmgr.log` (certs); `var/log/pan/sslvpn-access/sslvpn-task.log*.gz` are **binary** per-request records (`strings`/`grep -a`) |
+| GlobalProtect | `gpsvc.log`, `sslvpn-access/sslvpn-access.log`, `sslvpn_ngx_error.log`, `show_log_globalprotect.txt` (can be the biggest text file of the TSF — 64 MB seen; one row per portal/gateway event, columns: time, gateway/portal, status, event, region, `domain\user`) | `rasmgr.log`, `authd.log`, `sslmgr.log` (certs); `var/log/pan/sslvpn-access/sslvpn-task.log*.gz` are **binary** per-request records (`strings`/`grep -a`) |
 | authentication (admin, GP, captive portal) | `authd.log` | `useridd.log` for group mapping, `sslmgr.log` for cert-based auth |
 | User-ID | `useridd.log`, `distributord.log`, `redis_useridd.log` | `> show user …` sections |
-| routing | `routed.log` (legacy) or `frr_export.log` + `var/log/pan/frr/` + `etc/frr/` (advanced routing) | `> show routing …` / `> show advanced-routing …`; `bfd.log` for BFD |
+| routing | `routed.log` (legacy) or `var/log/pan/frr/` (`frr_export.log`, `ns<N>_frr_export.log` per logical router) + `etc/frr/` (advanced routing) | `> show routing …` / `> show advanced-routing …`; `bfd.log` for BFD |
 | interfaces / links | `pan_ifmgr.log`, `brdagent.log` (port/ASIC faults), `l2ctrld.log` | `> show interface all`, `show system environmentals` |
-| performance / drops | `mp-monitor.log`, `dp-monitor.log`, `dp-sessperf_mon.log` | `> show running resource-monitor`, `show counter global filter delta yes`, `debug dataplane pool statistics` |
+| performance / drops | `mp-monitor.log`, `dp-monitor.log` (under `opt/dpfs/var/log/pan/` on a PA-3200, per plane on a chassis), `dp-sessperf_mon.log` | `> show running resource-monitor`, `show counter global filter delta yes`, `debug dataplane pool statistics` |
 | content / AV updates | `paninstaller_content.log`, `curlog_out_*`, `contentd.log`, `md_*.log` | `> request content upgrade info`, `opt/pancfg/mgmt/global/*info.xml` |
 | WildFire | `wildfire-monitor.log`, `wildfire-upload.log`, `wf_curl.log` | `> show wildfire status` |
 | logging / log forwarding | `logrcvr.log`, `varrcvr.log`, `logging-services.log`, `logpurger.log` — on a PA-7000, under the log processing cards `opt/var/s<slot>/lfp<n>/log/pan/` (`logrcvr.log`, `syslog-ng.log`, `lfp-monitor.log`) | `> show logging-status`, `debug log-receiver statistics`; `redis_useridd.log`/`redis_mgmt.log` can be the biggest files of the TSF (200 MB seen) |
@@ -171,8 +183,10 @@ config/
 ```
 
 Panorama-managed devices carry the pushed part in `.merged-running-config.xml`
-and the raw push in `opt/pancfg/mgmt/tmp/panorama_pushed/` (`before-` and
-`after-sp-imported.xml`). `running-config.xml` alone is then incomplete.
+and the raw push in `opt/pancfg/mgmt/tmp/panorama_pushed/` (`newsp.xml`,
+`lastsp.xml`, `mergesp.xml`, `pushsp.xml`, the `*-push-request.xml`
+requests; 12.x adds `before-` and `after-sp-imported.xml`).
+`running-config.xml` alone is then incomplete.
 
 `cfg-audit.xml,v` is an RCS file: each revision is one commit, with author
 and timestamp. `rlog`/`co -p` read it, or search `date` headers by hand. It
@@ -186,9 +200,9 @@ info` and the object counts rather than trusting a datasheet.
 
 1. `show system info` → version, uptime, HA, serial. Uptime shorter than the
    problem's age means a reboot: go to crashes first.
-2. `show system files` + `var/log/pan/crashinfo/` → any core dump or crash
-   sidecar? The crash time is in the filename
-   (`configd-20260305145809-….info`).
+2. `show system files` + `var/cores/crashinfo/` (and `opt/var*/…/cores/`
+   on a chassis) → any core dump or crash sidecar? The process and the
+   crash time are in the filename (`routed-20260109122837-11.1.10-h1.info`).
 3. `show_log_system.txt` around the reported time → which daemon complained.
 4. That daemon's log, **including rotations**, around the same minute.
 5. The relevant `show` sections (§3) for the current state.
