@@ -2,7 +2,7 @@
 
 How a tech support file goes in and an anonymized one comes out, and why
 the code is shaped the way it is. The *rules* the real-world runs imposed —
-several dozen of them — live in [CLAUDE.md](../CLAUDE.md) as invariants,
+several dozen of them — live in [.claude/rules/anonymizer-invariants.md](../.claude/rules/anonymizer-invariants.md) as invariants,
 each with the incident that produced it; this page is the map they hang on.
 
 ## Two halves that never share code

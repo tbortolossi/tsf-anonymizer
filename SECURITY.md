@@ -29,7 +29,7 @@ with a synthetic line that shows the pattern.
 
 - **An identifier class that survives anonymization** in a case the tool
   claims to handle (see the table in the README and the invariants in
-  [CLAUDE.md](CLAUDE.md)): an IP, hostname, FQDN, e-mail, username, serial
+  [.claude/rules/anonymizer-invariants.md](.claude/rules/anonymizer-invariants.md)): an IP, hostname, FQDN, e-mail, username, serial
   or named object left in clear, or replaced by a pseudonym that reveals it
   (a chained or truncated replacement, a fake that collides with an original
   without being reported as a collision).
@@ -50,7 +50,7 @@ with a synthetic line that shows the pattern.
 ## What is documented, not a vulnerability
 
 The README's *Known limitations* and the *Known limitations* section of
-CLAUDE.md list what the tool does not do, on purpose or for lack of a
+`.claude/rules/anonymizer-invariants.md` list what the tool does not do, on purpose or for lack of a
 reliable heuristic — hostnames that appear only in free text, IPv6,
 organisation names in certificate subjects, identifiers embedded in binary
 files (flagged by the compare, redactable with `--redact-binaries`). A report

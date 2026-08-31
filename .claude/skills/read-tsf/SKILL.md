@@ -341,7 +341,7 @@ the same turn, without being asked:
 | the answer to a symptom took more than one grep | add the working `symptom → file → grep` line to Step 3 |
 | a pointer here was wrong: empty grep, renamed command, output that moved | fix it or delete it — a wrong pointer costs more than a missing one |
 | a phrasing in a log differs from what Step 2b describes | correct the example line |
-| the anonymizer mangled or missed something in this TSF | that belongs in the repo's CLAUDE.md (invariant or known limitation) **and** a test, not here |
+| the anonymizer mangled or missed something in this TSF | that belongs in the repo's `.claude/rules/anonymizer-invariants.md` (invariant or known limitation) **and** a test, not here |
 
 Two rules on how to write it:
 

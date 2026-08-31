@@ -41,6 +41,9 @@ tsf_anonymizer/
   cli.py         tsf-anonymizer anonymize | compare | serve
   web/app.py     FastAPI routes; templates/ + static/ are vanilla HTML/JS
 tests/           pytest; test_core.py, test_compare.py, test_web.py
+.claude/rules/   invariants, loaded only when a matching file is read:
+                 anonymizer-invariants.md (core, compare, mock) and
+                 jobs-and-serving.md (jobs, cli, web, Docker) — see below
 .claude/skills/read-tsf/  agent skill: SKILL.md is the shell-first method to
                  analyze a TSF (symptom→file→grep map distilled from TAC-MAN's
                  tsf-agent); TSF-GUIDE.md next to it is the human-facing file
@@ -62,52 +65,42 @@ for the rest.
 
 ## How work happens here
 
-The human-facing version is CONTRIBUTING.md; this is the operational one.
+CONTRIBUTING.md is the human-facing version (setup, workflow, releasing); what
+follows is only what it does not say or what an agent gets wrong.
 
-- **Environment: uv.** `uv sync` builds `.venv` from `uv.lock`; every command
-  runs as `uv run …`; a dependency is added with `uv add` (`--group dev` or
-  `--group docs`), which updates the lockfile — commit `uv.lock` with
-  `pyproject.toml`, `uv lock --check` fails CI when they drift. Python 3.11 is
-  the floor (`.python-version`); CI runs 3.11/3.12/3.13. The Dockerfile
-  installs from the lockfile too (`uv sync --frozen --no-dev`).
-- **Version: one place.** `pyproject.toml` only; `__version__` reads it from
-  the installed metadata. Bump with `uv version --bump patch|minor|major`
-  (never edit by hand), move the *Unreleased* section of CHANGELOG.md under
-  the new version, commit `chore: release vX.Y.Z`, tag `vX.Y.Z`, push the tag:
-  `release.yml` checks the tag matches, builds, publishes the GitHub release
-  from the changelog section and pushes the image to GHCR. SemVer with the
-  `0.x` reading: minor may change what is mapped, patch only fixes.
-- **Branch → PR → squash.** Never commit on `master`. Branch names say the
-  intent: `feat/`, `fix/`, `docs/`, `chore/`, `refactor/`. Commits are
-  Conventional Commits (`fix(compare): …`), subject = what changed and why it
-  matters, body = the reasoning a diff cannot show. One topic per branch. A PR
-  is squash-merged with its title as subject, branch deleted. CI must be
-  green: `lint`, `test` ×3, `docker` (builds and runs the tool end to end),
-  `ui-smoke` (the screenshot script against the real server).
-- **Every change to a boundary touches both halves and CLAUDE.md.** The
-  invariants below are the reason the tool works on real archives; a fix in
-  `core.py` without its mirror in `compare.py` shows up as an "unexplained"
-  or "leak" line — that is the design, not a nuisance. Add the invariant
-  paragraph, the test, a line under *Unreleased* in CHANGELOG.md.
+- **uv, never pip.** A dependency is added with `uv add` (`--group dev` or
+  `--group docs`), which updates `uv.lock`; commit both, `uv lock --check`
+  fails CI when they drift. The Dockerfile installs from the lockfile too
+  (`uv sync --frozen --no-dev`). Python 3.11 is the floor; CI runs 3.11-3.13.
+- **Version in one place.** `pyproject.toml` only, bumped with
+  `uv version --bump patch|minor|major` (never by hand); the release steps
+  are in CONTRIBUTING.md → *Releasing*. SemVer with the `0.x` reading: minor
+  may change what is mapped, patch only fixes.
+- **Never commit on `master`.** Branch by intent (`feat/`, `fix/`, `docs/`,
+  `chore/`, `refactor/`), Conventional Commits with the reasoning in the
+  body, one topic per branch, squash-merge with the PR title as subject. CI
+  must be green: `lint`, `test` ×3, `docker` (builds and runs the tool end to
+  end), `ui-smoke` (the screenshot script against the real server).
+- **Every change to a boundary touches both halves and the rules file.** The
+  invariants in `.claude/rules/` are the reason the tool works on real
+  archives; a fix in `core.py` without its mirror in `compare.py` shows up as
+  an "unexplained" or "leak" line — that is the design, not a nuisance. Add
+  the invariant paragraph there, the test, a line under *Unreleased* in
+  CHANGELOG.md.
 - **Docs follow the code in the same PR.** A flag, an env variable, a default,
   a UI element that changes updates README.md / `docs/user-guide.md`; a UI
   change reruns `make screenshots` and commits the PNGs (they are the smoke
   test's output — a control that moved fails CI before it fails a reader).
-- **Clean and rebuild.** `make clean` removes caches and build output and
-  never touches `data/` or `certs/`; `make distclean` also drops `.venv`;
-  `make docker-rebuild` builds the image with `--no-cache` and recreates the
-  container (after a base-image or lockfile change). `pre-commit` (installed
-  by `make setup`) runs ruff, the lockfile check and the large-file guard
-  (1.5 MB — a TSF never fits, a screenshot never needs to) on every commit.
-- **Public repository hygiene.** LICENSE (Apache-2.0), SECURITY.md (what
-  counts as a vulnerability, private reporting), CODE_OF_CONDUCT.md, issue
-  and PR templates that ask for genericized reproducers, CODEOWNERS,
-  Dependabot (uv, actions, docker), CodeQL. An identifier that survives
-  anonymization is a *security* report, not an issue. Nothing from a real
-  TSF ever enters an issue, a commit, a test or a doc — the mock archive is
-  the reproducer to extend.
+- **Clean and rebuild.** `make clean` never touches `data/` or `certs/`;
+  `make distclean` also drops `.venv`; `make docker-rebuild` builds with
+  `--no-cache` (after a base-image or lockfile change). `pre-commit` (from
+  `make setup`) runs ruff, the lockfile check and the 1.5 MB large-file guard
+  — a TSF never fits, a screenshot never needs to.
+- **An identifier that survives anonymization is a *security* report**
+  (SECURITY.md), not an issue. Nothing from a real TSF ever enters an issue,
+  a commit, a test or a doc — the mock archive is the reproducer to extend.
 
-## Invariants — what must stay true
+## Doctrine — what every invariant follows
 
 - **Two independent halves.** `compare.py` must not call the anonymizer to
   decide whether a change is legitimate; it re-derives expectations from the
@@ -120,270 +113,15 @@ The human-facing version is CONTRIBUTING.md; this is the operational one.
   *decompressed* bytes — compressed bytes always look binary.
 - **A replacement never contains a newline**, so line counts are preserved.
   The compare mode treats a line-count change as an error, not a warning.
-- **Name replacement is one trie-regex pass, never a per-token Python
-  callback.** `trie_regex()` builds a longest-match alternation; the previous
-  `re.sub(lambda)` over every token ran 11+ minutes on a real 155 MB TSF
-  (1.2 GB of text). Boundaries: `(?<![\w.\-])name(?![\w\-])` — a name is
-  never replaced inside a word or a hyphenated compound.
-- **`extract_archive` returns the archive's original `TarInfo`s and widens
-  modes only on the disk copy.** Real TSFs ship files in mode 0000; the
-  working copy needs u+rw, the output archive must keep 0000.
-- **`delete_original` deletes only after a clean integrity report.** Errors
-  or archive mismatches keep the original with `original_kept_reason` set;
-  a human deletes it via `POST /api/jobs/{id}/delete-original`.
-- **The prescan reads customer configuration, not vendor content.**
-  `_SKIP_SUBTREES` (`<predefined>`, `<threats>`…) and `_is_prescan_candidate`
-  (global.xml, predefined.xml, updates/, regip/, report templates) exist
-  because a candidate config embeds the App-ID catalog: 41 973 names like
-  `Apple`, `bgp`, `enabled` were registered as objects and then rewritten
-  inside XML tags. The boundaries `(?<![\w.\-<\/])…(?![\w\-=])` are the
-  second line of defence: never match right after `<` / `</`, never before `=`.
-- **A config that does not parse is still prescanned.** A truncated or
-  rejected `failed_candidatecfg.xml` used to register *nothing* — identifiers
-  the compare cannot see, since the compare only knows the mapping.
-  `_salvage_prescan_xml` pull-parses the parseable prefix with the parent
-  context intact, so the vendor-catalog guardrails above still apply; a bare
-  regex sweep over `<entry name=…>` would have re-registered the catalog.
-- **A fake value is never an input to a later pass.** `Anonymizer._fakes`
-  holds every pseudonym handed out; `anon_user`, `anon_ip`, `anon_serial` and
-  `register_named_object` return a fake unchanged. Without it, `user 'Zone-A'`
-  became `OBJ-0002` then `user001`, and config and logs no longer agreed.
-- **Fakes are shaped to not collide with originals**: serials start with 9,
-  fake IPs skip any address already seen as an original. When a collision
-  still happens (the customer uses 100.64/10), `MappingIndex.collisions`
-  reports it as such — separately from leaks, which it would otherwise inflate.
-- **Serial fallback: 12 digits not starting `0000`, or `007`+12 — and never
-  right after a dot.** Zero-padded counters in `show counter` output are 12
-  digits too; 3 434 of them were "anonymized" on the first real run. logdb
-  file names are `pan.000100628656.log`: thousands of those sequence numbers
-  became fake serials, producing exactly the "changed beyond the mapping"
-  warnings the compare exists to raise (its numeric boundary already excluded
-  a leading dot; the anonymizer now uses the same one, known serials included).
-- **Objects and usernames are one trie — the longest key wins whatever its
-  category.** Two tries in sequence let a service named `amanda` (the backup
-  software) eat the first label of user `amanda.hudspeth`: `SVC-17959.hudspeth`,
-  the surname in clear on a real PA-7000 TSF. `_cs_table` merges both maps
-  (objects win a same-key collision, as `MappingIndex` does) behind
-  `_obj_re`; `_replace_users` is now only the unfrozen phrasing discovery.
-  One regex pass fewer, too — the users pass was the most expensive.
-- **An e-mail domain does not start with an all-digit label, and the match
-  is not glued to `-word`.** sysd keys read `cfg.net.s6.eth2@252.acl-debug`
-  (slot 6, eth2, VLAN 252), and every one became an e-mail — and `252.acl` a
-  domain — on a real chassis. The price is a genuine `x@163.com`, absent
-  from firewall logs.
-- **A stray NUL does not make a file binary.** `is_binary_bytes` measured on
-  ~700 binary-classified files of eight real TSFs: `slot<n>-console-output.log`
-  has one NUL in 4 KB and 200 identifiers; GpTaskStat records have 5 % NUL
-  and 16 % control bytes; `wtmp` 90 % NUL; a zip 10 % control. Text with
-  NULs is ≤ 2 % NUL, ≤ 5 % other control bytes and ≥ 8 newlines per 4 KB —
-  all three, because rewriting a length-prefixed format corrupts it. `.ebl`
-  EDL caches are plain IP lists (340 identifiers in one) and left
-  `BINARY_EXTENSIONS`. The compare classifies with the same function.
-- **The device's own serial can look like a busybox date** (`0101…` =
-  MMDDhhmmYYYY) and be refused by the fallback regex — 63 823 raw hits in
-  `PA_<serial>_dt_…` telemetry file names on a real PA-7050 whose compare
-  reported nothing. `_prescan_system_info` registers it authoritatively, and
-  the known-serial trie has no date exclusion.
-- **Every mapping entry is a replacement that actually happens.** An entry
-  registered whole but whose name embeds an identity an *earlier* pass owns
-  can never fire — the earlier pass rewrites that part first. Two real cases:
-  `<entry name="acme\jdupont">` (userinfo.xml) is decomposed at prescan into a
-  domain and a username (119 299 unexplained lines otherwise), and
-  `build_patterns` drops object keys a FQDN/e-mail matches inside ('Enloe
-  Domain controllers' after 'Enloe' → host1208). Same doctrine as the CN
-  dedup: one identity, one pseudonym, owned by the pass that wins.
-- **Compare never runs difflib on a long line character by character.**
-  `_changed_spans` switches to token level past 2 000 chars and gives up
-  (one span, unexplained) past 4 000 tokens; XML lines of 24 000 chars exist.
-- **Every identity is discovered before anything is rewritten, then the
-  tables freeze.** XML prescan (`prescan_tree`) for objects, hosts, serials,
-  contacts; then `prescan_text_identities` over every text file for usernames
-  (log phrasings), e-mails, `hostname X` phrases — and IPs and
-  fallback-shaped serials, so that *nothing* is left to discover at rewrite
-  time. Usernames then go through a trie and are replaced everywhere
-  (`UID="x"`, `(x)`), not only in the phrasing that revealed them — which is
-  also why the frozen rewrite skips the phrasing regex entirely: the trie
-  already covers every hit it could find. `anon.frozen = True` turns any
-  would-be allocation during the rewrite into an unchanged value plus a
-  logged `FileOutcome.warnings` entry — a bug to surface, never silent
-  divergence. The `_built_for` recompile is now a safety net for direct
-  (unfrozen) API use, not something a TSF run relies on.
-- **The device's own name is taken from the device, and member names are
-  rewritten too.** `tmp/cli/techsupport_<devicename>_<date>.txt` is named
-  after the device (never the model), and `show system info` states the
-  hostname, devicename, domain and serial. `_prescan_system_info` registers
-  them authoritatively — a name without a digit or hyphen fails the
-  `hostname X` heuristic, and went out in clear on three of four real TSFs,
-  in the member name and in the text. For FQDNs `_` **and `-`** are
-  separators (a hostname cannot contain an underscore, PAN-OS glues the name
-  with underscores, and a hyphenated compound built on a hostname —
-  `adm-<hostname>`, the admin UI's DNS name, 1 379 nginx lines;
-  `<hostname>-PBP-ALERTE` — names the same device), in the anonymizer and in
-  the compare alike. Objects keep the "never inside a hyphenated compound"
-  rule: `web` must not rewrite `web-server-1`. `repack_archive` renames
-  members through the same frozen tables — **file name only, never a
-  directory** (`mapped_member_name`): directories are PAN-OS layout, and a
-  username `cli` once turned `tmp/cli/` into `tmp/user83115/` for 347
-  members. The compare pairs files and members by the same mapped name, so
-  "output = input with payloads swapped" holds through the mapping, not
-  literally.
-- **A FQDN registers its parent domains** down to the registrable one, and
-  the FQDN regex allows a dot before: `https://apex/` and `*.apex` survived a
-  raw grep of the anonymized real TSF while the compare reported 0 leaks,
-  because the apex was never a mapping key. **The compare only knows the
-  mapping** — a raw grep for the customer's name is the check it cannot do.
-- **Under an identity container, any spelling is an identity.**
-  `_IDENTITY_PARENTS` (users, admin, zone, address, certificate, server…)
-  bypasses the lowercase-word vocabulary heuristic, which had swallowed a
-  real admin named `jmartin`. An entry named by its IP is owned by the IP
-  pass; one named by a FQDN by the FQDN pass — never also an `OBJ-…`.
-- **The output archive is the input archive with payloads swapped.**
-  `repack_archive` iterates the original `TarInfo` list; it must not re-walk
-  the filesystem (`tar.add(dir)`), which loses order and metadata.
-- **Serial regex matches 12 or 15 digits only.** 13 digits is an epoch in
-  milliseconds; `\d{12,15}` turned every such timestamp into a fake serial.
 - **Same original → same pseudonym**, within a run and across runs seeded
   with the same `mapping.json` (`Anonymizer.from_mapping`).
-- **Never anonymize** PAN-OS interface names, `BUILTIN_OBJECTS` (`www`
-  included — a service named `www` rewrote http://www.w3.org in every vendor
-  XML namespace), `VENDOR_DOMAINS`, netmasks, loopback/multicast/link-local,
-  or `_USER_STOPWORDS` as usernames — brute-force attempts on an exposed GP
-  portal log `failed authentication for user 'error'` (also 'request',
-  'block', 'usr'), and pseudonymizing those words rewrote every standalone
-  "error" in every log. A word that identifies nobody needs no pseudonym.
-  Object and user tries also never match right after `//` (a URL authority)
-  and share the glued-timestamp trailing boundary — the compare has both,
-  and every boundary the two sides do not share is a future
-  unexplained-or-leak report. An `<address>` field holding `10.18.2.254/24`
-  is the IP pass's territory (`_IP_LIKE_RE`, not `_IPV4_ONLY_RE`): as a
-  "FQDN" it lost its netmask. `MappingIndex.apply` mirrors the anonymizer's
-  pass order (fqdns → objects → numeric) because a key can contain another
-  category's key — an address object named `FW-Outside-10.30.135.97` is one
-  FQDN identity, and applying the IP first destroyed the key (11 000
-  "unexplained" lines per config).
-- **The web UI handles the un-anonymized archive and the mapping that
-  reverses it**, so HTTP Basic auth (`TSF_PASSWORD`) covers *every* route —
-  `/api/health` leaks the data dir and job count, `/static` is a mount, not a
-  route; no exemption, the container healthcheck authenticates like any other
-  client. `create_app(password="")` runs open, for tests and loopback use;
-  compose makes the variable mandatory (`${TSF_PASSWORD:?}`) so nothing is
-  ever exposed by omission. Compose binds `127.0.0.1` by default; keep that
-  default, `TSF_BIND_ADDR` is the deliberate opt-out.
-- **TLS fails closed.** `serve` refuses to start when `TSF_TLS_CERT` points
-  at a file that is not there, instead of falling back to plain HTTP — a
-  silent downgrade of an exposed port is the failure mode worth designing
-  against. Serving policy (TLS, credential warnings) lives in `cmd_serve`,
-  not in the Dockerfile `CMD`, so a container and a bare
-  `tsf-anonymizer serve` behave identically; the container probe is
-  `tsf-anonymizer healthcheck`, a normal client that authenticates and
-  speaks TLS when the server does. `scripts/make-tls-cert.sh` keeps the CA
-  across runs and reissues only the leaf, so an imported trust anchor
-  survives a re-issue.
-- **The container runs as the host user** (`user:` in compose) so `./data`
-  stays deletable without `sudo`.
-- **A batch chains, it does not fan out — and it chains by device, not by
-  batch.** Several TSFs dropped together are separate jobs; a shared mapping is
-  passed by `seed_from`, which the server resolves at submit time to the
-  previous job of the same `group` — the firewall the archive comes from
-  (`JobStore.latest_in_group`). Two firewalls in one drop are two groups, hence
-  two mappings that never link an identifier across devices; the same group
-  name a month later continues *that* firewall's mapping instead of starting
-  over. The head of a group is its most recently **created** job, not a
-  finished one: inside a batch the next upload arrives while the previous
-  archive is still queued, and `_seed_ancestor` walks back at run time over a
-  job that produced no mapping — a failure in the middle of a batch must cost
-  neither the shared pseudonyms of the archives after it nor their run. An
-  uploaded seed wins over the chain, and seeds the first archive of *each*
-  group. The UI guesses the device from the filename (PAN-OS names a TSF
-  `<date>_<time>_techsupport.tgz`, so what a human added around that is the
-  device) and the guess is editable: grouping is the user's call, never the
-  filename's.
-- **Archives run several at a time; a chain still runs in order.** One TSF is
-  two long single-core loops (anonymize, then compare) over a few thousand
-  files, so one archive used one core and a batch of eight took a working day.
-  `JobStore` runs `TSF_WORKERS` archives at once (cpu/4, capped at 4) and
-  `_pump` starts a pending job only when `_chain_clear` says nothing it seeds
-  from is still queued or running — the *whole* chain, since a parent that
-  failed fast may have a grandparent still running. The wait happens in the
-  queue, never inside a worker: a chain of jobs each blocking a worker
-  deadlocks a full pool. Because the wait is per chain, a batch of unrelated
-  firewalls fans out while a batch of one firewall stays a chain. The job
-  threads only *orchestrate*: CPU work on threads serialises on the GIL (a
-  4-job batch ran on one core, and one job's regex pass starved another's
-  extract into looking hung), so every heavy phase runs in worker processes.
-- **Heavy passes are spread over processes by detect-then-freeze.**
-  `compare_one` is a pure function of the sidecar, so `compare_trees` maps it
-  over a `forkserver` pool (`TSF_COMPARE_WORKERS`) and collects reports back
-  in path order. The anonymize side earns the same right in two steps
-  (`TSF_ANON_WORKERS`): detection (`_detect_in_file`, stateless, parallel)
-  reports what each file reveals, the *parent* allocates pseudonyms in path
-  order — so counters fall exactly as a sequential run's would — and the
-  rewrite then runs with frozen tables, a pure lookup that `anonymize_tree`
-  maps over a pool. Allocation during a parallel rewrite would make the
-  mapping depend on scheduling and break "same original → same pseudonym";
-  freezing is what makes the parallelism sound, and `workers=1` vs `workers=N`
-  is asserted byte-identical by test. forkserver, not fork: this runs on a
-  worker thread of a live server, and forking a threaded process inherits
-  locks held by other threads. One nuance vs the old sequential code:
-  detection scans the *original* text, so an IP or serial embedded inside a
-  replaced identifier can enter the mapping where the old code never saw it —
-  a superset, never a miss.
-- **Rewritten `.gz` members are recompressed at level 6, not gzip's default
-  9** — measured 12 MB/s at 9 against 38 MB/s at 6 for the same output size,
-  the same trade `repack_archive` already makes for the outer archive.
-- **Every run keeps its own log.** `_capture_log` tees the package logger into
-  `output/job.log` for the duration of one job (they run one at a time, so one
-  handler is filtered to that job's own thread, so concurrent jobs do not bleed
-  into each other's file), and a crash also stores its traceback in
-  `job.error_detail`. The container's stderr is not a log: it is gone the next
-  time the container is recreated, and it is the only place that said which
-  file and which pattern broke. `core` logs the files it had to skip as
-  warnings, and those surface nowhere else — the UI opens the panel by itself
-  when a job failed. A failed job also *keeps the phase it died in* so the flow
-  marks the step that broke. `Job.phase_durations` records the seconds each
-  phase took (also logged at every transition): a slow run says *where* it was
-  slow, instead of leaving that to be reconstructed from guesses.
-- **A phase that runs for minutes counts.** `extract`, `copy` and `repack` used
-  to report `0/1` then `1/1`: on a real TSF the bar sat at 0 % for minutes and
-  a slow run could not be told from a hung one. They now report ~100 updates
-  whatever the size — `extract` drives `extractall` in slices (which keeps its
-  directory-attribute semantics and reads the stream forward-only), `copy`
-  counts through `copytree(copy_function=…)`, `repack` through the member loop.
-  `Job.updated_at` records when the run last said anything, which is what lets
-  the UI say *quiet for 4m* instead of leaving "running" to mean both. The
-  jobs list polls every 2 s while anything is queued or running — a batch is
-  watched from the list, not from one job's page — and every timer is cleared
-  when the view goes away.
-- **A capped list says it is capped** (`truncated` in diff hunks, `total` in
-  the report endpoint, top-50 leaks per file with a total count).
 
-## Known limitations (documented, asserted by tests — do not "fix" silently)
-
-- Hostnames absent from every XML config, from `show system info` and from a
-  `hostname X` log phrase are not redacted (no reliable hostname heuristic
-  without heavy false positives). Test:
-  `test_hostname_absent_from_the_config_is_not_redacted`.
-- Free-text fields (rule descriptions, comments, login banners) are not
-  scanned for company names; `<contact>` and `<full-name>` are.
-- Binary files may embed identifiers; the compare report flags them as
-  warnings rather than the anonymizer rewriting them. The big real-world case
-  is `var/log/pan/sslvpn-access/sslvpn-task.log*.gz`: a *binary* serialized
-  format (GpTaskStat records, length-prefixed strings) holding SrcIp/UserName/
-  Portal per record — ~27 000 flagged identifiers per file on a real TSF.
-  Rewriting length-prefixed strings would corrupt the framing; the operator
-  decides whether such files may ship — `redact_binaries` (on by default in
-  the UI and the API, `--redact-binaries` on the CLI) replaces such payloads
-  with `REDACTED_PAYLOAD` instead. Measured on eight real TSFs: every redacted
-  family has a text twin (`saNN`→`sarNN`, `rule-hit-count.bin`→`-db.txt`,
-  `sslvpn-task`→`show_log_globalprotect.txt`) except `wtmp`/`btmp`/`lastlog`
-  — admin login history, the one deliberate loss. The core decides with its *own* scanner
-  (deliberately duplicated boundaries, not shared code) and the compare
-  verifies each redaction was warranted against the original — an
-  unwarranted one is a warning, gratuitous data loss.
-- IPv6 untouched; usernames only in the log phrasings `_user_re` knows
-  (then replaced everywhere).
-- Addresses rendered as byte arrays (`[0 0 … 255 255 10 0 0 254]` in Go
-  debug output) are not recognised.
+The case law — one invariant per incident a real TSF produced, several
+dozen of them, plus the known limitations the tests assert — lives in
+`.claude/rules/anonymizer-invariants.md` and `.claude/rules/jobs-and-serving.md`.
+They load by themselves when a matching file is read; **read them before
+touching `core.py` or `compare.py` for any other reason**, it is where the
+bugs live.
 
 ## Conventions
 
@@ -403,6 +141,7 @@ about first. The checklist of what to write lives at the end of that file
 ("Before you finish — feed this file"), where it is loaded exactly when a TSF
 is being read; keep it there rather than duplicating it here, and keep
 `docs/TSF-GUIDE.md` in step with it. What the *anonymizer* got wrong on that
-TSF belongs here instead — an invariant or a known limitation above, plus a
-test in `tests/`. Genericize everything: no customer hostname, IP, serial,
-user or company name enters the skill, the docs, or a commit.
+TSF belongs in `.claude/rules/anonymizer-invariants.md` instead — an
+invariant or a known limitation, plus a test in `tests/`. Genericize
+everything: no customer hostname, IP, serial, user or company name enters the
+skill, the rules, the docs, or a commit.

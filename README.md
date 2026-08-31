@@ -279,7 +279,7 @@ The compare mode found twelve defects in the anonymizer inherited from
 TAC-MAN before that table read this way — rewritten XML tags, the App-ID
 catalog registered as customer objects, chained pseudonyms, counters taken for
 serials, URLs left untouched, an apex domain never mapped. They are recorded
-as invariants in [CLAUDE.md](CLAUDE.md).
+as invariants in [.claude/rules/anonymizer-invariants.md](.claude/rules/anonymizer-invariants.md).
 
 ## Known limitations
 

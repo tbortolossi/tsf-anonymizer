@@ -7,6 +7,13 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+### Changed
+- Agent guidance split: `CLAUDE.md` keeps the doctrine and the working rules;
+  the per-incident invariants moved to `.claude/rules/` as path-scoped rules
+  (`anonymizer-invariants.md` for `core.py`/`compare.py`,
+  `jobs-and-serving.md` for jobs, CLI, web and Docker), loaded only when a
+  matching file is read. Same content, no invariant dropped.
+
 ## [0.3.0] - 2026-08-31
 
 ### Added

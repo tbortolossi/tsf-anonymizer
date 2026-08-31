@@ -2,8 +2,9 @@
 
 Thanks for looking under the hood. This page is the human-facing version of
 the working rules; [CLAUDE.md](CLAUDE.md) holds the same rules for the coding
-agent plus the list of invariants the real-world runs taught us — read that
-list before touching `core.py` or `compare.py`, it is where the bugs live.
+agent, and [.claude/rules/](.claude/rules/) the invariants the real-world runs
+taught us — read `anonymizer-invariants.md` before touching `core.py` or
+`compare.py`, it is where the bugs live.
 
 ## Ground rules
 
@@ -77,8 +78,9 @@ Python 3.11 is the floor (`.python-version`); CI also runs 3.12 and 3.13.
 
 A change that comes out of analyzing a real TSF also updates
 `.claude/skills/read-tsf/SKILL.md` (what the archive taught about *reading*
-TSFs) and CLAUDE.md (what it taught about *anonymizing* them), each with a
-test — see *After every TSF analysis* in CLAUDE.md.
+TSFs) and `.claude/rules/anonymizer-invariants.md` (what it taught about
+*anonymizing* them), each with a test — see *After every TSF analysis* in
+CLAUDE.md.
 
 ## Adding a fix for something the anonymizer got wrong
 
@@ -90,9 +92,9 @@ and not the other. So a fix comes in three parts:
    before the fix (assert on the output text, per rule 3);
 2. the fix, on **both** halves when it is a boundary — every boundary the two
    sides do not share is a future "unexplained" or "leak" report;
-3. a one-paragraph invariant in CLAUDE.md saying what was wrong, how it was
-   found and what must stay true — future readers should never have to
-   rediscover it.
+3. a one-paragraph invariant in `.claude/rules/anonymizer-invariants.md`
+   saying what was wrong, how it was found and what must stay true — future
+   readers should never have to rediscover it.
 
 ## Documentation
 
