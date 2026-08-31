@@ -878,3 +878,37 @@ def test_edl_cache_file_name_glued_to_its_vsys_is_rewritten(anon):
     out = anon.anonymize_text("cache vsys1_ThreatFeed-Partner.ebl and my_ThreatFeed-Partner_x")
     assert "vsys1_OBJ-0001.ebl" in out
     assert "my_ThreatFeed-Partner_x" in out   # inside another identifier: untouched
+
+
+class TestOneTrieForObjectsAndUsers:
+    def test_service_named_like_a_first_name_does_not_eat_a_username(self, anon):
+        """Service 'amanda' (the backup software) + user 'amanda.hudspeth':
+        two tries in sequence produced SVC-0001.hudspeth — the surname leaked."""
+        anon.register_named_object("amanda", "svc")
+        anon.anon_user("amanda.hudspeth")
+        anon.build_patterns()
+        out = anon.anonymize_text("user amanda.hudspeth via service amanda")
+        assert "hudspeth" not in out
+        assert "user001" in out and "SVC-0001" in out
+
+    def test_counts_still_split_users_from_objects(self, tmp_path, anon):
+        anon.register_named_object("Zone-A", "zone")
+        anon.anon_user("jdupont")
+        anon.build_patterns()
+        anon.anonymize_text("jdupont in Zone-A and Zone-A")
+        assert anon.last_counts == {"usernames": 1, "named_objects": 2}
+
+
+class TestSysdKeysAreNotEmails:
+    @pytest.mark.parametrize("line", [
+        "cfg.net.s6.eth2@252.acl-debug: { 'disable': False, }",
+        '<obj name="cfg.net.s6.eth2@252.acl-debug" type="dict">',
+        "NET: acl: eth3@252: cfg.net.s6.eth3@252.acl-debug - x",
+    ])
+    def test_interface_at_vlan_keys_are_left_alone(self, anon, line):
+        assert anon.anonymize_text(line) == line
+        assert not anon.email_map and not anon.fqdn_map
+
+    def test_real_addresses_still_match(self, anon):
+        out = anon.anonymize_text("mail ops@acme-corp.fr, alert to j.doe@mail.example.org.")
+        assert "acme-corp.fr" not in out and "j.doe" not in out

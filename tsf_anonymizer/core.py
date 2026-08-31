@@ -262,8 +262,13 @@ _SERIAL_FALLBACK_RE = re.compile(
     r"(?<![.\d])(?!(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:[01]\d|2[0-3])[0-5]\d(?:19|20)\d\d(?!\d))"
     r"(0(?!000)\d{11}|007\d{12})(?!\d)"
 )
+# The domain may not start with an all-digit label and the match may not be
+# glued to a "-word": sysd keys read `cfg.net.s6.eth2@252.acl-debug`
+# (interface@vlan.acl) and every one became an e-mail — and "252.acl" a
+# domain — on a real PA-7000 TSF. The price is a genuine `x@163.com`, which
+# does not occur in firewall logs.
 _EMAIL_RE = re.compile(
-    r"\b([a-zA-Z0-9._%+\-]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b"
+    r"\b([a-zA-Z0-9._%+\-]+)@((?!\d+\.)[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b(?![\-_]\w)"
 )
 
 
@@ -303,6 +308,7 @@ class Anonymizer:
         self._email_counter = 0
 
         self._obj_re: Optional[re.Pattern] = None
+        self._cs_table: dict[str, str] = {}   # objects + usernames behind _obj_re
         self._fqdn_re: Optional[re.Pattern] = None
         self._known_serial_re: Optional[re.Pattern] = None
         self._user_trie_re: Optional[re.Pattern] = None
@@ -531,7 +537,10 @@ class Anonymizer:
         for name in [n for n in self.named_obj_map
                      if (self._fqdn_re and self._fqdn_re.search(n)) or _EMAIL_RE.search(n)]:
             del self.named_obj_map[name]
-        if self.named_obj_map:
+        # One case-sensitive trie for objects and usernames (objects win a
+        # same-key collision, as in the compare's MappingIndex).
+        self._cs_table = {**self.user_map, **self.named_obj_map}
+        if self._cs_table:
             # A name is replaced only as a whole token: not inside a longer
             # word, not as one segment of a hyphenated compound ("web" in
             # "web-server-1"), not as a label of a dotted name on the left
@@ -550,7 +559,7 @@ class Anonymizer:
             # names (vsys1_<EDL name>.ebl) — the one underscore that is a
             # separator, not part of a name.
             self._obj_re = re.compile(
-                r"(?:(?<![\w.\-<])|(?<=vsys\d_))(?<!<\/)(?<!\/\/)" + trie_regex(self.named_obj_map)
+                r"(?:(?<![\w.\-<])|(?<=vsys\d_))(?<!<\/)(?<!\/\/)" + trie_regex(self._cs_table)
                 + r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)"
             )
         else:
@@ -558,15 +567,7 @@ class Anonymizer:
         # Usernames (from the config's <users>/<admin> entries they are named
         # objects; from log phrasings they land here) are replaced wherever they
         # appear — UID="x", (x), x@host — not only in the phrasing that found them.
-        # Same trailing boundary as the object trie, glued timestamps
-        # included: md_out.log writes "user2026-01-31…" with no separator,
-        # and the compare (which has that alternative) reported every one the
-        # rewrite missed as a leak.
-        self._user_trie_re = (
-            re.compile(r"(?<![\w.\-<@])(?<!<\/)(?<!\/\/)" + trie_regex(self.user_map)
-                       + r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)")
-            if self.user_map else None
-        )
+        self._user_trie_re = None  # folded into _obj_re (one trie, longest key wins)
         self._built_for = self._map_sizes()
         # Serials discovered in the config are replaced wherever they appear,
         # whatever their shape; the regex fallback below is stricter. Same
@@ -635,19 +636,14 @@ class Anonymizer:
         return self._ip_re.sub(replace_match, text)
 
     def _replace_users(self, text: str) -> str:
-        if self._user_trie_re is not None:
-            table = self.user_map
-
-            def sub_known(m: re.Match) -> str:
-                self._count("usernames")
-                return table[m.group(0)]
-            text = self._user_trie_re.sub(sub_known, text)
-
-        # Frozen means the text-identity prescan ran: every username this
-        # phrasing regex can find is already in the trie, which replaces it
-        # everywhere — re-scanning here would be the single most expensive
-        # regex for zero effect. Unfrozen (direct API use, no prescan), the
-        # phrasing pass is still how usernames get discovered at all.
+        """Known usernames are replaced by the combined trie in
+        _replace_named_objects. What is left here is discovery by log
+        phrasing — frozen means the text-identity prescan ran and every
+        username this regex can find is already in that trie, so re-scanning
+        would be the single most expensive regex for zero effect. Unfrozen
+        (direct API use, no prescan), it is how usernames get discovered at
+        all — and a newly discovered one is replaced everywhere at the next
+        rebuild (`_built_for`)."""
         if self.frozen:
             return text
 
@@ -679,15 +675,22 @@ class Anonymizer:
         return self._fqdn_re.sub(replace_match, text)
 
     def _replace_named_objects(self, text: str) -> str:
+        """Named objects *and* usernames, one trie: the longest key wins at
+        every position whatever its category. Two tries in sequence let a
+        service named `amanda` eat the first label of `amanda.hudspeth`
+        (`SVC-17959.hudspeth` — the surname went out in clear on a real TSF);
+        one trie is also what the compare's token pass has always done."""
         if self._obj_re is None:
             return text
-        table = self.named_obj_map
+        table, users = self._cs_table, self.user_map
 
         def replace_match(m: re.Match) -> str:
-            fake = table.get(m.group(0))
+            key = m.group(0)
+            fake = table.get(key)
             if fake is None:
-                return m.group(0)
-            self._count("named_objects")
+                return key
+            self._count("usernames" if key in users and key not in self.named_obj_map
+                        else "named_objects")
             return fake
         return self._obj_re.sub(replace_match, text)
 
@@ -789,7 +792,7 @@ SENSITIVE_XML_FIELDS = {
 
 _CERT_CN_RE = re.compile(r"(?<![A-Za-z])CN\s*=\s*([^,/\n]+)")
 _DC_COMPONENT_RE = re.compile(r"DC=([^,]+)", re.IGNORECASE)
-_EMAIL_IN_TEXT_RE = re.compile(r"\b([a-zA-Z0-9._%+\-]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b")
+_EMAIL_IN_TEXT_RE = _EMAIL_RE
 _IPV4_ONLY_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 

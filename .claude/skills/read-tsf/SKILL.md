@@ -137,21 +137,32 @@ older 5000) do not:
 
 - **Each dataplane logs under its own root**: `opt/var.dp0/log/pan/dp-monitor.log`,
   `opt/var.dp1/…`, `opt/var.dp2/…` on a PA-5200. A PA-7000 chassis nests the
-  **slot** as well: `opt/var/s<slot>/dp<n>/log/pan/` (line cards seen as
-  `s1`, `s2`, `s8`, `s9`, each with `dp0`…`dp3`), and `sysd.log` names
-  components `s<slot>.dp<n>`. Always `ls -d opt/var.dp* opt/var/s*/dp*` first, and
+  **slot** as well: `opt/var/s<slot>/dp<n>/log/pan/` — a real PA-7080 (family
+  `7000b`) had eleven populated slots (`s1`…`s11`, four DPs each, ~95 files
+  per DP), and `sysd.log`/`sdb.txt` name components `s<slot>.dp<n>`
+  (`cfg.net.s6.eth2@252.acl` = slot 6, interface eth2, VLAN 252). Each DP
+  root may carry `log/pan/memdump/hwbuf-*.raw` — 100 MB hardware-buffer dumps,
+  binary, only for a buffer post-mortem. Always `ls -d opt/var.dp* opt/var/s*/dp*` first, and
   analyse **per plane, never the aggregate** — on a PA-7000 the classic
   finding is one line card at 90 % while the others idle (traffic imbalance),
-  invisible in any average. Model quirk: PA-5220 has dp0 only, **PA-5250 has
-  dp0 + dp2 (dp1 is skipped)**, PA-5260/5280 have dp0-dp2 — an empty
-  `opt/var.dp1` on a 5250 is normal, not a broken TSF.
+  invisible in any average. Do not assume which planes exist from the model:
+  tsf-agent's note said a PA-5250 skips dp1, but a real PA-5250 on 11.2 had
+  `opt/var.dp0`, `opt/var.dp1` and `opt/var.dp2` all populated (~80 files
+  each: `dp-monitor.log` + rotations, `dp-sessperf_mon.log`, `brdagent.log`,
+  `bfd.log`, `cgroups*.log`). `ls -d opt/var.dp*` is the only reliable answer;
+  an empty plane directory is still worth a look before calling it normal.
 - **`cp-monitor.log`** (`opt/var.cp/log/pan/` or `var/log/pan/`) exists only
   on platforms with a dedicated control-plane processor (PA-5000/5200/7000).
   Same sectioned-snapshot format; it tracks the MP↔DP plumbing: `netmsg`
   stats vs **errors** (ARP/MAC sync between MP and DP — `arp_delete` errors ≫
   stats = MP/DP desync; `arp_update` errors = DP ARP table full), `ifconfig`
   TX/RX errors on the internal CP interfaces (config-push and sync failures).
-  Absent on single-chip platforms by design — not a gap.
+  Absent on single-chip platforms by design — not a gap. The CP root also
+  holds the switch-fabric logs (`bcm.log`, `bcm_cmd.log` — Broadcom ASIC
+  commands and errors) and `dataplane<n>-console-output.log`, the serial
+  console of each DP as seen from the CP; `var/log/pan/
+  controlplane-console-output.log` is the CP's own (`N0.LMC1 Configuration
+  Completed: 4096 MB` = memory init at boot).
 - `sysd.log` names components per plane (`s1.dp0`, `s1.mp`), and
   `show running resource-monitor` in the techsupport txt repeats its blocks
   per slot/DP on a chassis — check which DP a block belongs to before

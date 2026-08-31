@@ -88,6 +88,18 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   became fake serials, producing exactly the "changed beyond the mapping"
   warnings the compare exists to raise (its numeric boundary already excluded
   a leading dot; the anonymizer now uses the same one, known serials included).
+- **Objects and usernames are one trie — the longest key wins whatever its
+  category.** Two tries in sequence let a service named `amanda` (the backup
+  software) eat the first label of user `amanda.hudspeth`: `SVC-17959.hudspeth`,
+  the surname in clear on a real PA-7000 TSF. `_cs_table` merges both maps
+  (objects win a same-key collision, as `MappingIndex` does) behind
+  `_obj_re`; `_replace_users` is now only the unfrozen phrasing discovery.
+  One regex pass fewer, too — the users pass was the most expensive.
+- **An e-mail domain does not start with an all-digit label, and the match
+  is not glued to `-word`.** sysd keys read `cfg.net.s6.eth2@252.acl-debug`
+  (slot 6, eth2, VLAN 252), and every one became an e-mail — and `252.acl` a
+  domain — on a real chassis. The price is a genuine `x@163.com`, absent
+  from firewall logs.
 - **Every mapping entry is a replacement that actually happens.** An entry
   registered whole but whose name embeds an identity an *earlier* pass owns
   can never fire — the earlier pass rewrites that part first. Two real cases:
