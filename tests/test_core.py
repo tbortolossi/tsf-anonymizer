@@ -857,3 +857,14 @@ class TestDeviceNameEverywhere:
         assert rep.ok and not rep.archive["mismatches"]
         assert rep.summary["members_renamed"] == 1
         assert rep.summary["errors"] == 0
+
+
+def test_machine_account_marker_is_not_part_of_the_username(tmp_path, anon):
+    xml = '<config><devices><users><entry name="acme\\pc01std$"/></users></devices></config>'
+    p = tmp_path / "userinfo.xml"
+    p.write_text(xml)
+    prescan_config_xml(p, anon)
+    assert "pc01std" in anon.user_map and "pc01std$" not in anon.user_map
+    anon.build_patterns()
+    out = anon.anonymize_text('<entry name="acme\\pc01std$"/>')
+    assert "pc01std" not in out and out.endswith('$"/>')
