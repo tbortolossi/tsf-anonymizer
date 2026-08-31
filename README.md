@@ -25,6 +25,17 @@ independent implementation that re-derives every change from the mapping.
 Standalone: one Python package, one container, a web UI and a CLI, no
 external service, nothing leaves your machine.
 
+**Behaviour stays, identity leaves.** The anonymized copy is meant to be
+analysed *instead of* the original — by TAC, by a colleague, by an LLM.
+What happened is all there: sequences, timings, counters, which rule, zone,
+gateway or daemon, what was committed just before, under pseudonyms that stay
+consistent across every file. Who it happened to is not: hostnames, serials,
+IPs, users, e-mails, object names — and, by default, the binary files that
+embed them. On a security incident that means the *method* is readable on
+the copy (a burst of failed logins from one pseudonymised source, the guessed
+names, what happened next) while the *attribution* — the real address,
+account, device — needs the mapping sidecar, which stays with the owner.
+
 ![Job page: the flow from upload to verdict, and the integrity summary](docs/screenshots/03-job-verdict.png)
 
 - [What it does](#what-it-does)

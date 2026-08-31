@@ -8,6 +8,22 @@ Guidance for Claude Code when working in this repository.
 web UI) that anonymizes PAN-OS tech support files (`.tgz`) and verifies, by an
 independent comparison, that the anonymization lost nothing but identifiers.
 
+**Purpose — behaviour stays, identity leaves.** An anonymized TSF is meant to
+be analysed *instead of* the original: by TAC, by an external analyst, by an
+LLM. Everything that explains *what happened* must survive — sequences,
+timings, counters, which rule / zone / gateway / daemon, what was committed
+just before — with identifiers replaced *consistently*, so correlation across
+files still works. Everything that says *who* must leave: hostnames,
+serials, IPs, users, e-mails, object names, and by default the binaries that
+embed them. Security work follows the same line: the **method** of an attack
+is readable on the copy (a burst of failed logins from one pseudonymised
+source, the guessed names, the rhythm, what happened next); the
+**attribution** — the real address, account, device — is recoverable only
+with the mapping sidecar, which stays with the owner. The compare mode
+proves the first half (nothing lost but identifiers); a raw grep of the
+device's own identity is the check for the second half, which the compare
+cannot do because it only knows the mapping.
+
 It was seeded from TAC-MAN's `libs/anonymizer` and **deliberately duplicated**:
 this repo imports nothing from TAC-MAN and must stay that way. Improvements
 here are not automatically mirrored there.
