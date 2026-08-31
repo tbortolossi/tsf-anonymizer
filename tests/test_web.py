@@ -11,6 +11,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+from tsf_anonymizer.jobs import JobStore
 from tsf_anonymizer.web.app import create_app
 from conftest import CONFIG_XML, LOG_SAMPLE, build_tsf, IDENTIFIERS
 
@@ -322,6 +323,110 @@ def test_an_uploaded_seed_wins_over_the_chain(client, tmp_path):
     job = _wait(client, r.json()["id"])
     assert job["seed_source"] == "uploaded mapping"
     assert _anonymized_log(client, job["id"]) == _anonymized_log(client, first["id"])
+
+
+def test_archives_filed_under_the_same_firewall_share_a_mapping(client, tmp_path):
+    """The device name is the chain: no `seed_from_job`, only a group.
+
+    This is what makes a TSF uploaded next month continue its firewall's
+    mapping instead of restarting from a fresh one.
+    """
+    first = _run(client, build_tsf(tmp_path), group="fw-a")
+    same_device = _run(client, _variant_tsf(tmp_path / "second.tgz"), group="fw-a")
+
+    assert same_device["seed_from"] == first["id"]
+    assert same_device["seed_source"].startswith(f"job {first['id']}")
+    assert _anonymized_log(client, same_device["id"]) == _anonymized_log(client, first["id"])
+
+
+def test_two_firewalls_dropped_together_get_a_mapping_each(client, tmp_path):
+    """One batch, two devices: the batch does not link them, the group does."""
+    first = _run(client, build_tsf(tmp_path), batch="b3", group="fw-a")
+    other = _run(client, _variant_tsf(tmp_path / "other.tgz"), batch="b3", group="fw-b")
+
+    assert other["seed_from"] is None and other["seed_source"] == ""
+    assert _anonymized_log(client, other["id"]) != _anonymized_log(client, first["id"])
+
+    # …and the second archive of the first firewall still continues its own
+    # chain, over the other device's job that was queued in between.
+    third = _run(client, _variant_tsf(tmp_path / "again.tgz"), batch="b3", group="fw-a")
+    assert third["seed_from"] == first["id"]
+    assert _anonymized_log(client, third["id"]) == _anonymized_log(client, first["id"])
+
+
+def test_a_group_chains_past_the_job_that_failed(client, tmp_path):
+    """The newest job of a group is the head even when it produced nothing."""
+    store = client.app.state.store
+    good = _run(client, build_tsf(tmp_path), group="fw-c")
+    failed = store.new("anonymize")
+    failed.status, failed.group, failed.seed_from = "failed", "fw-c", good["id"]
+    store._save(failed)
+
+    after = _run(client, _variant_tsf(tmp_path / "after-failure.tgz"), group="fw-c")
+    assert after["seed_from"] == failed.id                        # newest of the group…
+    assert after["seed_source"].startswith(f"job {good['id']}")   # …resolved back to a mapping
+    assert _anonymized_log(client, after["id"]) == _anonymized_log(client, good["id"])
+
+
+def test_a_seeded_job_waits_for_its_ancestor_even_when_a_worker_is_free(tmp_path):
+    """Several archives run at once; a chained one must not start early.
+
+    The check walks the *whole* chain: a parent that failed fast is settled,
+    but the grandparent it would seed from may still be running.
+    """
+    store = JobStore(tmp_path / "data", workers=4)
+    try:
+        first = store.new("anonymize")
+        first.status = "running"
+        second = store.new("anonymize")
+        second.seed_from = first.id
+        third = store.new("anonymize")
+        third.seed_from, third.status = second.id, "queued"
+        second.status = "failed"          # settled, but its own ancestor is not
+
+        assert store._chain_clear(second) is False
+        assert store._chain_clear(third) is False
+        # An archive of another firewall is not held back by any of it.
+        assert store._chain_clear(store.new("anonymize")) is True
+
+        first.status = "done"
+        assert store._chain_clear(second) is True and store._chain_clear(third) is True
+    finally:
+        store.shutdown()
+
+
+def test_a_job_can_be_run_again_from_the_upload_on_disk(client, tmp_path):
+    """A restart in the middle of a batch must not cost the uploads."""
+    job = _run(client, build_tsf(tmp_path), delete_original="false")
+    store = client.app.state.store
+    interrupted = store.get(job["id"])
+    interrupted.status, interrupted.error = "interrupted", "the service restarted"
+    store._save(interrupted)
+
+    r = client.post(f"/api/jobs/{job['id']}/requeue")
+    assert r.status_code == 200 and r.json()["status"] == "queued"
+    again = _wait(client, job["id"])
+    assert again["status"] == "done" and again["error"] is None
+    assert again["outputs"]["tgz"] and again["compare_summary"]["errors"] == 0
+
+    # A job whose upload is gone cannot be requeued, and says so.
+    store.delete_original(store.get(job["id"]))
+    store.get(job["id"]).status = "failed"
+    assert client.post(f"/api/jobs/{job['id']}/requeue").status_code == 409
+
+
+def test_jobs_running_at_the_same_time_keep_separate_logs(client, tmp_path):
+    """Each job's log is its own thread's, not everything the process logged."""
+    a = client.post("/api/jobs/anonymize", data={"delete_original": "false"},
+                    files={"file": ("a.tgz", build_tsf(tmp_path, "a.tgz").read_bytes())}).json()
+    b = client.post("/api/jobs/anonymize", data={"delete_original": "false"},
+                    files={"file": ("b.tgz", build_tsf(tmp_path / "second", "b.tgz").read_bytes())}).json()
+    _wait(client, a["id"]), _wait(client, b["id"])
+
+    log_a = "\n".join(client.get(f"/api/jobs/{a['id']}/log").json()["lines"])
+    log_b = "\n".join(client.get(f"/api/jobs/{b['id']}/log").json()["lines"])
+    assert a["id"] in log_a and b["id"] not in log_a
+    assert b["id"] in log_b and a["id"] not in log_b
 
 
 def test_a_failed_job_keeps_a_log_with_the_traceback(client):

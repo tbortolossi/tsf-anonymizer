@@ -43,7 +43,12 @@ independently of the anonymizer:
 1. every changed line is explained by the mapping (token-level re-application,
    then span-level inspection; what remains is *unexplained* and shown for review);
 2. no mapping key survives in any text file — and binary files, which are not
-   rewritten, are scanned for identifiers too and flagged as warnings;
+   rewritten, are scanned for identifiers too and flagged as warnings. Some
+   binary formats embed thousands of them (`sslvpn-task.log*.gz` carries the
+   source IP and username of every GlobalProtect request); the opt-in
+   **redact binaries** checkbox (`--redact-binaries`) replaces such payloads
+   with a marker instead, and the verification then checks each redaction was
+   warranted against the original;
 3. line counts, timestamp counts, short-numeric-token counts (counters, PIDs,
    sizes) and the XML tag sequence are identical on both sides;
 4. binary files are byte-identical; archive members, order and metadata match.
@@ -115,7 +120,7 @@ data/jobs/<id>/input/       the TSF you uploaded, un-anonymized
                output/      <name>_anon.tgz, <name>_anon.mapping.json,
                             anonymize-report.json, integrity-report.json,
                             job.log
-               job.json     status, summaries, batch and seed of the job
+               job.json     status, summaries, firewall, batch and seed of the job
 ```
 
 A 300 MB TSF extracts to ~1.5 GB, kept twice so the diff viewer can read both
@@ -132,21 +137,60 @@ bug report is a file, not a `docker compose logs` transcript that the next
 `--force-recreate` throws away. `GET /api/jobs/<id>/log?tail=N` returns the
 last N lines as JSON.
 
+### Following a run
+
+The jobs list refreshes itself every 2 seconds while anything is queued or
+running: each running job shows its phase, a percentage and how long it has
+been going, each queued one its position in the queue. A phase that stops
+reporting is called out (*quiet for 4m*) rather than left to look identical to
+a slow one — `extract`, `copy` and `repack` count members, so the bar moves
+during the long phases too, not only while files are being rewritten.
+
+### How fast, and how many at once
+
+The service runs **several archives at once** (`TSF_WORKERS`, default `cpu/4`
+capped at 4) and spreads each job's heavy passes over worker *processes*: the
+text prescan and the rewrite (`TSF_ANON_WORKERS`) as well as the verification
+(`TSF_COMPARE_WORKERS`, which `TSF_ANON_WORKERS` defaults to — the two phases
+of one job never overlap, so they share the same budget). Processes, not
+threads: Python threads serialise CPU work on the GIL, which is how a
+"parallel" batch once ran on a single core. The mapping does not depend on the
+worker count — identities are all discovered and numbered before the parallel
+rewrite starts — so `workers=1` and `workers=8` produce byte-identical output.
+A batch of unrelated firewalls fans out; archives chained to the same firewall
+still run in order, because a job may not start before the one it seeds from
+has finished.
+
+All three are empty by default in `docker-compose.yml`, which means "decide
+from the core count"; set them to pin the load, e.g. `TSF_WORKERS=2` on a
+small host. `GET /api/health` reports what the service settled on.
+
+If a job was interrupted — a restart in the middle of a batch — **run again**
+on its page requeues it from the upload already on disk
+(`POST /api/jobs/<id>/requeue`); nothing has to be uploaded twice.
+
 ### Batches
 
 Drop several TSFs at once. They are uploaded and processed one at a time, and
 you choose what the batch shares:
 
-- **One shared mapping** — the same customer across several archives: each job
-  seeds from the previous one, so an identifier keeps the same pseudonym
-  everywhere and the mapping keeps growing. A job that fails is stepped over,
-  not cascaded.
+- **One shared mapping** — one firewall, or one customer, across several
+  archives: each job seeds from the previous one, so an identifier keeps the
+  same pseudonym everywhere and the mapping keeps growing. A job that fails is
+  stepped over, not cascaded.
+- **One mapping per firewall** — several devices in the same drop: each file
+  carries the name of its firewall (guessed from the filename, editable next to
+  the file). Archives of the same firewall share a growing mapping; different
+  firewalls stay unrelated, so nothing links an identifier from one device to
+  another.
 - **A separate mapping per TSF** — unrelated archives: nothing links an
   identifier from one to another.
 
-An uploaded `mapping.json` seeds the first archive of the batch and travels
-down the chain, which is how a TSF taken next month keeps last month's
-pseudonyms.
+The firewall name is also what makes a mapping outlive the batch: upload a TSF
+next month under the same name and it continues that device's mapping instead
+of starting over — no `mapping.json` to keep around. An uploaded `mapping.json`
+still wins, and seeds the first archive of each mapping before travelling down
+the chain.
 
 CLI (same code, no container):
 

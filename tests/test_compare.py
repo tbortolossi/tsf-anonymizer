@@ -322,3 +322,28 @@ def test_name_glued_to_a_timestamp_is_explained():
     idx = MappingIndex({"named_objects": {"GP_globalprotect_home-lab_example": "OBJ-0001"}})
     assert explain_line("Cert : GP_globalprotect_home-lab_example2026-04-05 09:38:00",
                         "Cert : OBJ-00012026-04-05 09:38:00", idx)
+
+
+def test_the_parallel_pass_reports_exactly_what_the_sequential_one_does(tsf, tmp_path):
+    """Spreading the per-file analysis over processes is a wall-clock change
+    and nothing else: same reports, same order, same summary."""
+    work = tmp_path / "work"
+    _, mapping = anonymize_tsf(tsf, tmp_path / "out.tgz", work_root=work, keep_trees=True)
+    one = compare_trees(work / "orig", work / "anon", mapping, workers=1)
+    many = compare_trees(work / "orig", work / "anon", mapping, workers=3)
+
+    assert many.to_dict() == one.to_dict()
+    assert [f.path for f in many.files] == [f.path for f in one.files]
+
+
+def test_apply_mirrors_the_pass_order_for_nested_keys():
+    """An FQDN-mapped key with an IP inside it (address object named
+    FW-Outside-10.30.135.97): the IP applied first would destroy the key."""
+    from tsf_anonymizer.compare import MappingIndex, explain_line
+    idx = MappingIndex({
+        "fqdns": {"ocos-fw-outside-10.30.135.97": "host8964.anon.internal"},
+        "ip_addresses": {"10.30.135.97": "100.64.1.78"},
+    })
+    o = "<description>OCOS-FW-Outside-10.30.135.97</description>"
+    a = "<description>host8964.anon.internal</description>"
+    assert explain_line(o, a, idx)

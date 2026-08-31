@@ -29,17 +29,19 @@ from __future__ import annotations
 
 import difflib
 import gzip
-import hashlib
+import multiprocessing
 import re
 import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Callable, Optional
 
 from .core import (
-    BINARY_EXTENSIONS, MAPPING_CATEGORIES, extract_archive, is_binary_bytes, trie_regex,
+    BINARY_EXTENSIONS, MAPPING_CATEGORIES, REDACTED_PAYLOAD, extract_archive,
+    is_binary_bytes, trie_regex,
 )
 
 ProgressFn = Callable[[str, int, int, str], None]
@@ -78,7 +80,7 @@ class MappingIndex:
     # whole token; never right after "<" / "</" (an XML tag), never before "="
     # (an attribute) or "://" (a URL scheme). "@" and "/" before are fine —
     # "@Mail.Ru", "https://vpn.acme.fr/".
-    _BEFORE = r"(?<![\w.\-<])(?<!<\/)"
+    _BEFORE = r"(?<![\w.\-<])(?<!<\/)(?<!\/\/)"
     _AFTER = r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)"
 
     def __init__(self, mapping: dict) -> None:
@@ -135,14 +137,21 @@ class MappingIndex:
         return None
 
     def apply(self, text: str) -> str:
-        """Rewrite `text` with mapping keys → fakes. Callbacks run per hit only."""
-        if self._num_re is not None:
-            text = self._num_re.sub(lambda m: self.forward.get(m.group(0), m.group(0)), text)
-        if self._cs_re is not None:
-            text = self._cs_re.sub(lambda m: self.forward.get(m.group(0), m.group(0)), text)
+        """Rewrite `text` with mapping keys → fakes. Callbacks run per hit only.
+
+        Pass order mirrors the anonymizer's (fqdns/emails, then objects/users,
+        then IPs/serials) — not because this asks the anonymizer anything, but
+        because a key can contain another category's key: an address object
+        named `FW-Outside-10.30.135.97` is one FQDN-mapped identity, and
+        applying the IP first would destroy that key and leave 11 000 real
+        lines "unexplained"."""
         if self._ci_re is not None:
             text = self._ci_re.sub(
                 lambda m: self.forward_ci.get(m.group(0).lower(), m.group(0)), text)
+        if self._cs_re is not None:
+            text = self._cs_re.sub(lambda m: self.forward.get(m.group(0), m.group(0)), text)
+        if self._num_re is not None:
+            text = self._num_re.sub(lambda m: self.forward.get(m.group(0), m.group(0)), text)
         return text
 
     def find_leaks(self, text: str) -> dict[str, int]:
@@ -188,6 +197,7 @@ class FileReport:
     numeric_anon: int = 0
     xml_structure: Optional[str] = None  # preserved | changed | unparseable
     binary_identical: Optional[bool] = None
+    redacted: bool = False
     notes: list[str] = field(default_factory=list)
 
 
@@ -349,7 +359,8 @@ def analyze_binary_pair(rel: str, orig_raw: bytes, anon_raw: bytes, kind: str,
                         index: MappingIndex) -> FileReport:
     rep = FileReport(path=rel, kind=kind, status="identical",
                      orig_size=len(orig_raw), anon_size=len(anon_raw))
-    rep.binary_identical = hashlib.sha256(orig_raw).digest() == hashlib.sha256(anon_raw).digest()
+    # Both payloads are already in memory: a plain compare beats hashing them.
+    rep.binary_identical = orig_raw == anon_raw
     if not rep.binary_identical:
         rep.status = "error"
         rep.notes.append("binary payload changed")
@@ -389,43 +400,104 @@ def _walk(tree: Path) -> dict[str, Path]:
     return {str(p.relative_to(tree)): p for p in sorted(tree.rglob("*")) if p.is_file()}
 
 
+def compare_one(rel: str, o_path: Path, a_path: Path, index: MappingIndex) -> FileReport:
+    """Analyse one pair. Pure: a mapping in, a report out — nothing shared,
+    which is what makes the pass safe to spread over processes."""
+    try:
+        o_raw, o_kind = _read_payload(o_path)
+        a_raw, a_kind = _read_payload(a_path)
+    except Exception as e:
+        return FileReport(rel, "text", "error", notes=[f"unreadable: {e}"])
+    if a_raw == REDACTED_PAYLOAD and o_kind in ("binary", "gz_binary"):
+        # A declared redaction. Verified, not trusted: the original must
+        # actually embed mapped identifiers, or the data loss was gratuitous.
+        rep = FileReport(rel, o_kind, "anonymized", orig_size=len(o_raw),
+                         anon_size=len(a_raw), redacted=True)
+        occurrences = sum(index.find_leaks(o_raw.decode("latin-1")).values())
+        if occurrences:
+            rep.notes.append(f"binary payload redacted "
+                             f"({occurrences} embedded identifier occurrence(s) in the original)")
+        else:
+            rep.status = "warning"
+            rep.notes.append("binary payload redacted, but no mapped identifier "
+                             "was found in the original")
+        return rep
+    if o_kind in ("binary", "gz_binary"):
+        return analyze_binary_pair(rel, o_raw, a_raw, o_kind, index)
+    if a_kind in ("binary", "gz_binary"):
+        return FileReport(rel, o_kind, "error", orig_size=len(o_raw), anon_size=len(a_raw),
+                          notes=["text file became binary"])
+    return analyze_text_pair(rel, o_raw, a_raw, o_kind, index,
+                             xml=rel.lower().endswith(".xml"))
+
+
+# One MappingIndex per worker process, built once by the initializer: compiling
+# the trie over ~100 000 identifiers is the expensive part, and it must not be
+# paid per file.
+_WORKER: tuple[MappingIndex, Path, Path] | None = None
+
+
+def _init_worker(mapping: dict, orig_dir: str, anon_dir: str) -> None:
+    global _WORKER
+    _WORKER = (MappingIndex(mapping), Path(orig_dir), Path(anon_dir))
+
+
+def _analyze_in_worker(rel: str) -> FileReport:
+    index, orig_dir, anon_dir = _WORKER
+    try:
+        return compare_one(rel, orig_dir / rel, anon_dir / rel, index)
+    except Exception as e:  # a worker crash must cost one file, not the report
+        return FileReport(rel, "text", "error", notes=[f"comparison failed: {e}"])
+
+
 def compare_trees(orig_dir: Path, anon_dir: Path, mapping: dict,
-                  progress: ProgressFn = _noop) -> CompareReport:
+                  progress: ProgressFn = _noop, workers: int = 1) -> CompareReport:
+    """Compare two extracted trees.
+
+    `workers` > 1 spreads the per-file analysis over processes. The pass is a
+    pure function of the sidecar, so this changes nothing but the wall clock:
+    the reports are collected back in path order, and a worker that dies on one
+    file costs that file, not the run.
+    """
     index = MappingIndex(mapping)
     report = CompareReport()
     o_files, a_files = _walk(orig_dir), _walk(anon_dir)
     all_paths = sorted(set(o_files) | set(a_files))
     total = len(all_paths)
 
-    for i, rel in enumerate(all_paths, 1):
+    done: dict[str, FileReport] = {}
+    pairs = []
+    for rel in all_paths:
         if rel not in a_files:
-            report.files.append(FileReport(rel, "missing", "error",
-                                           orig_size=o_files[rel].stat().st_size,
-                                           notes=["missing from anonymized archive"]))
-            continue
-        if rel not in o_files:
-            report.files.append(FileReport(rel, "extra", "error",
-                                           anon_size=a_files[rel].stat().st_size,
-                                           notes=["not present in the original archive"]))
-            continue
-        try:
-            o_raw, o_kind = _read_payload(o_files[rel])
-            a_raw, a_kind = _read_payload(a_files[rel])
-        except Exception as e:
-            report.files.append(FileReport(rel, "text", "error", notes=[f"unreadable: {e}"]))
-            continue
-        if o_kind in ("binary", "gz_binary"):
-            rep = analyze_binary_pair(rel, o_raw, a_raw, o_kind, index)
-        elif a_kind in ("binary", "gz_binary"):
-            rep = FileReport(rel, o_kind, "error", orig_size=len(o_raw), anon_size=len(a_raw),
-                             notes=["text file became binary"])
+            done[rel] = FileReport(rel, "missing", "error",
+                                   orig_size=o_files[rel].stat().st_size,
+                                   notes=["missing from anonymized archive"])
+        elif rel not in o_files:
+            done[rel] = FileReport(rel, "extra", "error",
+                                   anon_size=a_files[rel].stat().st_size,
+                                   notes=["not present in the original archive"])
         else:
-            rep = analyze_text_pair(rel, o_raw, a_raw, o_kind, index,
-                                    xml=rel.lower().endswith(".xml"))
-        report.files.append(rep)
-        if i % 25 == 0 or i == total:
-            progress("compare", i, total, rel)
+            pairs.append(rel)
 
+    if workers > 1 and len(pairs) > 1:
+        # forkserver, not fork: this runs on a worker thread of a live server,
+        # and forking a threaded process inherits locks held by other threads.
+        ctx = multiprocessing.get_context("forkserver")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx,
+                                 initializer=_init_worker,
+                                 initargs=(mapping, str(orig_dir), str(anon_dir))) as pool:
+            for i, (rel, rep) in enumerate(
+                    zip(pairs, pool.map(_analyze_in_worker, pairs, chunksize=4)), 1):
+                done[rel] = rep
+                if i % 25 == 0 or i == len(pairs):
+                    progress("compare", i, total, rel)
+    else:
+        for i, rel in enumerate(pairs, 1):
+            done[rel] = compare_one(rel, o_files[rel], a_files[rel], index)
+            if i % 25 == 0 or i == len(pairs):
+                progress("compare", i, total, rel)
+
+    report.files = [done[rel] for rel in all_paths]
     report.summary = summarize(report.files)
     report.summary["mapping_collisions"] = len(index.collisions)
     report.summary["mapping_collision_sample"] = index.collisions[:20]
@@ -440,6 +512,7 @@ def summarize(files: list[FileReport]) -> dict:
         "changed_lines": 0, "explained_lines": 0, "unexplained_lines": 0,
         "line_count_mismatches": 0,
         "leaks_total": 0, "files_with_leaks": 0, "binary_files_with_identifiers": 0,
+        "binary_redacted": 0,
         "timestamp_mismatches": 0, "numeric_mismatches": 0,
         "xml_checked": 0, "xml_structure_changed": 0,
     }
@@ -454,6 +527,8 @@ def summarize(files: list[FileReport]) -> dict:
                 s["binary_identical"] += 1
             if f.leak_count:
                 s["binary_files_with_identifiers"] += 1
+            if f.redacted:
+                s["binary_redacted"] += 1
         s["changed_lines"] += f.changed_lines
         s["explained_lines"] += f.explained_lines
         s["unexplained_lines"] += f.unexplained_lines
@@ -474,12 +549,22 @@ def summarize(files: list[FileReport]) -> dict:
     return s
 
 
-def compare_members(orig_tgz: Path, anon_tgz: Path) -> dict:
-    """Archive-level check: same members, same order, same metadata."""
+def compare_members(orig_tgz: Path, anon_tgz: Path,
+                    progress: ProgressFn = _noop) -> dict:
+    """Archive-level check: same members, same order, same metadata.
+
+    Reading a member list decompresses the whole archive; on a real TSF that
+    is minutes *per side*, so each side reports — a 0/1 bar sat quiet for
+    14 minutes on a real run and could not be told from a hang.
+    """
     def load(p: Path) -> list[tarfile.TarInfo]:
         with tarfile.open(p, "r:*") as tar:
             return [m for m in tar.getmembers() if m.name.lstrip("/") not in ("", ".")]
-    o, a = load(orig_tgz), load(anon_tgz)
+    progress("verify", 0, 2, f"Reading members of {orig_tgz.name}")
+    o = load(orig_tgz)
+    progress("verify", 1, 2, f"Reading members of {anon_tgz.name}")
+    a = load(anon_tgz)
+    progress("verify", 2, 2, "")
     mismatches: list[str] = []
     o_names = [m.name.lstrip("/") for m in o]
     a_names = [m.name.lstrip("/") for m in a]
@@ -512,20 +597,19 @@ def compare_members(orig_tgz: Path, anon_tgz: Path) -> dict:
 
 def compare_archives(orig_tgz: Path, anon_tgz: Path, mapping: dict,
                      work_root: Optional[Path] = None, keep_trees: bool = False,
-                     progress: ProgressFn = _noop) -> CompareReport:
+                     progress: ProgressFn = _noop, workers: int = 1) -> CompareReport:
     import shutil
 
     tmp_ctx = tempfile.TemporaryDirectory(prefix="tsf_cmp_") if work_root is None else None
     root = Path(tmp_ctx.name) if tmp_ctx else work_root
     root.mkdir(parents=True, exist_ok=True)
     try:
-        progress("extract", 0, 2, f"Extracting {orig_tgz.name}")
-        extract_archive(orig_tgz, root / "orig")
-        progress("extract", 1, 2, f"Extracting {anon_tgz.name}")
-        extract_archive(anon_tgz, root / "anon")
-        progress("extract", 2, 2, "")
-        report = compare_trees(root / "orig", root / "anon", mapping, progress)
-        report.archive = compare_members(orig_tgz, anon_tgz)
+        # Each extraction counts its own members; the archive name in the
+        # message is what says which of the two is being read.
+        extract_archive(orig_tgz, root / "orig", progress=progress)
+        extract_archive(anon_tgz, root / "anon", progress=progress)
+        report = compare_trees(root / "orig", root / "anon", mapping, progress, workers=workers)
+        report.archive = compare_members(orig_tgz, anon_tgz, progress)
         if not keep_trees and work_root is not None:
             shutil.rmtree(root / "orig", ignore_errors=True)
             shutil.rmtree(root / "anon", ignore_errors=True)

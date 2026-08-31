@@ -23,7 +23,8 @@ def cmd_anonymize(args: argparse.Namespace) -> int:
     seed = json.loads(Path(args.seed_mapping).read_text()) if args.seed_mapping else None
     report, mapping = anonymize_tsf(inp, None if args.mapping_only else out,
                                     mapping_only=args.mapping_only, seed_mapping=seed,
-                                    progress=_progress)
+                                    progress=_progress, workers=args.workers,
+                                    redact_binaries=args.redact_binaries)
     if args.mapping_only:
         print(json.dumps(mapping, indent=2, ensure_ascii=False))
         return 0
@@ -149,6 +150,12 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("input")
     a.add_argument("-o", "--output")
     a.add_argument("--seed-mapping", help="mapping.json from a previous run (same customer)")
+    a.add_argument("--workers", type=int, default=int(os.getenv("TSF_ANON_WORKERS") or 1),
+                   help="processes for the text prescan and the rewrite; the mapping "
+                        "is identical whatever the count (env TSF_ANON_WORKERS)")
+    a.add_argument("--redact-binaries", action="store_true",
+                   help="replace binary payloads that embed mapping identifiers with a "
+                        "marker (e.g. sslvpn-task logs) instead of shipping them untouched")
     a.add_argument("--mapping-only", action="store_true", help="only print what would be mapped")
     a.add_argument("--verify", action="store_true", help="run the compare mode afterwards")
     a.add_argument("--report", help="write the integrity report JSON here (with --verify)")

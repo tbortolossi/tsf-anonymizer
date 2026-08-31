@@ -5,13 +5,20 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const fmtBytes = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : b < 1073741824 ? `${(b / 1048576).toFixed(1)} MB` : `${(b / 1073741824).toFixed(2)} GB`;
   const fmtDate = (t) => new Date(t * 1000).toLocaleString("en-GB");
-  const state = { jobId: null, pollTimer: null, filter: "error,warning", q: "" };
+  const fmtDur = (s) => s < 60 ? `${Math.round(s)}s`
+    : s < 3600 ? `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, "0")}s`
+    : `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}`;
+  const state = { jobId: null, pollTimer: null, listTimer: null, filter: "error,warning", q: "" };
 
   // ---- tabs --------------------------------------------------------------
   $$("nav .tab").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
   function showTab(name) {
     $$("nav .tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
     $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${name}`));
+    // Leaving a running job used to leave its 1 s poll alive, refreshing a
+    // panel nobody can see.
+    clearTimeout(state.pollTimer);
+    clearTimeout(state.listTimer);
     $("#job-view").hidden = true;
     if (name === "jobs") loadJobs();
   }
@@ -55,6 +62,9 @@
   // Archives are uploaded one after the other: a TSF is hundreds of MB, and the
   // worker runs them sequentially anyway.
   const TSF_NAME = /\.(tgz|tar\.gz|tar)$/i;
+  // One entry per archive: the File, and the firewall it belongs to. Archives
+  // sharing a firewall name share one growing mapping; different names never
+  // link an identifier from one device to another.
   const picked = [];
   const form = $("#form-anonymize"), dz = $("#drop-zone"), fileInput = $("#tsf-files");
   const batchLog = $("#batch-log");
@@ -62,28 +72,74 @@
   // Without this a file dropped next to the zone replaces the page with it.
   ["dragover", "drop"].forEach((e) => document.addEventListener(e, (ev) => ev.preventDefault()));
 
+  // PAN-OS names a TSF <date>_<time>_techsupport.tgz — no device in it. What a
+  // human added around that generic part usually *is* the device, so strip the
+  // generic part and keep the rest as a first guess. It is only a guess: the
+  // field it fills is editable, and grouping is what the user decides.
+  function guessDevice(name) {
+    const s = name.replace(TSF_NAME, "")
+      .replace(/\d{4}[-_.]?\d{2}[-_.]?\d{2}([-_.]?\d{2}[-_.:]?\d{2}([-_.:]?\d{2})?)?/g, " ")
+      .replace(/tech[-_ ]?support|tsf|anon(ymized)?|\(\d+\)|\bcopy\b/gi, " ")
+      .replace(/[^A-Za-z0-9.-]+/g, " ").trim()
+      .replace(/\s+/g, "-").replace(/-{2,}/g, "-").replace(/^[-.]+|[-.]+$/g, "");
+    return /[A-Za-z]/.test(s) ? s.toLowerCase().slice(0, 40) : "";
+  }
+
+  function seedPolicy() {
+    return picked.length > 1 ? $("input[name=seed_policy]:checked").value : "shared";
+  }
+
+  // How many mappings a per-firewall batch will produce: one per name, plus one
+  // for each file left unnamed (an unnamed file is nobody else's device).
+  function deviceCount() {
+    const named = new Set(picked.map((p) => p.device.trim()).filter(Boolean));
+    return named.size + picked.filter((p) => !p.device.trim()).length;
+  }
+
   function addFiles(files) {
     let ignored = 0;
     for (const f of files) {
       if (!TSF_NAME.test(f.name)) { ignored++; continue; }
-      if (picked.some((p) => p.name === f.name && p.size === f.size)) continue;
-      picked.push(f);
+      if (picked.some((p) => p.f.name === f.name && p.f.size === f.size)) continue;
+      picked.push({ f, device: guessDevice(f.name) });
     }
     batchLog.textContent = ignored ? `${ignored} file(s) ignored — TSFs are .tgz archives` : "";
     renderPicked();
   }
 
+  function pickedSummary() {
+    const total = picked.reduce((s, p) => s + p.f.size, 0);
+    const n = deviceCount();
+    return `${picked.length} archives · ${fmtBytes(total)} total` +
+      (seedPolicy() === "device" ? ` · ${n} firewall${n > 1 ? "s" : ""}, ${n} mapping${n > 1 ? "s" : ""}` : "");
+  }
+
   function renderPicked() {
-    const total = picked.reduce((s, f) => s + f.size, 0);
-    $("#file-list").innerHTML = picked.map((f, i) =>
-      `<li><span class="mono">${esc(f.name)}</span> <span class="opt">${fmtBytes(f.size)}</span>
+    const perDevice = seedPolicy() === "device";
+    $("#file-list").innerHTML = picked.map((p, i) =>
+      `<li><span class="mono">${esc(p.f.name)}</span>${perDevice ? `
+       <input class="dev" type="text" data-dev="${i}" maxlength="40" placeholder="firewall"
+              value="${esc(p.device)}" title="archives carrying the same name share one mapping">` : ""}
+       <span class="opt">${fmtBytes(p.f.size)}</span>
        <button type="button" class="link" data-drop="${i}" title="remove">✕</button></li>`).join("")
-      + (picked.length > 1 ? `<li class="notes">${picked.length} archives · ${fmtBytes(total)} total</li>` : "");
+      + (picked.length > 1 ? `<li class="notes" id="picked-summary">${esc(pickedSummary())}</li>` : "");
     $$("[data-drop]").forEach((b) => b.addEventListener("click", () => {
       picked.splice(Number(b.dataset.drop), 1); renderPicked();
     }));
-    $("#batch-seed").hidden = picked.length < 2;
+    // Typing a name must not re-render the row under the caret, so the summary
+    // is the only thing refreshed here.
+    $$("[data-dev]").forEach((inp) => inp.addEventListener("input", () => {
+      picked[Number(inp.dataset.dev)].device = inp.value;
+      $("#picked-summary").textContent = pickedSummary();
+    }));
+    $("#batch-seed").hidden = picked.length === 0;
+    $("#seed-policy").hidden = picked.length < 2;
+    // One name for the whole drop only makes sense when the whole drop is one
+    // mapping; per-firewall names live in the list, and "separate" names nothing.
+    $("#device-one").hidden = picked.length > 1 && seedPolicy() !== "shared";
   }
+
+  $$("input[name=seed_policy]").forEach((r) => r.addEventListener("change", renderPicked));
 
   dz.addEventListener("dragover", () => dz.classList.add("over"));
   dz.addEventListener("dragleave", () => dz.classList.remove("over"));
@@ -117,28 +173,45 @@
     const btn = $("button[type=submit]", form);
     const seedFile = $("input[name=seed_mapping]", form).files[0] || null;
     const del = $("input[name=delete_original]", form).checked;
+    const redact = $("input[name=redact_binaries]", form).checked;
     // One shared mapping is only a question when there is more than one archive.
-    const shared = picked.length > 1 && $("input[name=seed_policy]:checked").value === "shared";
+    const policy = seedPolicy();
     const batch = picked.length > 1 ? `b${Date.now().toString(36)}` : null;
+    const oneName = $("#batch-device").value.trim();
+    // The group is what the server chains on: same group → same growing
+    // mapping. "shared" gives the whole drop one group (the firewall typed
+    // above, or a one-off id that chains inside this batch only), "device"
+    // gives each file its own firewall — unnamed files get a one-off id so
+    // they never fall into the same group by accident — and "separate" gives
+    // no group at all, which is how an archive starts from a fresh mapping.
+    const groupOf = (i) =>
+      policy === "separate" ? "" :
+      policy === "device" ? (picked[i].device.trim() || `${batch}-${i + 1}`) :
+      (oneName || batch || "");
+    const outcome = policy === "device" ? `${deviceCount()} mapping(s), one per firewall`
+      : policy === "separate" ? "a separate mapping each" : "one shared mapping";
     btn.disabled = true;
-    const ids = [];
-    let previous = null;
+    const ids = [], seeded = new Set();
     try {
       for (let i = 0; i < picked.length; i++) {
+        const group = groupOf(i);
         const fd = new FormData();
-        fd.set("file", picked[i]);
+        fd.set("file", picked[i].f);
         fd.set("delete_original", del ? "true" : "false");
+        fd.set("redact_binaries", redact ? "true" : "false");
         if (batch) fd.set("batch", batch);
-        // An uploaded seed starts the chain; the rest inherit it through the
-        // previous job, so the mapping keeps growing instead of restarting.
-        if (seedFile && (i === 0 || !shared)) fd.set("seed_mapping", seedFile);
-        if (shared && previous) fd.set("seed_from_job", previous);
+        if (group) fd.set("group", group);
+        // An uploaded seed starts every chain: the first archive of each group
+        // gets it, the rest inherit it through their group's previous job, so
+        // the mapping keeps growing instead of restarting.
+        if (seedFile && !(group && seeded.has(group))) fd.set("seed_mapping", seedFile);
+        seeded.add(group);
         batchLog.textContent = `queuing ${i + 1} of ${picked.length}…`;
-        const job = await postJob(fd, `uploading ${i + 1}/${picked.length}: ${picked[i].name}`);
-        ids.push(job.id); previous = job.id;
+        const job = await postJob(fd, `uploading ${i + 1}/${picked.length}: ${picked[i].f.name}`);
+        ids.push(job.id);
       }
     } catch (e) {
-      batchLog.textContent = `upload failed on ${picked[ids.length]?.name}: ${e.message}` +
+      batchLog.textContent = `upload failed on ${picked[ids.length]?.f.name}: ${e.message}` +
         (ids.length ? ` — ${ids.length} archive(s) already queued` : "");
       btn.disabled = false;
       return;
@@ -147,13 +220,19 @@
     picked.length = 0; renderPicked();
     form.reset();
     $(".upload-progress", form).hidden = true; $(".bar", form).style.width = "0";
-    batchLog.textContent = ids.length > 1 ? `${ids.length} archives queued${shared ? " (shared mapping)" : ""}` : "";
+    batchLog.textContent = ids.length > 1 ? `${ids.length} archives queued — ${outcome}` : "";
     if (ids.length === 1) openJob(ids[0]); else showTab("jobs");
   });
 
   // ---- jobs list ---------------------------------------------------------
+  // The list is where a batch is watched: one archive at a time, hours of it.
+  // Without a refresh of its own it stays frozen on the state it had when the
+  // tab was opened, which reads as "nothing is happening".
   async function loadJobs() {
+    clearTimeout(state.listTimer);
     const jobs = await (await fetch("/api/jobs")).json();
+    const now = Date.now() / 1000;
+    const queue = jobs.filter((j) => j.status === "queued").sort((a, b) => a.created_at - b.created_at);
     const tb = $("#jobs-table tbody");
     tb.innerHTML = jobs.map((j) => {
       const s = j.compare_summary;
@@ -162,8 +241,8 @@
         `<span class="status status-done">OK</span>`) : "—";
       return `<tr class="clickable" data-id="${j.id}" title="${esc(j.error || "")}">
         <td>${fmtDate(j.created_at)}</td><td>${j.kind}</td>
-        <td class="mono">${esc(j.input_name)}${j.anon_input_name ? " ↔ " + esc(j.anon_input_name) : ""}</td>
-        <td><span class="status status-${j.status}">${j.status}</span></td><td>${integ}</td>
+        <td class="mono">${esc(j.input_name)}${j.anon_input_name ? " ↔ " + esc(j.anon_input_name) : ""}${j.group ? `<span class="opt"> · ${esc(j.group)}</span>` : ""}</td>
+        <td><span class="status status-${j.status}">${j.status}</span>${liveDetail(j, now, queue)}</td><td>${integ}</td>
         <td><button class="secondary" data-open="${j.id}">open</button>
             <button class="danger" data-del="${j.id}">delete</button></td></tr>`;
     }).join("") || `<tr><td colspan="6" class="notes">no jobs yet</td></tr>`;
@@ -175,12 +254,56 @@
       loadJobs();
     }));
     $$("tr.clickable", tb).forEach((tr) => tr.addEventListener("click", () => openJob(tr.dataset.id)));
+    if (jobs.some((j) => j.status === "queued" || j.status === "running")
+        && $("#tab-jobs").classList.contains("active")) {
+      state.listTimer = setTimeout(loadJobs, 2000);
+    }
+  }
+
+  // Phase names are internal identifiers; what a human watches is a step with
+  // a name. The order is the order the run actually goes through them.
+  const PHASE_LABEL = {
+    extract: "extracting", copy: "working copy", prescan: "config scan",
+    "prescan-text": "identity scan", anonymize: "rewriting", repack: "repacking",
+    compare: "comparing", verify: "archive check", finished: "finishing",
+  };
+  const PHASE_SEQ = {
+    anonymize: ["extract", "copy", "prescan", "prescan-text", "anonymize", "repack", "compare", "verify"],
+    compare: ["extract", "compare", "verify"],
+  };
+  const phaseLabel = (p) => PHASE_LABEL[p] || p;
+
+  // What a row of the list can say about a job that has not finished: which
+  // phase of how many it is in (a segmented bar — a plain bar restarts at 0 %
+  // on every phase and reads as "it went backwards"), how far that phase is,
+  // how long the job has been running, whether it has gone quiet — and, for
+  // the ones still waiting, where they are in the queue.
+  function liveDetail(job, now, queue) {
+    if (job.status === "queued") {
+      const i = queue.findIndex((q) => q.id === job.id);
+      return `<span class="opt"> ${i === 0 ? "next" : `#${i + 1} in queue`}</span>`;
+    }
+    if (job.status !== "running") return "";
+    const seq = PHASE_SEQ[job.kind] || [];
+    const idx = seq.indexOf(job.phase);
+    const pct = job.progress_total ? Math.round((job.progress_done / job.progress_total) * 100) : 0;
+    const idle = job.updated_at ? Math.max(0, now - job.updated_at) : 0;
+    const segs = seq.map((p, i) => {
+      const fill = idx < 0 ? 0 : i < idx ? 100 : i === idx ? pct : 0;
+      return `<div class="seg${i === idx ? " cur" : ""}" title="${esc(phaseLabel(p))}">
+        <div class="fill" style="width:${fill}%"></div></div>`;
+    }).join("");
+    return `<div class="row-progress segs" title="${esc(phaseLabel(job.phase))} ${job.progress_done}/${job.progress_total}">${segs}</div>
+      <span class="opt">${idx >= 0 ? `${idx + 1}/${seq.length} · ` : ""}${esc(phaseLabel(job.phase))} ${pct}% · ${
+        fmtDur(Math.max(0, now - (job.started_at || now)))}${
+        idle > 30 ? ` · <b>quiet for ${fmtDur(idle)}</b>` : ""}</span>`;
   }
 
   // ---- job view ----------------------------------------------------------
   async function openJob(id) {
     state.jobId = id;
     clearTimeout(state.pollTimer);
+    clearTimeout(state.listTimer);
     $$(".tab-panel").forEach((p) => p.classList.remove("active"));
     $$("nav .tab").forEach((b) => b.classList.remove("active"));
     $("#job-view").hidden = false;
@@ -221,11 +344,13 @@
   // upload → anonymize → independent check → verdict. The check step is named
   // after the only thing that makes it worth anything: it re-derives what it
   // expects from the mapping, it never asks the anonymizer what it did.
-  const ANON_PHASES = ["extract", "prescan", "prescan-text", "anonymize", "copy", "repack"];
+  const ANON_PHASES = ["extract", "copy", "prescan", "prescan-text", "anonymize", "repack"];
   const CHECK_PHASES = ["compare", "verify"];
 
   function renderFlow(job) {
     const v = verdict(job);
+    const pd = job.phase_durations || {};
+    const stepDur = (phases) => phases.reduce((t, p) => t + (pd[p] || 0), 0);
     const steps = [{ label: "Upload", hint: job.input_name, phases: [] }];
     if (job.kind === "anonymize") {
       steps.push({ label: "Anonymize", hint: "identifiers → pseudonyms", phases: ANON_PHASES });
@@ -243,16 +368,49 @@
       let cls = i < active ? "done" : i > active ? "todo" : "active";
       if (!running && i === steps.length - 1) cls = v ? `done ${v.cls}` : "todo";
       if (job.error && i === active) cls = "failed";
-      const detail = cls === "active" && job.progress_total
-        ? `${job.progress_done}/${job.progress_total}` : esc(s.hint || "");
+      // A step earns a better detail line the moment it has one: the active
+      // step says which of its phases is running and how far, a step that ran
+      // says how long it took, a failed one names the phase that broke.
+      const took = stepDur(s.phases);
+      const pct = job.progress_total ? Math.round((job.progress_done / job.progress_total) * 100) : 0;
+      const inStep = s.phases.indexOf(job.phase);
+      let detail = esc(s.hint || "");
+      if (cls === "active" && inStep >= 0) {
+        detail = `${esc(phaseLabel(job.phase))} ${inStep + 1}/${s.phases.length} · ${pct}%`;
+      } else if (cls === "failed") {
+        detail = `failed in ${esc(phaseLabel(job.phase))}`;
+      } else if (cls.startsWith("done") && took > 0 && !s.verdict) {
+        detail = fmtDur(took);
+      }
       return `<li class="${cls}"><span class="n">${i + 1}</span>
         <span class="t">${esc(s.label)}</span><span class="d">${detail}</span></li>`;
-    }).join("") + `</ol>`;
+    }).join("") + `</ol>` + phaseTimings(job, running);
+  }
+
+  // Where the minutes went, one line, in run order — the reason a run was
+  // slow should be readable from its page, not reconstructed from the log.
+  function phaseTimings(job, running) {
+    const pd = job.phase_durations || {};
+    const seq = (PHASE_SEQ[job.kind] || []).filter((p) => pd[p] >= 0.5);
+    if (running || !seq.length) return "";
+    const items = seq.map((p) => `${esc(phaseLabel(p))} <b>${fmtDur(pd[p])}</b>`).join(" · ");
+    const total = job.started_at && job.finished_at ? ` — total ${fmtDur(job.finished_at - job.started_at)}` : "";
+    return `<p class="notes timings">${items}${total}</p>`;
   }
 
   function renderHeader(job) {
     const pct = job.progress_total ? Math.round((job.progress_done / job.progress_total) * 100) : 0;
     const running = job.status === "queued" || job.status === "running";
+    const now = Date.now() / 1000;
+    // Server clocks and browser clocks are not the same clock; a negative age
+    // would be nonsense, so it floors at 0.
+    const idle = job.updated_at ? Math.max(0, now - job.updated_at) : null;
+    // Which mapping this job continues, and why: the firewall it was filed
+    // under is the reason it seeded from that particular job.
+    const chain = [job.group ? `firewall <b>${esc(job.group)}</b>` : "",
+                   job.batch ? `batch ${esc(job.batch)}` : "",
+                   job.seed_source ? `seeded from ${esc(job.seed_source)}` : "own mapping",
+                  ].filter(Boolean).join(" · ");
     // The log has its own panel below; it is not one of the result files.
     const dl = Object.entries(job.outputs || {}).filter(([k]) => k !== "log").map(([k, v]) =>
       `<a href="/api/jobs/${job.id}/download/${k}" download>${{ tgz: "⬇ anonymized TSF", mapping: "⬇ mapping.json", integrity_report: "⬇ integrity report", anonymize_report: "⬇ anonymize report" }[k] || k}</a>`).join("");
@@ -263,9 +421,13 @@
         <button class="secondary" id="back-jobs">← jobs</button></div>
       ${renderFlow(job)}
       ${running ? `<div class="upload-progress"><div class="bar" style="width:${pct}%"></div>
-        <span class="label">${esc(job.phase)} ${job.progress_done}/${job.progress_total} ${esc(job.message)}</span></div>` : ""}
+        <span class="label">${esc(phaseLabel(job.phase))} — ${job.progress_done}/${job.progress_total} (${pct}%) ${esc(job.message)}</span></div>
+        <p class="notes">${job.started_at ? fmtDur(Math.max(0, now - job.started_at)) + " elapsed" : "waiting for the worker"}${
+          idle === null ? "" : idle > 30 ? ` · <b>no progress reported for ${fmtDur(idle)}</b>`
+            : ` · last update ${fmtDur(idle)} ago`}</p>` : ""}
       ${job.error ? `<div class="verdict bad"><span>${esc(job.error)}</span></div>` : ""}
       ${running ? "" : `<div class="actions">${job.status === "done" ? dl : ""}
+        ${job.status !== "done" ? `<button class="secondary" id="requeue">run again</button>` : ""}
         ${job.status === "done" && job.trees_kept ? `<button class="secondary" id="purge-trees">free disk (purge extracted trees)</button>` : ""}
         ${job.status === "done" && !job.trees_kept ? `<span class="notes">extracted trees purged — diff viewer unavailable</span>` : ""}
         <button class="secondary" id="show-log">${job.error ? "show the run log (traceback)" : "run log"}</button></div>`}
@@ -274,8 +436,7 @@
           <a href="/api/jobs/${job.id}/download/log" download>download the full log</a></div>
         <div class="logbox"><pre id="log-text"></pre></div>
       </div>
-      ${job.seed_source ? `<p class="notes">seeded from ${esc(job.seed_source)}${job.batch ? " · batch " + esc(job.batch) : ""}</p>`
-        : job.batch ? `<p class="notes">batch ${esc(job.batch)} · own mapping</p>` : ""}
+      ${chain ? `<p class="notes">${chain}</p>` : ""}
       ${job.status === "done" && job.original_deleted ? `<p class="notes">✓ original deleted after a clean verification</p>` : ""}
       ${job.status === "done" && !job.original_deleted && job.original_kept_reason ? `<div class="verdict warn">⚠ ${esc(job.original_kept_reason)} <button class="danger" id="delete-original">delete original now</button></div>` : ""}
       ${job.status === "done" && !job.original_deleted && !job.original_kept_reason ? `<p class="notes">original kept (not requested to delete) <button class="danger" id="delete-original">delete original</button></p>` : ""}`;
@@ -291,6 +452,12 @@
     if (delOrig) delOrig.addEventListener("click", async () => {
       if (!confirm("Delete the un-anonymized upload and the extracted trees? Outputs stay; the diff viewer will not.")) return;
       await fetch(`/api/jobs/${job.id}/delete-original`, { method: "POST" });
+      pollJob();
+    });
+    const again = $("#requeue");
+    if (again) again.addEventListener("click", async () => {
+      const r = await fetch(`/api/jobs/${job.id}/requeue`, { method: "POST" });
+      if (!r.ok) { alert((await r.json()).detail || "cannot requeue"); return; }
       pollJob();
     });
     const purge = $("#purge-trees");
@@ -340,7 +507,9 @@
         ${kpi("unexplained", s.unexplained_lines, s.unexplained_lines ? "warn" : "ok")}
         ${kpi("surviving identifiers (text)", s.leaks_total, s.leaks_total ? "err" : "ok")}
         ${kpi("binaries w/ identifiers", s.binary_files_with_identifiers, s.binary_files_with_identifiers ? "warn" : "ok")}
-        ${kpi("binary files identical", `${s.binary_identical}/${s.binary_files}`, s.binary_identical === s.binary_files ? "ok" : "err")}
+        ${s.binary_redacted ? kpi("binaries redacted", s.binary_redacted, "warn") : ""}
+        ${kpi("binary files identical", `${s.binary_identical}/${s.binary_files - (s.binary_redacted || 0)}`,
+              s.binary_identical + (s.binary_redacted || 0) === s.binary_files ? "ok" : "err")}
         ${kpi("line-count mismatches", s.line_count_mismatches, s.line_count_mismatches ? "err" : "ok")}
         ${kpi("timestamp mismatches", s.timestamp_mismatches, s.timestamp_mismatches ? "warn" : "ok")}
         ${kpi("numeric-token mismatches", s.numeric_mismatches, s.numeric_mismatches ? "warn" : "ok")}
@@ -360,7 +529,7 @@
     }
     if (a) {
       html += `<details><summary>anonymization stats</summary><div class="kpis">
-        ${kpi("files", a.files_total)}${kpi("modified", a.modified)}${kpi("binary (untouched)", a.binary)}${kpi("errors", a.errors, a.errors ? "err" : "")}
+        ${kpi("files", a.files_total)}${kpi("modified", a.modified)}${kpi("binary (untouched)", a.binary)}${a.redacted ? kpi("binaries redacted", a.redacted, "warn") : ""}${kpi("errors", a.errors, a.errors ? "err" : "")}
         ${kpi("config files scanned", a.config_files_scanned)}${kpi("duration", `${a.duration_s.toFixed(1)}s`)}
         ${Object.entries(a.mapping_sizes || {}).map(([k, v]) => kpi(k.replace("_", " ") + " mapped", v)).join("")}
         ${Object.entries(a.replacements || {}).map(([k, v]) => kpi(k.replace("_", " ") + " replaced", v)).join("")}
@@ -459,5 +628,7 @@
 
   // ---- boot --------------------------------------------------------------
   const hash = location.hash.replace("#", "");
-  if (hash.startsWith("job/")) openJob(hash.slice(4)); else loadJobs();
+  if (hash.startsWith("job/")) openJob(hash.slice(4));
+  else if (["jobs", "compare", "anonymize"].includes(hash)) showTab(hash);
+  else loadJobs();
 })();

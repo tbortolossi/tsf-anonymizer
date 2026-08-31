@@ -24,6 +24,12 @@ services:
       # put it in .env (gitignored) or export it. Basic auth over plain HTTP
       # is LAN-grade: for anything wider, terminate TLS in front.
       TSF_USERNAME: "${TSF_USERNAME:-admin}"
+      # How many archives run at once, and how many processes each one's
+      # compare pass uses. Empty means "decide from the core count"
+      # (cpu/4 archives, capped at 4, then the cores left over each).
+      TSF_WORKERS: "${TSF_WORKERS:-}"
+      TSF_COMPARE_WORKERS: "${TSF_COMPARE_WORKERS:-}"
+      TSF_ANON_WORKERS: "${TSF_ANON_WORKERS:-}"
       TSF_TLS_CERT: "${TSF_TLS_CERT:-/certs/server.crt}"
       TSF_TLS_KEY: "${TSF_TLS_KEY:-/certs/server.key}"
       TSF_PASSWORD: "${TSF_PASSWORD:?set TSF_PASSWORD (put it in .env) - the UI serves un-anonymized archives}"
