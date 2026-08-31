@@ -352,3 +352,9 @@ def test_apply_mirrors_the_pass_order_for_nested_keys():
     o = "<description>OCOS-FW-Outside-10.30.135.97</description>"
     a = "<description>host8964.anon.internal</description>"
     assert explain_line(o, a, idx)
+
+
+def test_compare_explains_the_vsys_glued_edl_name():
+    from tsf_anonymizer.compare import MappingIndex, explain_line
+    idx = MappingIndex({"named_objects": {"ThreatFeed-Partner": "OBJ-0001"}})
+    assert explain_line("vsys1_ThreatFeed-Partner.ebl", "vsys1_OBJ-0001.ebl", idx)

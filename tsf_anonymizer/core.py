@@ -546,8 +546,11 @@ class Anonymizer:
             # "(?<!//)": a name right after "//" is the start of a URL
             # authority (http://www.w3.org), never a standalone object —
             # rewriting one broke vendor XML namespaces on a real TSF.
+            # "(?<=vsys\d_)": PAN-OS glues an object name to its vsys in file
+            # names (vsys1_<EDL name>.ebl) — the one underscore that is a
+            # separator, not part of a name.
             self._obj_re = re.compile(
-                r"(?<![\w.\-<])(?<!<\/)(?<!\/\/)" + trie_regex(self.named_obj_map)
+                r"(?:(?<![\w.\-<])|(?<=vsys\d_))(?<!<\/)(?<!\/\/)" + trie_regex(self.named_obj_map)
                 + r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)"
             )
         else:
