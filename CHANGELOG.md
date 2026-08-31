@@ -39,6 +39,12 @@ change what is mapped, a patch bump only fixes).
   explains it unchanged.
 
 ### Added
+- The mock TSF now exercises routing coherence: a `<virtual-router>` and a
+  `<logical-router>` with static routes, a RIB in both formats (classic
+  `show routing route` with learned OSPF/BGP rows and ages,
+  `show advanced-routing route`), an OSPF LSDB extract, and a dated
+  `routed.log` flap of the learned route — the fixtures the
+  prefix-preservation tests assert on.
 - `scripts/check-identifiers.py`: a guard against real identifiers entering
   the tree (routable IPv4, host names and e-mails outside
   `scripts/identifier-allowlist.txt`, serial shapes, `DOMAIN\user`, a

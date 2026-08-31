@@ -115,9 +115,28 @@ The sections worth reading on every case, in order:
 | `> show system setting …` | tuning knobs that differ from defaults |
 
 `> show counter global` appears twice: once raw and once as a delta over a
-few seconds. The delta is the one that says what is happening *now*.
-`> show system resources` is **not** in the dump (checked on ten TSFs, 10.2
-to 12.1): management-plane CPU and memory history is `mp-monitor.log` (§4).
+few seconds. The delta is the one that says what is happening *now* — but it
+can span 0.2 s, so low-rate counters only surface in the raw section (which
+has its own rate column). `> show system resources` is **not** in the dump
+(checked on ten TSFs, 10.2 to 12.1): management-plane CPU and memory history
+is `mp-monitor.log` (§4).
+
+Packet-buffer cases (verified on eight real PBP-case TSFs, 10.2 → 11.2):
+`Packet buffer congestion (utilization) is X/Y` lines in
+`tmp/cli/logs/show_log_system.txt` are the per-minute, weeks-long,
+reboot-surviving buffer history — Y is the measured pool total (the software
+buffer pool on 1400/3400/5400; the on-chip `PKI POOL DFLT` on
+3200/5200/7000, where `debug dataplane pool statistics` has **no** `Packet
+Buffers` row). Buffer average high while sessions idle = leak (resets only
+at reboot); maxima spiking with recovery between = burst — the hour/day/week
+resource-monitor blocks (newest-first) and the pool table embedded in every
+`dp-monitor.log` snapshot decide between them. PBP counters on 10.2/11.x are
+`flow_dos_pbp_drop`/`_ifp_zone`/`_block_host` + `flow_dos_drop_ip_blocked`,
+not only `pkt_buf_protect_*`; no TSF in the corpus carries `show session
+packet-buffer-protection`, `ingress-backlogs` or threat logs — blocked-host
+identity is unrecoverable after the fact. Details and the L2-storm /
+fragmentation / proxy-retransmit counter signatures: SKILL.md, buffers
+section.
 
 ## 4. Daemon logs — which file for which problem
 
