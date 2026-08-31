@@ -62,10 +62,11 @@
       <label class="check"><input type="checkbox" name="delete_original" value="true" checked>
         Delete the original after a clean verification <span class="opt">(the un-anonymized upload and
         its extracted tree are removed; with problems it is kept for review)</span></label>
-      <label class="check"><input type="checkbox" name="redact_binaries" value="true">
-        Redact binary files that embed identifiers <span class="opt">(e.g. sslvpn-task logs — their
-        payload is replaced by a marker instead of shipping the identifiers; the verification checks
-        each redaction was warranted)</span></label>
+      <label class="check"><input type="checkbox" name="redact_binaries" value="true" checked>
+        Redact binary files that embed identifiers <span class="opt">(sslvpn-task logs, wtmp/btmp, sar
+        headers… — the payload is replaced by a marker instead of shipping admin IPs and the
+        hostname; text twins such as <code>sarNN</code> and <code>rule-hit-count-db.txt</code> are
+        anonymized normally, and the verification checks each redaction was warranted)</span></label>
       <button type="submit">Start</button>
       <div class="upload-progress" hidden><div class="bar"></div><span class="label"></span></div>
       <p id="batch-log" class="notes"></p>

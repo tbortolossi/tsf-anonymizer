@@ -72,10 +72,13 @@ independently of the anonymizer:
 2. no mapping key survives in any text file — and binary files, which are not
    rewritten, are scanned for identifiers too and flagged as warnings. Some
    binary formats embed thousands of them (`sslvpn-task.log*.gz` carries the
-   source IP and username of every GlobalProtect request); the opt-in
-   **redact binaries** checkbox (`--redact-binaries`) replaces such payloads
-   with a marker instead, and the verification then checks each redaction was
-   warranted against the original;
+   source IP and username of every GlobalProtect request; `wtmp`/`btmp` hold
+   admin login IPs, `sar` headers the hostname). **Redact binaries** — on by
+   default in the UI and the API, `--redact-binaries` on the CLI — replaces
+   such payloads with a marker instead; the text twins (`sarNN`,
+   `rule-hit-count-db.txt`, `show_log_globalprotect.txt`) are anonymized
+   normally, so nothing an analysis needs is lost, and the verification
+   checks each redaction was warranted against the original;
 3. line counts, timestamp counts, short-numeric-token counts (counters, PIDs,
    sizes) and the XML tag sequence are identical on both sides;
 4. binary files are byte-identical; archive members, order and metadata match.

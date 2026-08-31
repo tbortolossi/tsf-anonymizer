@@ -68,9 +68,13 @@ def test_anonymize_job_end_to_end(client, tmp_path):
     for ident in IDENTIFIERS:
         assert ident not in json.dumps(client.get(f"/api/jobs/{job['id']}/download/integrity_report").json()["summary"])
 
-    # report filtering + paging
+    # redaction is the default: the two binaries that embed identifiers ship
+    # as markers (anonymized, not warnings), and the check says so
+    assert job["compare_summary"]["binary_redacted"] == 2
     rep = client.get(f"/api/jobs/{job['id']}/report", params={"status": "warning"}).json()
-    assert rep["total"] == 2 and all(f["status"] == "warning" for f in rep["files"])
+    assert rep["total"] == 0
+    rep = client.get(f"/api/jobs/{job['id']}/report", params={"q": "rule-hit-count.bin"}).json()
+    assert rep["files"] and all(f["redacted"] for f in rep["files"])
     rep = client.get(f"/api/jobs/{job['id']}/report", params={"q": "system.log", "limit": 1}).json()
     assert rep["total"] == 2 and len(rep["files"]) == 1
 

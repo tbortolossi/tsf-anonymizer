@@ -30,6 +30,14 @@ change what is mapped, a patch bump only fixes).
   `tsf_anonymizer.__version__` reads it from the installed metadata.
 - Ruff now also enforces import order, modern syntax and bugbear checks.
 
+### Changed
+- Binary redaction is **on by default** in the web UI and the API
+  (`redact_binaries`): a binary member that embeds mapped identifiers
+  (`sslvpn-task` GpTaskStat records, `wtmp`/`btmp`/`lastlog`, `sar` headers,
+  `rule-hit-count.bin`) ships as a marker instead. Every family but the login
+  history has a text twin that is anonymized normally. The CLI keeps its
+  `--redact-binaries` flag.
+
 ## [0.2.3] - 2026-08-31
 
 ### Fixed

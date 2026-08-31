@@ -355,9 +355,12 @@ The human-facing version is CONTRIBUTING.md; this is the operational one.
   format (GpTaskStat records, length-prefixed strings) holding SrcIp/UserName/
   Portal per record — ~27 000 flagged identifiers per file on a real TSF.
   Rewriting length-prefixed strings would corrupt the framing; the operator
-  decides whether such files may ship — `redact_binaries` (a per-job opt-in:
-  UI checkbox, `--redact-binaries`) replaces such payloads with
-  `REDACTED_PAYLOAD` instead. The core decides with its *own* scanner
+  decides whether such files may ship — `redact_binaries` (on by default in
+  the UI and the API, `--redact-binaries` on the CLI) replaces such payloads
+  with `REDACTED_PAYLOAD` instead. Measured on eight real TSFs: every redacted
+  family has a text twin (`saNN`→`sarNN`, `rule-hit-count.bin`→`-db.txt`,
+  `sslvpn-task`→`show_log_globalprotect.txt`) except `wtmp`/`btmp`/`lastlog`
+  — admin login history, the one deliberate loss. The core decides with its *own* scanner
   (deliberately duplicated boundaries, not shared code) and the compare
   verifies each redaction was warranted against the original — an
   unwarranted one is a warning, gratuitous data loss.

@@ -176,7 +176,7 @@ Same code, no server:
 tsf-anonymizer anonymize in.tgz --verify --report integrity.json          # anonymize + check
 tsf-anonymizer anonymize in.tgz --verify --delete-original                # … and delete on success
 tsf-anonymizer anonymize next.tgz --seed-mapping in_anon.mapping.json     # same customer, same pseudonyms
-tsf-anonymizer anonymize in.tgz --redact-binaries --workers 4
+tsf-anonymizer anonymize in.tgz --redact-binaries --workers 4             # redaction is on by default in the UI/API, a flag on the CLI
 tsf-anonymizer compare in.tgz in_anon.tgz --mapping in_anon.mapping.json  # check alone
 tsf-anonymizer serve --host 127.0.0.1 --port 8090 --data-dir ./data       # the UI, open, loopback
 tsf-anonymizer mock-tsf -o demo.tgz --lines 5000                          # a synthetic archive
