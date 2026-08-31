@@ -561,15 +561,32 @@ class Anonymizer:
             )
         else:
             self._fqdn_re = None
-        # An object whose name *embeds* a FQDN or an e-mail can never win: the
-        # earlier pass rewrites that part first and the whole-name key is dead
-        # — a mapping entry that never fires, and thousands of lines the
-        # compare cannot explain ('Enloe Domain controllers' after 'Enloe'
-        # became host1208, on a real TSF). The identifying part is owned by
-        # the earlier pass; drop the dead key so the mapping stays honest.
-        for name in [n for n in self.named_obj_map
-                     if (self._fqdn_re and self._fqdn_re.search(n)) or _EMAIL_RE.search(n)]:
+        # An object whose name *embeds* a FQDN can never win from the object
+        # pass: the FQDN pass rewrites that part first and the whole-name key
+        # is dead — a mapping entry that never fires, and thousands of lines
+        # the compare cannot explain ('Enloe Domain controllers' after 'Enloe'
+        # became host1208, on a real TSF). Dropping the key was the first
+        # answer; it left the *rest* of the name in clear, and on a real
+        # PA-1420 the rest was the site: a certificate named after its own
+        # FQDN with the dots flattened to hyphens (`<site>-fw-xx-<domain>-org-au`)
+        # came out as `<site>-fw-xx-host014-org-au` in 15 files. The name is
+        # one identity (it sits under an identity container), so it moves to
+        # the pass that wins: as a FQDN-class key it is the longest
+        # alternative in that trie and is rewritten whole, with the pseudonym
+        # it already has. The compare mirrors this for free — its
+        # case-insensitive trie prefers the longest key too. An object
+        # embedding an e-mail stays a dead key (e-mails run even earlier) and
+        # is dropped as before.
+        for name in [n for n in self.named_obj_map if _EMAIL_RE.search(n)]:
             del self.named_obj_map[name]
+        if self._fqdn_re is not None:
+            for name in [n for n in self.named_obj_map if self._fqdn_re.search(n)]:
+                self.fqdn_map[name.lower()] = self.named_obj_map.pop(name)
+            self._fqdn_re = re.compile(
+                r"(?<![A-Za-z0-9<])(?<!<\/)" + trie_regex(self.fqdn_map)
+                + r"(?:(?![A-Za-z0-9=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)",
+                re.IGNORECASE,
+            )
         # One case-sensitive trie for objects and usernames (objects win a
         # same-key collision, as in the compare's MappingIndex).
         self._cs_table = {**self.user_map, **self.named_obj_map}

@@ -713,13 +713,45 @@ class TestRealTsfWarningFixes:
 
     def test_object_embedding_a_fqdn_is_not_a_dead_mapping_entry(self, anon):
         anon.register_fqdn("enloe")
-        anon.register_named_object("Enloe Domain controllers", "srv-prof")
+        fake = anon.register_named_object("Enloe Domain controllers", "srv-prof")
         anon.build_patterns()
         out = anon.anonymize_text("server profile 'Enloe Domain controllers'")
         assert "enloe" not in out.lower()
-        # the whole-name key can never fire (the FQDN pass wins on 'Enloe'),
-        # so it must not sit in the mapping as an entry that never happens
+        # the whole-name key can never fire from the object pass (the FQDN
+        # pass wins on 'Enloe'), so it is handed to that pass instead of
+        # sitting in the mapping as an entry that never happens
         assert "Enloe Domain controllers" not in anon.named_obj_map
+        assert anon.fqdn_map["enloe domain controllers"] == fake
+        assert out == f"server profile '{fake}'"
+
+    def test_certificate_named_after_a_flattened_fqdn_is_rewritten_whole(self, anon):
+        # Real PA-1420: a certificate entry named after its own FQDN with the
+        # dots turned into hyphens embeds the short domain name the device
+        # registers from `show system info`; only that label was rewritten and
+        # the site prefix of the device's own hostname survived in 15 files.
+        anon.register_fqdn("site-fw-01.corpdom.example")
+        anon.register_fqdn("corpdom")
+        anon.register_named_object("site-fw-xx-corpdom-example", "certificate")
+        anon.build_patterns()
+        text = ('<entry name="site-fw-xx-corpdom-example"/>\n'
+                "Starting ager for cert:site-fw-xx-corpdom-example, vsys: for 146621\n")
+        out = anon.anonymize_text(text)
+        assert "site-fw" not in out and "corpdom" not in out
+        assert out.count("\n") == text.count("\n")
+        # one identity, one pseudonym, in the pass that wins — and the
+        # mapping still explains every occurrence (compare side tested apart)
+        fake = anon.fqdn_map["site-fw-xx-corpdom-example"]
+        assert fake.startswith("OBJ-") and out.count(fake) == 2
+        assert "site-fw-xx-corpdom-example" not in anon.named_obj_map
+
+    def test_object_embedding_an_email_is_still_a_dropped_key(self, anon):
+        anon.anon_email("ops", "corpdom.example")
+        anon.register_named_object("alert ops@corpdom.example", "srv-prof")
+        anon.build_patterns()
+        out = anon.anonymize_text("profile 'alert ops@corpdom.example'")
+        assert "ops@corpdom.example" not in out
+        assert "alert ops@corpdom.example" not in anon.named_obj_map
+        assert "alert ops@corpdom.example" not in anon.fqdn_map
 
     def test_user_named_like_a_known_fqdn_is_owned_by_the_fqdn_pass(self, anon):
         anon.register_fqdn("ehs")
