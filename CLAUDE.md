@@ -150,9 +150,12 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   `<hostname>-PBP-ALERTE` — names the same device), in the anonymizer and in
   the compare alike. Objects keep the "never inside a hyphenated compound"
   rule: `web` must not rewrite `web-server-1`. `repack_archive` renames
-  members through the same frozen tables; the compare pairs files and
-  members by the *mapped* name, so "output = input with payloads swapped"
-  holds through the mapping, not literally.
+  members through the same frozen tables — **file name only, never a
+  directory** (`mapped_member_name`): directories are PAN-OS layout, and a
+  username `cli` once turned `tmp/cli/` into `tmp/user83115/` for 347
+  members. The compare pairs files and members by the same mapped name, so
+  "output = input with payloads swapped" holds through the mapping, not
+  literally.
 - **A FQDN registers its parent domains** down to the registrable one, and
   the FQDN regex allows a dot before: `https://apex/` and `*.apex` survived a
   raw grep of the anonymized real TSF while the compare reported 0 leaks,
