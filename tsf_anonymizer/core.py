@@ -885,7 +885,11 @@ def _register_entry_name(name_attr: Optional[str], parent_tag: str, anon: Anonym
         # "lan" — the user part is the identity either way.
         if domain.lower() not in _DC_STOPWORDS and domain.lower() not in BUILTIN_OBJECTS:
             anon.register_fqdn(domain)
-        anon.anon_user(user)
+        # A trailing "$" is the machine-account marker, not part of the name:
+        # kept in the key, the whole key never fired (an object pass had
+        # already rewritten the name in front of it) — one unexplained line
+        # on a real TSF, and the "$" survives in the output regardless.
+        anon.anon_user(user.rstrip("$"))
         return
     if _IP_LIKE_RE.match(name_attr):
         pass  # an address object named by its IP: the IP pass owns it

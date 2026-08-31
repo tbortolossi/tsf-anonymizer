@@ -283,9 +283,12 @@ points: `TSF-GUIDE.md` §5. Two specifics:
 - **Huge vendor files** — `updates/*/global.xml` (37 MB App-ID DB),
   `regip/reg_ips.xml`, `*.dat`, `fs_manifest.txt`, `req_stats.log` — are
   almost never the answer; don't burn context reading them.
-- **Binary files** (`rule-hit-count.bin`, `wtmp`, `var/log/sa/sa*`,
-  `sslvpn-task.log`) need `grep -a` / `strings`, or the matching text export
-  (`sar*`, `rule-hit-count-db.txt`).
+- **Binary files** (`rule-hit-count.bin`, `wtmp`/`btmp`/`lastlog`,
+  `var/log/sa/sa*`, `var/log/pan/sslvpn-access/sslvpn-task.log*.gz` — one
+  serialized `GpTaskStat` record per GP request: task id, vsys, source IP,
+  HTTP method, user, portal, gateway, auth profile, result) need `grep -a` /
+  `strings`, or the matching text export (`sar*`, `rule-hit-count-db.txt`,
+  `show_log_globalprotect.txt`).
 
 ## Anonymized TSFs
 

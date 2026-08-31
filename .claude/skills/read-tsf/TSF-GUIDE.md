@@ -117,7 +117,7 @@ writes `ikemgr-ng.log` while `ikemgr.log` stays present and idle; same for
 | reboot / crash | `crashinfo/*.info`, `sysd.log`, `messages`, `opt/panrepo/logs/reboot.log` | `show system files`; `mp-monitor.log` for memory before the crash |
 | HA failover | `ha_agent.log`, `show_log_system.txt` (filter `ha`) | `show high-availability all`; path/link monitoring config in `running-config.xml` |
 | site-to-site VPN | `ikemgr-ng.log` (or `ikemgr.log`), `keymgr*.log` | `> debug ike stat …`, `show vpn ike-sa`, `show vpn ipsec-sa`; the peer's proposals in the config |
-| GlobalProtect | `gpsvc.log`, `sslvpn-access.log`, `sslvpn_ngx_error.log`, `show_log_globalprotect.txt` | `rasmgr.log`, `authd.log`, `sslmgr.log` (certs) |
+| GlobalProtect | `gpsvc.log`, `sslvpn-access.log`, `sslvpn_ngx_error.log`, `show_log_globalprotect.txt` (can be the biggest text file of the TSF — 64 MB seen; one row per portal/gateway event, columns: time, gateway/portal, status, event, region, `domain\user`) | `rasmgr.log`, `authd.log`, `sslmgr.log` (certs); `var/log/pan/sslvpn-access/sslvpn-task.log*.gz` are **binary** per-request records (`strings`/`grep -a`) |
 | authentication (admin, GP, captive portal) | `authd.log` | `useridd.log` for group mapping, `sslmgr.log` for cert-based auth |
 | User-ID | `useridd.log`, `distributord.log`, `redis_useridd.log` | `> show user …` sections |
 | routing | `routed.log` (legacy) or `frr_export.log` + `var/log/pan/frr/` + `etc/frr/` (advanced routing) | `> show routing …` / `> show advanced-routing …`; `bfd.log` for BFD |
@@ -141,7 +141,12 @@ the daemon.
 Files you can ignore unless you have a reason not to: `global.xml` (the
 content database), `regip/reg_ips.xml`, `*.dat` (regex group binaries),
 `ui_content/*.js.gz`, `fs_manifest.txt` (a file listing of the whole box),
-`req_stats.log` (management-server request accounting).
+`req_stats.log` (management-server request accounting),
+`last-candidatecfg-audit.xml,v` (RCS history of every *candidate*, tens of
+MB). Two that look like noise but are not: `content_telemetry.log` opens
+with a full `--- show system info ---` block (a second copy of the device's
+identity and versions), and `show_log_system.txt` (79 MB seen) is the
+cross-daemon timeline — grep it, never open it.
 
 ## 5. Reading the config
 
