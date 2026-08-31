@@ -469,3 +469,25 @@ def test_no_log_for_a_job_that_never_ran(tmp_path):
     job = store.new("anonymize")
     with TestClient(create_app(tmp_path / "data", password="")) as c:
         assert c.get(f"/api/jobs/{job.id}/log").status_code == 404
+
+
+def test_concurrent_saves_of_one_job_never_race_on_the_temp_file(tmp_path):
+    # The worker persists a transition while a request (re-run, cancel) saves
+    # the same job: with one shared job.json.tmp the second replace() found
+    # nothing to rename — FileNotFoundError, seen as a flaky CI failure.
+    from concurrent.futures import ThreadPoolExecutor
+
+    from tsf_anonymizer.jobs import JobStore
+    store = JobStore(tmp_path / "data")
+    job = store.new("anonymize")
+
+    def hammer(n):
+        for _ in range(300):
+            job.progress_done = n
+            store._save(job)
+
+    with ThreadPoolExecutor(4) as pool:
+        list(pool.map(hammer, range(4)))   # re-raises the first exception, if any
+    saved = json.loads((store.job_dir(job.id) / "job.json").read_text(encoding="utf-8"))
+    assert saved["id"] == job.id
+    store.shutdown()

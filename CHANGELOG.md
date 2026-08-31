@@ -14,6 +14,15 @@ change what is mapped, a patch bump only fixes).
   `jobs-and-serving.md` for jobs, CLI, web and Docker), loaded only when a
   matching file is read. Same content, no invariant dropped.
 
+### Fixed
+- A job's `error` and `error_detail` are set before its status flips to
+  `failed`, so a client that sees the verdict always sees the traceback
+  (`test_a_failed_job_keeps_a_log_with_the_traceback` was flaky).
+- `job.json` is written through a per-writer temp file: the worker and a
+  request saving the same job shared one `job.json.tmp`, and the second
+  rename failed (`test_a_job_can_be_run_again_from_the_upload_on_disk` was
+  flaky).
+
 ## [0.3.0] - 2026-08-31
 
 ### Added

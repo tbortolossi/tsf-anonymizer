@@ -221,7 +221,11 @@ class JobStore:
     def _save(self, job: Job) -> None:
         d = self.job_dir(job.id)
         d.mkdir(parents=True, exist_ok=True)
-        tmp = d / "job.json.tmp"
+        # One temp file per writer: the worker persisting a transition and a
+        # request saving the same job (re-run, cancel) used to share
+        # job.json.tmp, and the second replace() found nothing to rename.
+        # replace() is atomic, so the last writer wins whole; no lock needed.
+        tmp = d / f"job.json.{os.getpid()}.{threading.get_ident()}.tmp"
         tmp.write_text(json.dumps(job.to_dict(), indent=2), encoding="utf-8")
         tmp.replace(d / "job.json")
 
@@ -425,8 +429,12 @@ class JobStore:
                 job.status = "done"
             except Exception as e:
                 logger.exception("job %s failed", job.id)
-                job.status, job.error = "failed", f"{type(e).__name__}: {e}"
+                # The reason before the verdict: the API serves this object
+                # straight from memory, so a reader polling every 50 ms could
+                # see status "failed" with error_detail still None.
+                job.error = f"{type(e).__name__}: {e}"
                 job.error_detail = traceback.format_exc()
+                job.status = "failed"
             finally:
                 job.finished_at = job.updated_at = time.time()
                 # A failure keeps the phase it died in, so the flow in the UI

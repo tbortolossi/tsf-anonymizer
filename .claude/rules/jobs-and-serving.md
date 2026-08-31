@@ -93,5 +93,13 @@ here with its test and a CHANGELOG line, never only fixed.
   jobs list polls every 2 s while anything is queued or running — a batch is
   watched from the list, not from one job's page — and every timer is cleared
   when the view goes away.
+- **`job.json` is written through a per-writer temp file, and the verdict is
+  set last.** Two writers of the same job (the worker persisting a transition,
+  a request re-running or cancelling it) shared one `job.json.tmp` and the
+  second `replace()` raised `FileNotFoundError`; a poller saw
+  `status == "failed"` with `error_detail` still `None` because the status
+  was assigned before the traceback. Both surfaced as flaky `test_web` runs
+  in CI, not as user reports — a race in the store shows up first as a test
+  that fails one run in ten.
 - **A capped list says it is capped** (`truncated` in diff hunks, `total` in
   the report endpoint, top-50 leaks per file with a total count).
