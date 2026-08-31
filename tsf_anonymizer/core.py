@@ -52,20 +52,35 @@ def _noop_progress(phase: str, done: int, total: int, message: str) -> None:
 # Binary file detection
 # ---------------------------------------------------------------------------
 
+# .ebl is deliberately absent: an EDL cache (vsys1_<name>.ebl) is a plain
+# text IP list — 340 identifiers in one on a real TSF.
 BINARY_EXTENSIONS = {
-    ".bin", ".dat", ".ebl", ".db", ".sqlite", ".png", ".jpg", ".jpeg",
+    ".bin", ".dat", ".db", ".sqlite", ".png", ".jpg", ".jpeg",
     ".gif", ".ico", ".pdf", ".zip", ".tar", ".rpm", ".deb", ".so", ".a",
     ".pyc", ".pyo", ".whl", ".egg", ".core", ".pcap", ".cap",
 }
 
 
 def is_binary_bytes(chunk: bytes) -> bool:
-    if b"\x00" in chunk:
-        return True
+    """Text, or a binary format whose bytes must not be rewritten?
+
+    A stray NUL used to mean binary, which left every `slot<n>-console-output.log`
+    (one NUL in 4 KB, 200 identifiers) untouched. Measured on ~700 binary-
+    classified files of eight real TSFs: text with a few NULs has ≤ 2 % of
+    them, almost no other control bytes and a newline every few hundred
+    bytes; real binary formats (`sslvpn-task.log` GpTaskStat records: 5 %
+    NUL / 16 % control, `wtmp`: 90 % NUL, a zip: 10 % control) fail at least
+    one of the three. Rewriting a length-prefixed format would corrupt it,
+    so the NUL-tolerant branch is the strict one.
+    """
     if not chunk:
         return False
-    non_text = sum(1 for b in chunk if b < 9 or (13 < b < 32) or b == 127)
-    return non_text / len(chunk) > 0.30
+    n = len(chunk)
+    nul = chunk.count(0)
+    ctrl = sum(1 for b in chunk if (b < 9 and b) or (13 < b < 32) or b == 127)
+    if nul == 0:
+        return ctrl / n > 0.30
+    return not (nul / n <= 0.02 and ctrl / n <= 0.05 and chunk.count(b"\n") >= 8)
 
 
 def is_binary_file(path: Path) -> bool:
@@ -102,9 +117,21 @@ BUILTIN_OBJECTS = {
 # *everywhere* rewrote every standalone "error" in every log — 60 571
 # unexplained lines. A word that identifies nobody needs no pseudonym.
 _USER_STOPWORDS = {
-    "error", "request", "block", "usr", "user", "username", "login", "logout",
-    "test", "guest", "unknown", "invalid", "failed", "success", "warning",
-    "info", "debug", "password",
+    # seen as brute-force guesses on real TSFs
+    "error", "request", "block", "usr", "port",
+    # log vocabulary
+    "user", "username", "login", "logout", "unknown", "invalid", "failed",
+    "success", "warning", "info", "debug", "password", "session", "service",
+    "config", "status", "level", "count", "system", "default", "none", "null",
+    # the usual login-guess list of any exposed portal
+    "test", "test1", "guest", "guest1", "demo", "temp", "tmp", "backup",
+    "printer", "scanner", "camera", "oracle", "postgres", "mysql", "ftp",
+    "ftpuser", "ssh", "vpn", "pi", "ubuntu", "support", "sales", "marketing",
+    "office", "manager", "operator", "monitor", "nagios", "zabbix", "cisco",
+    "web", "mail", "email", "sysadmin", "administrator", "superuser",
+    "anonymous", "nobody", "daemon", "bin", "sys", "adm", "git", "jenkins",
+    "docker", "tomcat", "apache", "nginx", "student", "staff", "remote",
+    "access", "security", "firewall", "router", "switch", "ubnt", "user1",
 }
 
 # PAN-OS hardware interface name pattern — keep as-is (not customer-identifying,
