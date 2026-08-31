@@ -13,14 +13,14 @@ description: >
 A TSF is a gzipped tar (100–400 MB, ~1.2 GB extracted, ~500 files): the device
 configuration, the daemon logs with their rotations, and the output of several
 hundred `show`/`debug` commands captured at generation time. The full layout
-and per-file map is in [docs/TSF-GUIDE.md](../../../docs/TSF-GUIDE.md); this
+and per-file map is in [TSF-GUIDE.md](TSF-GUIDE.md); this
 skill is the working method.
 
 ## Step 0 — extract and anchor yourself
 
 ```bash
 mkdir tsf && tar xzf <file>.tgz -C tsf && chmod -R u+rwX tsf && cd tsf
-ls tmp/cli/                          # techsupport_<model>_<date>.txt = the command dump
+ls tmp/cli/                          # techsupport_<devicename>_<YYYYMMDD>_<HHMM>.txt = the command dump
 grep -A3 "^> show clock" tmp/cli/techsupport_*.txt
 grep -A25 "^> show system info" tmp/cli/techsupport_*.txt | head -30
 ```
@@ -38,6 +38,9 @@ Anchor on three facts before anything else:
 
 Real TSFs ship files in mode `0000` — hence the `chmod`. Files may hold
 Latin-1 bytes; add `-a` to grep or decode with `errors="surrogateescape"`.
+The command dump is named after the **device** (hostname or devicename as
+the customer set it), never the model — verified on four real TSFs; the
+model is on the `model:` line of `show system info`.
 
 ## Step 1 — the reading order that works
 
@@ -128,10 +131,15 @@ timestamps instead of reading one block.
 
 **Multi-DP and CP — chassis platforms have more than one of everything.**
 A PA-400/800/1400/3200 or VM has one MP and one DP: `var/log/pan/dp-monitor.log`
-is *the* dataplane. PA-5200/PA-7000 (and older 5000) do not:
+is *the* dataplane — and so does a **PA-5400** (5410–5450, family `5400f`),
+verified on a real PA-5430: no `opt/var.dp*` at all. PA-5200/PA-7000 (and
+older 5000) do not:
 
 - **Each dataplane logs under its own root**: `opt/var.dp0/log/pan/dp-monitor.log`,
-  `opt/var.dp1/…`, `opt/var.dp2/…`. Always `ls -d opt/var.dp*` first, and
+  `opt/var.dp1/…`, `opt/var.dp2/…` on a PA-5200. A PA-7000 chassis nests the
+  **slot** as well: `opt/var/s<slot>/dp<n>/log/pan/` (line cards seen as
+  `s1`, `s2`, `s8`, `s9`, each with `dp0`…`dp3`), and `sysd.log` names
+  components `s<slot>.dp<n>`. Always `ls -d opt/var.dp* opt/var/s*/dp*` first, and
   analyse **per plane, never the aggregate** — on a PA-7000 the classic
   finding is one line card at 90 % while the others idle (traffic imbalance),
   invisible in any average. Model quirk: PA-5220 has dp0 only, **PA-5250 has
@@ -172,7 +180,7 @@ its own state is" without parsing anything. Then, per domain (P0 files first
 | **Drops / perf / buffers** | `> show counter global filter delta yes`, `> show running resource-monitor` | `dp-monitor.log`, `> show session info`, `> debug dataplane pool statistics`, `> show zone-protection` | See the buffers/PBP/counters section below. Read `drop`/`error` severities first; the **delta** section says what happens now. `flow_policy_deny`+`tcp_rst_from_self`=policy RST · `flow_fwd_mtu_exceeded`+`ip_df_drop`=MTU in tunnel path (big packets fail, ping works) · `flow_tcp_non_syn` right after failover is EXPECTED. Depleted DP pools drop silently. |
 | **Interfaces** | `> show interface all`, `pan_ifmgr.log` | `brdagent.log` (port/ASIC), `l2ctrld.log` | Physical first — it invalidates every higher-layer diagnosis on the path. CRC/FCS on one port=cable/SFP · late collisions=duplex mismatch · `dot1q_tag_err`=VLAN arriving on a port not carrying it. |
 | **Disk** | `> show system disk-space`, `df` in techsupport | `logpurger.log`, `messages` | WHICH partition decides the cause: /var/log=logrotate stuck (du≠df = deleted-fd) or forgotten debug level · /opt/panrepo=old images (safe cleanup) · /opt/panlogs=at quota by design, only purge *errors* matter · root full=the dangerous one (commits fail). Cores on disk = pivot to crash, don't delete them. |
-| **Routing** | `routed.log` or `frr_export.log`+`etc/frr/` | `> show routing route` / `> show advanced-routing …` | Advanced-routing engine = FRR; legacy = routed. Check which one owns the config. |
+| **Routing** | `routed.log` or `frr_export.log`+`var/log/pan/frr/`+`etc/frr/` | `> show routing route` / `> show advanced-routing …`, `bfd.log` | Advanced-routing engine = FRR (`advanced-routing: on` in `show system info`; its daemons log under `var/log/pan/frr/`); legacy = routed. Check which one owns the config. |
 | **Commit / config** | `configd.log`, `commit_stats.log`, `show_log_config.txt` | `cfg-audit.xml,v` | `commit_stats.log` has per-phase durations (Jobid/Start/Fin blocks). |
 | **Content / AV updates** | `paninstaller_content.log`, `contentd.log` | `opt/pancfg/mgmt/global/*info.xml` | Correlate the update **time** with the symptom start before blaming it. |
 | **Panorama** | `devsrv.log`, `ms.log` | `opt/pancfg/mgmt/tmp/panorama_pushed/` | `running-config.xml` alone is incomplete on managed devices — use `.merged-running-config.xml`. |
@@ -181,7 +189,7 @@ its own state is" without parsing anything. Then, per domain (P0 files first
 
 Secondary domains not tabled here — WildFire, URL filtering, QoS, SD-WAN,
 DLP, App-ID, DNS/DHCP, licences — follow the same method; their per-problem
-log map is in [docs/TSF-GUIDE.md](../../../docs/TSF-GUIDE.md) §4.
+log map is in [TSF-GUIDE.md](TSF-GUIDE.md) §4.
 
 ## Buffers, packet-buffer protection and counters — the silent-drop toolkit
 
@@ -254,7 +262,7 @@ grep the same name in the raw section for its description column.
 `opt/pancfg/mgmt/saved-configs/running-config.xml` is the config in force
 (`.merged-running-config.xml` if Panorama-managed; the raw push sits in
 `panorama_pushed/before|after-sp-imported.xml`). Structure and grep entry
-points: `docs/TSF-GUIDE.md` §5. Two specifics:
+points: `TSF-GUIDE.md` §5. Two specifics:
 
 - `opt/pancfg/mgmt/devices/*/platform.xml` = the limits PAN-OS **enforces**
   (max sessions, tunnels, rules) — compare with `show session info` rather
@@ -288,8 +296,12 @@ private IP, `192.0.2.x`/`198.51.100.x`/`203.0.113.x` public, `hostNNN[.anon.inte
 a hostname, `userNNN` a user, `ZONE-0012`/`RULE-0045`/`GW-0002`… named objects
 (prefix = category), same-length digits starting `9` a serial. Correlation
 still works — "peer `203.0.113.7` on `GW-0002`" is the same peer everywhere.
-The `*.mapping.json` sidecar reverses it and must never travel with the
-anonymized archive.
+Member names are rewritten with the same mapping — the command dump reads
+`tmp/cli/techsupport_host001_<date>.txt`. A binary member whose payload is
+the one-line `[tsf-anonymizer] binary payload redacted…` was deliberately
+emptied because it embedded identifiers (`sslvpn-task.log*.gz` typically);
+its original is gone from the archive, not hidden. The `*.mapping.json`
+sidecar reverses it all and must never travel with the anonymized archive.
 
 ## Before you finish — feed this file
 
@@ -310,8 +322,10 @@ Two rules on how to write it:
 - **Genericize.** No customer hostname, IP, serial, user, company or case
   number ever enters this file. The pattern is what is worth keeping, the
   value never is. Use the same placeholders the rest of the file uses.
-- **Keep `docs/TSF-GUIDE.md` in step.** It is the human-facing version of the
-  same knowledge; when one gains a section the other needs a look.
+- **Keep `TSF-GUIDE.md` (next to this file) in step.** It is the human-facing
+  version of the same knowledge — the file map and per-problem log tables live
+  there, the method lives here; when one gains a section the other needs a
+  look. `docs/TSF-GUIDE.md` is a symlink to it.
 
 Say in one line what you added, so the person reading your analysis knows the
 skill moved.

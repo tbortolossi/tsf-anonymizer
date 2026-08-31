@@ -116,10 +116,15 @@ class MappingIndex:
                         if num_keys else None)
         self._cs_re = (re.compile(self._BEFORE + trie_regex(cs_keys) + self._AFTER)
                        if cs_keys else None)
-        # FQDN keys may follow a dot (*.apex, sub.apex) — mirrors the core.
-        self._ci_re = (re.compile(r"(?<![\w\-<])(?<!<\/)" + trie_regex(self.forward_ci) + self._AFTER,
-                                  re.IGNORECASE)
-                       if self.forward_ci else None)
+        # FQDN keys may follow a dot (*.apex, sub.apex), and "_" is a
+        # separator for them (a hostname cannot contain one; PAN-OS glues the
+        # device name with underscores in techsupport_<name>_<date>.txt) —
+        # mirrors the core's boundaries exactly.
+        self._ci_re = (re.compile(
+            r"(?<![A-Za-z0-9\-<])(?<!<\/)" + trie_regex(self.forward_ci)
+            + r"(?:(?![A-Za-z0-9\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)",
+            re.IGNORECASE)
+            if self.forward_ci else None)
         # Minimum key length that the leak scan will bother with. Below 3 the
         # false-positive rate makes the report useless.
         self.min_leak_len = 3
@@ -442,10 +447,11 @@ def _init_worker(mapping: dict, orig_dir: str, anon_dir: str) -> None:
     _WORKER = (MappingIndex(mapping), Path(orig_dir), Path(anon_dir))
 
 
-def _analyze_in_worker(rel: str) -> FileReport:
+def _analyze_in_worker(pair: tuple[str, str]) -> FileReport:
+    rel, a_rel = pair
     index, orig_dir, anon_dir = _WORKER
     try:
-        return compare_one(rel, orig_dir / rel, anon_dir / rel, index)
+        return compare_one(rel, orig_dir / rel, anon_dir / a_rel, index)
     except Exception as e:  # a worker crash must cost one file, not the report
         return FileReport(rel, "text", "error", notes=[f"comparison failed: {e}"])
 
@@ -462,13 +468,23 @@ def compare_trees(orig_dir: Path, anon_dir: Path, mapping: dict,
     index = MappingIndex(mapping)
     report = CompareReport()
     o_files, a_files = _walk(orig_dir), _walk(anon_dir)
-    all_paths = sorted(set(o_files) | set(a_files))
+    # Member names carry identifiers too (techsupport_<devicename>_<date>.txt),
+    # so the anonymized side is looked up under the *mapped* name first — the
+    # same mapping, applied to the path — and under the original name second
+    # (an anonymize job's working trees keep the original names on disk).
+    a_rel_of: dict[str, Optional[str]] = {}
+    for rel in o_files:
+        mapped = index.apply(rel)
+        a_rel_of[rel] = mapped if mapped in a_files else (rel if rel in a_files else None)
+    matched = {v for v in a_rel_of.values() if v}
+    renamed = sum(1 for rel, a_rel in a_rel_of.items() if a_rel and a_rel != rel)
+    all_paths = sorted(set(o_files) | {a for a in a_files if a not in matched})
     total = len(all_paths)
 
     done: dict[str, FileReport] = {}
-    pairs = []
+    pairs: list[tuple[str, str]] = []
     for rel in all_paths:
-        if rel not in a_files:
+        if rel in o_files and a_rel_of[rel] is None:
             done[rel] = FileReport(rel, "missing", "error",
                                    orig_size=o_files[rel].stat().st_size,
                                    notes=["missing from anonymized archive"])
@@ -477,7 +493,7 @@ def compare_trees(orig_dir: Path, anon_dir: Path, mapping: dict,
                                    anon_size=a_files[rel].stat().st_size,
                                    notes=["not present in the original archive"])
         else:
-            pairs.append(rel)
+            pairs.append((rel, a_rel_of[rel]))
 
     if workers > 1 and len(pairs) > 1:
         # forkserver, not fork: this runs on a worker thread of a live server,
@@ -486,19 +502,20 @@ def compare_trees(orig_dir: Path, anon_dir: Path, mapping: dict,
         with ProcessPoolExecutor(max_workers=workers, mp_context=ctx,
                                  initializer=_init_worker,
                                  initargs=(mapping, str(orig_dir), str(anon_dir))) as pool:
-            for i, (rel, rep) in enumerate(
+            for i, ((rel, _), rep) in enumerate(
                     zip(pairs, pool.map(_analyze_in_worker, pairs, chunksize=4)), 1):
                 done[rel] = rep
                 if i % 25 == 0 or i == len(pairs):
                     progress("compare", i, total, rel)
     else:
-        for i, rel in enumerate(pairs, 1):
-            done[rel] = compare_one(rel, o_files[rel], a_files[rel], index)
+        for i, (rel, a_rel) in enumerate(pairs, 1):
+            done[rel] = compare_one(rel, o_files[rel], a_files[a_rel], index)
             if i % 25 == 0 or i == len(pairs):
                 progress("compare", i, total, rel)
 
     report.files = [done[rel] for rel in all_paths]
     report.summary = summarize(report.files)
+    report.summary["members_renamed"] = renamed
     report.summary["mapping_collisions"] = len(index.collisions)
     report.summary["mapping_collision_sample"] = index.collisions[:20]
     return report
@@ -550,8 +567,12 @@ def summarize(files: list[FileReport]) -> dict:
 
 
 def compare_members(orig_tgz: Path, anon_tgz: Path,
-                    progress: ProgressFn = _noop) -> dict:
+                    progress: ProgressFn = _noop, mapping: Optional[dict] = None) -> dict:
     """Archive-level check: same members, same order, same metadata.
+
+    Member names are compared through the mapping: a name that carries an
+    identifier (techsupport_<devicename>_<date>.txt) is expected to come out
+    renamed, exactly as the text would.
 
     Reading a member list decompresses the whole archive; on a real TSF that
     is minutes *per side*, so each side reports — a 0/1 bar sat quiet for
@@ -565,8 +586,9 @@ def compare_members(orig_tgz: Path, anon_tgz: Path,
     progress("verify", 1, 2, f"Reading members of {anon_tgz.name}")
     a = load(anon_tgz)
     progress("verify", 2, 2, "")
+    index = MappingIndex(mapping or {})
     mismatches: list[str] = []
-    o_names = [m.name.lstrip("/") for m in o]
+    o_names = [index.apply(m.name.lstrip("/")) for m in o]
     a_names = [m.name.lstrip("/") for m in a]
     if o_names != a_names:
         missing = sorted(set(o_names) - set(a_names))
@@ -579,8 +601,8 @@ def compare_members(orig_tgz: Path, anon_tgz: Path,
             mismatches.append("member order differs")
     a_by = {m.name.lstrip("/"): m for m in a}
     meta_diff = 0
-    for m in o:
-        n = a_by.get(m.name.lstrip("/"))
+    for m, expected in zip(o, o_names):
+        n = a_by.get(expected)
         if n is None:
             continue
         if (m.type, m.mode, m.uid, m.gid, m.mtime) != (n.type, n.mode, n.uid, n.gid, n.mtime):
@@ -589,6 +611,7 @@ def compare_members(orig_tgz: Path, anon_tgz: Path,
         mismatches.append(f"{meta_diff} member(s) with different metadata (mode/uid/gid/mtime)")
     return {
         "members_orig": len(o), "members_anon": len(a),
+        "members_renamed": sum(1 for m, e in zip(o, o_names) if m.name.lstrip("/") != e),
         "order_preserved": o_names == a_names,
         "metadata_differences": meta_diff,
         "mismatches": mismatches,
@@ -609,7 +632,7 @@ def compare_archives(orig_tgz: Path, anon_tgz: Path, mapping: dict,
         extract_archive(orig_tgz, root / "orig", progress=progress)
         extract_archive(anon_tgz, root / "anon", progress=progress)
         report = compare_trees(root / "orig", root / "anon", mapping, progress, workers=workers)
-        report.archive = compare_members(orig_tgz, anon_tgz, progress)
+        report.archive = compare_members(orig_tgz, anon_tgz, progress, mapping)
         if not keep_trees and work_root is not None:
             shutil.rmtree(root / "orig", ignore_errors=True)
             shutil.rmtree(root / "anon", ignore_errors=True)
@@ -632,6 +655,8 @@ def file_diff(orig_dir: Path, anon_dir: Path, rel: str, mapping: dict,
     returned instead of hunks (for a "browse the whole file" view).
     """
     o_path, a_path = orig_dir / rel, anon_dir / rel
+    if not a_path.is_file():
+        a_path = anon_dir / MappingIndex(mapping).apply(rel)  # a renamed member
     if not o_path.is_file() or not a_path.is_file():
         return {"path": rel, "error": "file missing on one side"}
     o_raw, o_kind = _read_payload(o_path)

@@ -25,10 +25,11 @@ tsf_anonymizer/
   cli.py         tsf-anonymizer anonymize | compare | serve
   web/app.py     FastAPI routes; templates/ + static/ are vanilla HTML/JS
 tests/           pytest; test_core.py, test_compare.py, test_web.py
-docs/TSF-GUIDE.md  what a TSF contains and how to read one (user-facing)
-.claude/skills/read-tsf/  agent skill: shell-first method to analyze a TSF
-                 (symptom→file→grep map distilled from TAC-MAN's tsf-agent);
-                 keep it consistent with TSF-GUIDE.md when either changes
+.claude/skills/read-tsf/  agent skill: SKILL.md is the shell-first method to
+                 analyze a TSF (symptom→file→grep map distilled from TAC-MAN's
+                 tsf-agent); TSF-GUIDE.md next to it is the human-facing file
+                 map — keep the two consistent when either changes.
+                 docs/TSF-GUIDE.md is a symlink to the latter.
 Dockerfile, docker-compose.yml
 ```
 
@@ -111,6 +112,18 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
   logged `FileOutcome.warnings` entry — a bug to surface, never silent
   divergence. The `_built_for` recompile is now a safety net for direct
   (unfrozen) API use, not something a TSF run relies on.
+- **The device's own name is taken from the device, and member names are
+  rewritten too.** `tmp/cli/techsupport_<devicename>_<date>.txt` is named
+  after the device (never the model), and `show system info` states the
+  hostname, devicename, domain and serial. `_prescan_system_info` registers
+  them authoritatively — a name without a digit or hyphen fails the
+  `hostname X` heuristic, and went out in clear on three of four real TSFs,
+  in the member name and in the text. For FQDNs `_` is a separator (a
+  hostname cannot contain one, and PAN-OS glues the name with underscores),
+  in the anonymizer and in the compare alike. `repack_archive` renames
+  members through the same frozen tables; the compare pairs files and
+  members by the *mapped* name, so "output = input with payloads swapped"
+  holds through the mapping, not literally.
 - **A FQDN registers its parent domains** down to the registrable one, and
   the FQDN regex allows a dot before: `https://apex/` and `*.apex` survived a
   raw grep of the anonymized real TSF while the compare reported 0 leaks,
@@ -243,8 +256,9 @@ Commands: `pip install -e ".[dev]"` · `pytest` · `ruff check .` ·
 
 ## Known limitations (documented, asserted by tests — do not "fix" silently)
 
-- Hostnames absent from every XML config are not redacted (no reliable
-  hostname heuristic without heavy false positives). Test:
+- Hostnames absent from every XML config, from `show system info` and from a
+  `hostname X` log phrase are not redacted (no reliable hostname heuristic
+  without heavy false positives). Test:
   `test_hostname_absent_from_the_config_is_not_redacted`.
 - Free-text fields (rule descriptions, comments, login banners) are not
   scanned for company names; `<contact>` and `<full-name>` are.

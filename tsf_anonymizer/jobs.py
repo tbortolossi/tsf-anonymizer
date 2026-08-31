@@ -476,7 +476,7 @@ class JobStore:
 
         cmp = compare_trees(d / "work" / "orig", d / "work" / "anon", mapping, progress,
                             workers=self.compare_workers)
-        cmp.archive = compare_members(input_tgz, output_tgz, progress)
+        cmp.archive = compare_members(input_tgz, output_tgz, progress, mapping)
         progress("finished", 1, 1, "")  # closes out the last phase's duration
         (d / "output" / "integrity-report.json").write_text(
             json.dumps(cmp.to_dict(), indent=2), encoding="utf-8")
