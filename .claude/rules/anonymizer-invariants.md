@@ -86,8 +86,18 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   can never fire — the earlier pass rewrites that part first. Two real cases:
   `<entry name="acme\jdupont">` (userinfo.xml) is decomposed at prescan into a
   domain and a username (119 299 unexplained lines otherwise), and
-  `build_patterns` drops object keys a FQDN/e-mail matches inside ('Enloe
-  Domain controllers' after 'Enloe' → host1208). Same doctrine as the CN
+  `build_patterns` **hands an object key a FQDN matches inside to the FQDN
+  pass** (`fqdn_map[name.lower()]`, pseudonym unchanged), where it is the
+  longest alternative and is rewritten whole. Dropping such keys was the
+  first answer ('Enloe Domain controllers' after 'Enloe' → host1208), and it
+  left the rest of the name in clear: on a real PA-1420 a certificate named
+  after its own FQDN with the dots flattened to hyphens
+  (`<site>-fw-xx-<domain>-org-au`) came out as `<site>-fw-xx-host014-org-au`
+  in 15 files — the site prefix of the device's own hostname, which no
+  mapping key covered, so the compare reported nothing. The compare needs no
+  mirror: its case-insensitive trie prefers the longest key too, and the
+  sidecar carries the object under `fqdns`. Objects embedding an e-mail
+  are still dropped (e-mails run even earlier). Same doctrine as the CN
   dedup: one identity, one pseudonym, owned by the pass that wins.
 - **Compare never runs difflib on a long line character by character.**
   `_changed_spans` switches to token level past 2 000 chars and gives up

@@ -7,6 +7,14 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+### Fixed
+- An object whose name embeds a FQDN is now rewritten whole by the FQDN pass
+  instead of having its key dropped: a certificate named after its flattened
+  FQDN (`<site>-fw-xx-<domain>-org-au`) kept the site prefix of the device's
+  hostname in clear in 15 files of a real PA-1420 TSF. The key moves to the
+  `fqdns` table of the sidecar with the pseudonym it already had; the compare
+  explains it unchanged.
+
 ### Added
 - `scripts/check-identifiers.py`: a guard against real identifiers entering
   the tree (routable IPv4, host names and e-mails outside

@@ -370,3 +370,20 @@ def test_compare_explains_a_hostname_inside_a_hyphenated_compound():
     from tsf_anonymizer.compare import MappingIndex, explain_line
     idx = MappingIndex({"fqdns": {"fw-dc1": "host001"}})
     assert explain_line('host: "adm-fw-dc1"', 'host: "adm-host001"', idx)
+
+
+def test_compare_prefers_the_whole_object_key_over_the_fqdn_it_embeds():
+    # The anonymizer hands an object whose name embeds a FQDN to the FQDN
+    # pass (a certificate named after its flattened FQDN, real PA-1420). The
+    # sidecar then carries both keys under "fqdns"; the compare must rewrite
+    # the longer one whole and see no leak in the result.
+    from tsf_anonymizer.compare import MappingIndex, explain_line
+    idx = MappingIndex({"fqdns": {"corpdom": "host014",
+                                  "site-fw-xx-corpdom-example": "CERT-0003"}})
+    orig = 'cert:site-fw-xx-corpdom-example, vsys: for 1; domain corpdom'
+    anon = 'cert:CERT-0003, vsys: for 1; domain host014'
+    assert idx.apply(orig) == anon
+    assert explain_line(orig, anon, idx)
+    assert idx.find_leaks(anon) == {}
+    assert idx.find_leaks('cert:site-fw-xx-host014-example') == {}  # the old partial output: no key left,
+    # which is exactly why a raw grep of the site prefix is the check the compare cannot do
