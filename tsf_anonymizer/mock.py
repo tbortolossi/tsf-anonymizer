@@ -224,6 +224,9 @@ def techsupport_name(device: str = DEVICE) -> str:
     return f"techsupport_{device}_20260407_1000.txt"
 
 
+MTIME = 1775548800  # 2026-04-07 10:00:00 UTC — every timestamp the archive carries
+
+
 def build_mock_tsf(output: Path, *, lines: int = 400, seed: int = 7) -> Path:
     """Write the synthetic archive to ``output`` and return its path.
 
@@ -246,10 +249,12 @@ def build_mock_tsf(output: Path, *, lines: int = 400, seed: int = 7) -> Path:
     logs = render_logs(rng, lines)
     for path, text in logs.items():
         add(path, text)
-        # Two rotations of each log, compressed, with older content.
+        # Two rotations of each log, compressed, with older content. The inner
+        # gzip header carries a timestamp too: pin it, or two builds a second
+        # apart differ by a few bytes (test_mock_is_deterministic was flaky).
         older = render_logs(random.Random(seed + 1), max(10, lines // 4))[path]
         for n in (1, 2):
-            add(f"{path}.{n}.gz", gzip.compress(older.encode("utf-8"), compresslevel=6))
+            add(f"{path}.{n}.gz", gzip.compress(older.encode("utf-8"), compresslevel=6, mtime=MTIME))
     # A file real TSFs ship in mode 0000 (the archive must keep that mode).
     add("opt/pancfg/mgmt/global/.hcr_metadata.json", f'{{"peer": "{MGMT_IP}", "serial": "{SERIAL}"}}\n', 0o000)
     add("var/log/pan/rule-hit-count-db.txt",
@@ -260,13 +265,12 @@ def build_mock_tsf(output: Path, *, lines: int = 400, seed: int = 7) -> Path:
     add("var/log/wtmp", (b"\x07\x00\x00\x00" + b"\x00" * 60 + MGMT_IP.encode() + b"\x00" * 300) * 12)
     add("var/log/pan/untouched.txt", "nothing identifying here\n")
 
-    mtime = 1775548800
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     # gzip's header carries a file name and a timestamp: pin both so the bytes
     # do not depend on the output path or the clock.
     with open(output, "wb") as raw, \
-            gzip.GzipFile(filename="", mode="wb", compresslevel=6, fileobj=raw, mtime=mtime) as gz, \
+            gzip.GzipFile(filename="", mode="wb", compresslevel=6, fileobj=raw, mtime=MTIME) as gz, \
             tarfile.open(fileobj=gz, mode="w") as tar:
         seen_dirs: set[str] = set()
         for path, payload, mode in members:
@@ -277,12 +281,12 @@ def build_mock_tsf(output: Path, *, lines: int = 400, seed: int = 7) -> Path:
                     continue
                 seen_dirs.add(d)
                 info = tarfile.TarInfo("./" + d)
-                info.type, info.mode, info.mtime = tarfile.DIRTYPE, 0o755, mtime
+                info.type, info.mode, info.mtime = tarfile.DIRTYPE, 0o755, MTIME
                 info.uid = info.gid = 1234
                 info.uname = info.gname = "pan"
                 tar.addfile(info)
             info = tarfile.TarInfo("./" + path)
-            info.size, info.mode, info.mtime = len(payload), mode, mtime
+            info.size, info.mode, info.mtime = len(payload), mode, MTIME
             info.uid = info.gid = 1234
             info.uname = info.gname = "pan"
             tar.addfile(info, io.BytesIO(payload))

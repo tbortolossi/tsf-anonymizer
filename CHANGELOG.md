@@ -13,12 +13,13 @@ change what is mapped, a patch bump only fixes).
   (`anonymizer-invariants.md` for `core.py`/`compare.py`,
   `jobs-and-serving.md` for jobs, CLI, web and Docker), loaded only when a
   matching file is read. Same content, no invariant dropped.
-
-### Changed
 - Container image on `python:3.14-slim`; Python 3.14 added to the CI matrix
   and the classifiers (3.11 stays the floor).
 
 ### Fixed
+- The mock's rotated `.gz` members carry a pinned gzip timestamp, so two
+  builds of the archive are byte-identical whatever the clock says
+  (`test_mock_is_deterministic` was flaky).
 - A job's `error` and `error_detail` are set before its status flips to
   `failed`, so a client that sees the verdict always sees the traceback
   (`test_a_failed_job_keeps_a_log_with_the_traceback` was flaky).
