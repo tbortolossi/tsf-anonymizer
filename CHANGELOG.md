@@ -39,6 +39,14 @@ change what is mapped, a patch bump only fixes).
   explains it unchanged.
 
 ### Added
+- The compare now checks **routing coherence** structurally: the config and
+  both RIB formats are re-parsed on each side, and every structural
+  relation (a nexthop inside a connected subnet, a route containing another
+  route or a connected network, every prefix length) must hold on the
+  anonymized tree iff it holds on the original — summary key `routing`,
+  one line in the CLI compare output, a KPI tile in the UI. This is the
+  check that fails if prefix preservation ever regresses; per-line
+  explanation cannot see it.
 - The mock TSF now exercises routing coherence: a `<virtual-router>` and a
   `<logical-router>` with static routes, a RIB in both formats (classic
   `show routing route` with learned OSPF/BGP rows and ages,

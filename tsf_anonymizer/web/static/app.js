@@ -516,9 +516,13 @@
         ${kpi("mapping collisions", s.mapping_collisions || 0, s.mapping_collisions ? "warn" : "ok")}
         ${s.mapping_duplicate_pseudonyms ? kpi("duplicate pseudonyms", s.mapping_duplicate_pseudonyms, "err") : ""}
         ${kpi("XML structure preserved", `${s.xml_checked - s.xml_structure_changed}/${s.xml_checked}`, s.xml_structure_changed ? "err" : "ok")}
+        ${s.routing && s.routing.checked ? kpi("routing coherence", s.routing.ok ? "OK" : "BROKEN", s.routing.ok ? "ok" : "err") : ""}
       </div>`;
       if (s.mapping_collisions) {
         html += `<p class="notes">collisions — original values that are also pseudonyms handed out elsewhere (e.g. the customer uses 100.64.0.0/10): <span class="mono">${(s.mapping_collision_sample || []).map(esc).join(", ")}</span>. They are ambiguous in the output, not leaked.</p>`;
+      }
+      if (s.routing && s.routing.checked && !s.routing.ok) {
+        html += `<p class="notes">routing coherence — a structural relation (a nexthop inside a connected subnet, a route containing another) holds on one side only: <span class="mono">${(s.routing.mismatches || []).map(esc).join("; ")}</span></p>`;
       }
       if (s.mapping_duplicate_pseudonyms) {
         html += `<p class="notes">duplicate pseudonyms — distinct original values that received the same pseudonym (a mapping defect: correlation on the copy is wrong): <span class="mono">${(s.mapping_duplicate_sample || []).map(esc).join(", ")}</span>. Re-anonymize with a current build.</p>`;

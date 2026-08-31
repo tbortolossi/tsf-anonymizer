@@ -73,6 +73,14 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   they are only excluded from the leak scan, where the same string is
   somebody's pseudonym. Dropping them from `forward`, the first design,
   made every occurrence of such a key an "unexplained" line.
+- **The compare checks routing coherence structurally.** `_routing_view`
+  re-derives from each tree alone (config layer3 networks, static routes,
+  both RIB formats) the relations the prefix tree exists to preserve, and
+  `check_routing_coherence` requires each — nexthop ∈ connected subnet,
+  route ⊆ route, connected ⊆ route, prefix lengths — to hold on the
+  anonymized side iff it holds on the original. No mapping, no anonymizer
+  import: a regression of prefix preservation fails the compare even
+  though any injective mapping would still explain every line.
 - **Serial fallback: 12 digits not starting `0000`, or `007`+12 — and never
   right after a dot.** Zero-padded counters in `show counter` output are 12
   digits too; 3 434 of them were "anonymized" on the first real run. logdb
