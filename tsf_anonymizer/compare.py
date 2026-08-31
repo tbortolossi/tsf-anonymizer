@@ -117,9 +117,11 @@ class MappingIndex:
         # reported as such rather than scanned for.
         values = set(self.forward.values())
         self.collisions = sorted(k for k in self.forward if k in values)
-        for k in self.collisions:
-            self.forward_ci.pop(k.lower(), None)
-        self.forward = {k: v for k, v in self.forward.items() if k not in values}
+        # They stay in `forward`: the anonymizer did rewrite them in the
+        # original, so `apply` must too — dropping them once left every
+        # occurrence of such a key "unexplained". Only the leak scan skips
+        # them: in the *output* the same string is somebody's pseudonym.
+        self._collision_keys = set(self.collisions) | {k.lower() for k in self.collisions}
         # IPs and serials sit inside hyphenated/underscored tokens all the time
         # (lr-203.0.113.184-2, PA_001901000456_dt): digit boundaries, not
         # token boundaries, or 100 000 real-TSF lines read as unexplained.
@@ -188,12 +190,12 @@ class MappingIndex:
                 continue
             for m in rx.finditer(text):
                 k = m.group(0)
-                if len(k) >= self.min_leak_len:
+                if len(k) >= self.min_leak_len and k not in self._collision_keys:
                     hits[k] = hits.get(k, 0) + 1
         if self._ci_re is not None:
             for m in self._ci_re.finditer(text):
                 k = m.group(0).lower()
-                if len(k) >= self.min_leak_len:
+                if len(k) >= self.min_leak_len and k not in self._collision_keys:
                     hits[k] = hits.get(k, 0) + 1
         return hits
 

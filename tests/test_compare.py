@@ -170,7 +170,7 @@ class TestDetectsDamage:
     def test_leak_in_rotated_gz_is_found(self, anonymized):
         _, _, mapping, work = anonymized
         rel = "var/log/pan/system.log.1.gz"
-        _tamper(work, rel, lambda b: b.replace(b"100.64.", b"172.16.4.9 100.64.", 1))
+        _tamper(work, rel, lambda b: b"172.16.4.9 " + b)
         (work / "orig" / "var/log/pan/system.log.1.gz").write_bytes((work / "orig" / rel).read_bytes())
         rep = compare_trees(work / "orig", work / "anon", mapping)
         f = next(f for f in rep.files if f.path == rel)
@@ -272,6 +272,9 @@ class TestCollisionsAndLongLines:
         assert idx.collisions == ["100.64.0.3"]
         assert idx.find_leaks("peer 100.64.0.3") == {}
         assert idx.apply("peer 10.0.0.1") == "peer 100.64.0.3"
+        # the collision key is still applied on the original side — dropping
+        # it left every occurrence of such a key "unexplained"
+        assert idx.apply("peer 100.64.0.3") == "peer 192.0.2.1"
 
     def test_collisions_reach_the_summary(self, anonymized):
         _, _, mapping, work = anonymized

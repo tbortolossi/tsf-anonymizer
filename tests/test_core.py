@@ -27,13 +27,19 @@ def anon() -> Anonymizer:
 
 
 class TestAnonIp:
-    def test_private_ip_is_replaced_with_cgnat(self, anon):
+    def test_private_ip_stays_in_its_class_with_the_host_octet_kept(self, anon):
         fake = anon.anon_ip("10.0.0.253")
-        assert fake != "10.0.0.253" and fake.startswith("100.")
-        assert 64 <= int(fake.split(".")[1]) <= 127
+        assert fake != "10.0.0.253"
+        assert fake.startswith("10.") and fake.endswith(".253")
 
-    def test_public_ip_is_replaced_with_test_net(self, anon):
-        assert anon.anon_ip("8.8.8.8").split(".")[0] in {"192", "198", "203"}
+    def test_public_ip_is_replaced_with_class_e(self, anon):
+        fake = anon.anon_ip("8.8.8.8")
+        assert fake != "8.8.8.8"
+        assert 240 <= int(fake.split(".")[0]) <= 255
+
+    def test_an_address_never_maps_to_itself(self, anon):
+        for ip in ("10.0.0.1", "172.16.0.1", "192.168.1.1", "100.64.0.1", "8.8.8.8"):
+            assert anon.anon_ip(ip) != ip
 
     def test_same_ip_maps_to_same_fake(self, anon):
         assert anon.anon_ip("172.16.4.9") == anon.anon_ip("172.16.4.9")
@@ -412,35 +418,68 @@ class TestRealTsfLessons:
         assert anon.anon_serial("001901000123").startswith("9")
         assert len(anon.anon_serial("007051000012345")) == 15
 
-    def test_fake_ip_skips_an_original_we_already_know(self, anon):
-        anon.anon_ip("100.64.0.1")            # the customer uses our fake range
-        fake = anon.anon_ip("10.0.0.9")        # first private fake would be 100.64.0.1
-        assert fake != "100.64.0.1"
-
-    def test_private_fakes_are_unique_at_scale(self, anon):
-        # The old generator merged .0/.1 host octets every 256th allocation:
-        # 52 duplicate pseudonyms in one real mapping, invisible to the
-        # compare. 70 000 crosses every octet boundary of the counter.
+    def test_fake_ip_never_repeats_a_value_already_used(self, anon):
         import ipaddress
-        fakes = [anon.anon_ip(f"10.{(i >> 16) & 255}.{(i >> 8) & 255}.{i & 255}")
-                 for i in range(1, 70_000)]
-        assert len(set(fakes)) == len(fakes)
-        for f in fakes[:512] + fakes[-512:]:
-            assert ipaddress.ip_address(f) in ipaddress.ip_network("100.64.0.0/10")
+        taken = anon._tree_fake(int(ipaddress.ip_address("10.7.7.7")))
+        anon._fakes.add(taken)                 # someone already owns that value
+        fake = anon.anon_ip("10.7.7.7")
+        assert fake != taken                                       # probed away…
+        assert fake.rsplit(".", 1)[0] == taken.rsplit(".", 1)[0]   # …within the /24
 
-    def test_public_fakes_spill_into_class_e_instead_of_cycling(self, anon):
-        # RFC 5737 holds 762 pseudonyms; the old generator then cycled — on a
-        # real TSF 54 197 of 84 971 distinct IPs (public attack sources
-        # included) shared a pseudonym. The overflow now spills into 240/4.
-        import ipaddress
-        fakes = [anon.anon_ip(f"{8 + (i >> 16)}.{(i >> 8) & 255}.{i & 255}.7")
-                 for i in range(2_000)]
+    def test_private_fakes_are_unique_and_prefix_preserving_at_scale(self, anon):
+        # Injectivity at scale (the old counter merged .0/.1 hosts — 52
+        # duplicate pseudonyms in one real mapping) plus the structural
+        # properties the routing coherence rests on.
+        ips = [f"10.{(i >> 16) & 255}.{(i >> 8) & 255}.{i & 255}" for i in range(1, 70_000)]
+        fakes = [anon.anon_ip(ip) for ip in ips]
         assert len(set(fakes)) == len(fakes)
-        for f in fakes[:762]:
-            assert int(f.split(".")[0]) in (192, 198, 203)
-        for f in fakes[762:]:
+        by24: dict[str, set[str]] = {}
+        by16: dict[str, set[str]] = {}
+        for ip, f in zip(ips, fakes, strict=True):
+            assert f.startswith("10.")                              # class kept
+            assert ip.rsplit(".", 1)[1] == f.rsplit(".", 1)[1]      # host kept
+            by24.setdefault(ip.rsplit(".", 1)[0], set()).add(f.rsplit(".", 1)[0])
+            by16.setdefault(ip[:ip.index(".", 3)], set()).add(f[:f.index(".", 3)])
+        assert all(len(s) == 1 for s in by24.values())  # same real /24 -> one fake /24
+        assert all(len(s) == 1 for s in by16.values())  # same real /16 -> one fake /16
+
+    def test_public_fakes_group_by_real_slash24(self, anon):
+        # A real TSF carries tens of thousands of public IPs (54 845 measured
+        # on one; the old generator cycled after 762 and merged them).
+        import ipaddress
+        ips = [f"{8 + (i >> 16)}.{(i >> 8) & 255}.{i & 255}.{(i * 7) % 256}"
+               for i in range(2_000)]
+        fakes = [anon.anon_ip(ip) for ip in dict.fromkeys(ips)]
+        assert len(set(fakes)) == len(fakes)
+        by24: dict[str, set[str]] = {}
+        for ip, f in zip(dict.fromkeys(ips), fakes, strict=True):
+            ipaddress.ip_address(f)
             assert 240 <= int(f.split(".")[0]) <= 255
-            ipaddress.ip_address(f)  # every spilled fake is a valid address
+            by24.setdefault(ip.rsplit(".", 1)[0], set()).add(f.rsplit(".", 1)[0])
+        assert all(len(s) == 1 for s in by24.values())
+
+    def test_route_destination_still_contains_its_hosts(self, anon):
+        import ipaddress
+        out = anon.anonymize_text("route 10.20.0.0/16 nexthop 10.20.0.1 host 10.20.5.9")
+        toks = out.split()
+        net = ipaddress.ip_network(toks[1], strict=False)
+        assert toks[1].endswith("/16")
+        assert ipaddress.ip_address(toks[3]) in net
+        assert ipaddress.ip_address(toks[5]) in net
+
+    def test_seeded_run_keeps_prefix_coherence_for_new_ips(self, anon):
+        old = anon.anon_ip("10.9.1.10")
+        pub = anon.anon_ip("8.8.8.8")
+        b = Anonymizer.from_mapping(anon.get_mapping())
+        assert b.anon_ip("10.9.1.10") == old
+        # a new address in a known subnet lands in the same fake subnet
+        assert b.anon_ip("10.9.1.77").rsplit(".", 1)[0] == old.rsplit(".", 1)[0]
+        assert b.anon_ip("8.8.8.99").rsplit(".", 1)[0] == pub.rsplit(".", 1)[0]
+
+    def test_mapping_sidecar_carries_the_ip_seed(self, anon):
+        m = anon.get_mapping()
+        assert bytes.fromhex(m["ip_seed"]) == anon.ip_seed
+        assert Anonymizer.from_mapping(m).ip_seed == anon.ip_seed
 
 
 class TestRealTsfLessonsRound2:
@@ -632,8 +671,10 @@ class TestDetectThenFreeze:
 
     def test_parallel_run_is_identical_to_sequential(self, tmp_path, tsf):
         out_seq, out_par = tmp_path / "seq.tgz", tmp_path / "par.tgz"
-        _, m_seq = anonymize_tsf(tsf, out_seq, workers=1)
-        _, m_par = anonymize_tsf(tsf, out_par, workers=2)
+        # determinism across runs is the seeded contract: share the ip_seed
+        seed = {"ip_seed": "00" * 16}
+        _, m_seq = anonymize_tsf(tsf, out_seq, workers=1, seed_mapping=seed)
+        _, m_par = anonymize_tsf(tsf, out_par, workers=2, seed_mapping=seed)
         assert m_seq == m_par
         with tarfile.open(out_seq) as t1, tarfile.open(out_par) as t2:
             names1 = [m.name for m in t1.getmembers()]
@@ -653,8 +694,9 @@ class TestDetectThenFreeze:
                 assert p1 == p2, name
 
     def test_rewrite_allocates_nothing_after_the_prescan(self, tmp_path, tsf):
-        report, full_mapping = anonymize_tsf(tsf, tmp_path / "out.tgz")
-        _, prescan_mapping = anonymize_tsf(tsf, None, mapping_only=True)
+        seed = {"ip_seed": "00" * 16}
+        report, full_mapping = anonymize_tsf(tsf, tmp_path / "out.tgz", seed_mapping=seed)
+        _, prescan_mapping = anonymize_tsf(tsf, None, mapping_only=True, seed_mapping=seed)
         assert prescan_mapping == full_mapping
         assert not any(f.warnings for f in report.files)
 
@@ -823,8 +865,9 @@ class TestRedactBinaries:
 
     def test_parallel_redaction_matches_sequential(self, tmp_path, tsf):
         out1, out2 = tmp_path / "s.tgz", tmp_path / "p.tgz"
-        _, m1 = anonymize_tsf(tsf, out1, redact_binaries=True, workers=1)
-        _, m2 = anonymize_tsf(tsf, out2, redact_binaries=True, workers=2)
+        seed = {"ip_seed": "00" * 16}
+        _, m1 = anonymize_tsf(tsf, out1, redact_binaries=True, workers=1, seed_mapping=seed)
+        _, m2 = anonymize_tsf(tsf, out2, redact_binaries=True, workers=2, seed_mapping=seed)
         assert m1 == m2
         assert read_member(out1, "./var/log/pan/rule-hit-count.bin") \
             == read_member(out2, "./var/log/pan/rule-hit-count.bin")

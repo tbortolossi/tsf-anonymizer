@@ -77,8 +77,8 @@ members through the same frozen tables, file names only, never directories.
 
 | class | original | pseudonym | shaped so that |
 |---|---|---|---|
-| private IPv4 | `10.1.2.3` | `100.64.x.y` | RFC 6598 — never a real internal range |
-| public IPv4 | `8.8.8.8` | `192.0.2.x` …, then `240.x.y.z` | RFC 5737 documentation ranges, spilling into class E (never routable) past 762 |
+| private IPv4 | `10.1.2.3` | `10.x.y.3` | same class + host octet kept: prefix-preserving (keyed PRF tree, `ip_seed` in the sidecar), so subnets and routes stay coherent |
+| public IPv4 | `8.8.8.8` | `240.x.y.z` | class E — never routable, never a real third party; one fake /24 per real /24 |
 | FQDN / hostname | `fw01.acme.local` | `host007.anon.internal` | parent domains registered down to the apex |
 | e-mail | `j.dupont@acme.fr` | `user003@host002.anon.internal` | |
 | named object | `Zone-Prod-DMZ` | `ZONE-0012` | category prefix kept, so the config still reads |
@@ -86,11 +86,14 @@ members through the same frozen tables, file names only, never directories.
 | serial | `001901000123` | `900000000001` | same length, leading `9`: cannot collide with a real one |
 
 Same original → same pseudonym, within a run and across runs seeded with
-the same `mapping.json`. A pseudonym is never an input to a later pass
-(`Anonymizer._fakes`). Fake IPs skip any address seen as an original — and any
-pseudonym already handed out: the mapping is injective, and the compare
-reports *duplicate pseudonyms* if it ever is not. When a customer really uses
-100.64/10 the compare reports a *collision*, separately from leaks.
+the same `mapping.json` — for IPs the sidecar also carries `ip_seed`, the
+key of the prefix-preserving tree, so a second TSF keeps whole subnets
+coherent, not only the addresses both archives share. A pseudonym is never
+an input to a later pass (`Anonymizer._fakes`). The IP mapping is injective
+(a structural fake that would repeat a used value probes within its /24) and
+the compare reports *duplicate pseudonyms* if it ever is not; a fake that
+coincides with a real customer address is reported as a *collision*,
+separately from leaks.
 
 ## The mapping sidecar
 

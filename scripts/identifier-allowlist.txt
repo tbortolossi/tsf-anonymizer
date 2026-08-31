@@ -72,3 +72,4 @@ cloudflare.com
 amazonaws.com
 akamai.com
 ntp.org
+8.8.8.99

@@ -49,15 +49,30 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   fake IPs skip any address already seen as an original. When a collision
   still happens (the customer uses 100.64/10), `MappingIndex.collisions`
   reports it as such — separately from leaks, which it would otherwise inflate.
-- **The IP mapping is injective — and the compare checks it.** The generation
-  loop skips any pseudonym already handed out (`_fakes`), and public fakes
-  beyond the 762 RFC 5737 addresses spill into 240.0.0.0/4 (class E — never
-  routable, never a real third party) instead of cycling. The old generator
+- **The IP mapping is injective — and the compare checks it.** A structural
+  fake that would repeat a pseudonym already handed out (`_fakes`) or an
+  original we know probes within its /24 (every prefix relation survives),
+  then falls back to the sequential generators. The old generator
   merged `.0`/`.1` host octets every 256th allocation and cycled the public
   blocks: 54 197 of 84 971 distinct IPs shared a pseudonym on one real TSF —
   distinct attack sources merged on the copy, invisible to a compare that
   never checked value uniqueness. `MappingIndex.duplicate_pseudonyms` now
   reports a non-injective mapping in the summary and the UI.
+- **IP pseudonyms preserve prefix structure** (`_tree_fake`): same real
+  prefix → same fake prefix, so subnets, route destinations — static or
+  learned mid-log by OSPF/BGP — LSDB entries and nexthops stay mutually
+  coherent across files and across TSFs seeded from the same mapping
+  (`ip_seed` rides in the sidecar). RFC 1918/CGNAT addresses stay in their
+  own class with the host octet kept (root tree node always flipped: an
+  address never maps to itself — 45 identity mappings appeared on the
+  corpus before that rule); everything else maps into 240.0.0.0/4, one fake
+  /24 per real /24. The trade: a private fake can equal an address the
+  customer also uses elsewhere (0.12 % measured on 196 730 corpus IPs) —
+  reported by the compare as a *collision*, and collision keys are still
+  **applied** by `MappingIndex.apply` (the anonymizer did rewrite them);
+  they are only excluded from the leak scan, where the same string is
+  somebody's pseudonym. Dropping them from `forward`, the first design,
+  made every occurrence of such a key an "unexplained" line.
 - **Serial fallback: 12 digits not starting `0000`, or `007`+12 — and never
   right after a dot.** Zero-padded counters in `show counter` output are 12
   digits too; 3 434 of them were "anonymized" on the first real run. logdb
