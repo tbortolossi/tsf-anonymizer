@@ -7,7 +7,7 @@ name = "tsf-anonymizer"
 # Single source of truth for the version: `uv version --bump patch|minor|major`
 # updates it here and in uv.lock; the package reads it back through
 # importlib.metadata (see tsf_anonymizer/__init__.py). Never edit by hand.
-version = "0.2.3"
+version = "0.3.0"
 description = "Anonymize PAN-OS tech support files (TSF) without losing debugging value, and prove it with a compare mode."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -7,6 +7,8 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-31
+
 ### Added
 - `tsf-anonymizer mock-tsf`: a deterministic synthetic TSF (fictional company,
   reserved address ranges) to try the tool on, reproduce bugs and generate the
@@ -88,7 +90,8 @@ change what is mapped, a patch bump only fixes).
   anonymize, compare, web UI, Docker image; the first twelve real-TSF
   invariants recorded in CLAUDE.md.
 
-[Unreleased]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.2.0...v0.2.1
