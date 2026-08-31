@@ -14,6 +14,10 @@ change what is mapped, a patch bump only fixes).
   `jobs-and-serving.md` for jobs, CLI, web and Docker), loaded only when a
   matching file is read. Same content, no invariant dropped.
 
+### Changed
+- Container image on `python:3.14-slim`; Python 3.14 added to the CI matrix
+  and the classifiers (3.11 stays the floor).
+
 ### Fixed
 - A job's `error` and `error_detail` are set before its status flips to
   `failed`, so a client that sees the verdict always sees the traceback

@@ -49,7 +49,7 @@ make check                  # lint + tests + lockfile — what CI runs
 | `make docker` | `docker compose up -d --build` |
 | `make clean` | removes caches and build output (never `data/`) |
 
-Python 3.11 is the floor (`.python-version`); CI also runs 3.12 and 3.13.
+Python 3.11 is the floor (`.python-version`); CI also runs 3.12, 3.13 and 3.14.
 `uv python install 3.11` fetches an interpreter if the machine has none.
 
 ## Workflow: issue → branch → pull request → squash merge

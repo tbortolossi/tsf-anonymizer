@@ -71,7 +71,7 @@ follows is only what it does not say or what an agent gets wrong.
 - **uv, never pip.** A dependency is added with `uv add` (`--group dev` or
   `--group docs`), which updates `uv.lock`; commit both, `uv lock --check`
   fails CI when they drift. The Dockerfile installs from the lockfile too
-  (`uv sync --frozen --no-dev`). Python 3.11 is the floor; CI runs 3.11-3.13.
+  (`uv sync --frozen --no-dev`). Python 3.11 is the floor; CI runs 3.11-3.14.
 - **Version in one place.** `pyproject.toml` only, bumped with
   `uv version --bump patch|minor|major` (never by hand); the release steps
   are in CONTRIBUTING.md → *Releasing*. SemVer with the `0.x` reading: minor

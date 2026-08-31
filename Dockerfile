@@ -1,6 +1,6 @@
 # Two stages: uv resolves and installs from uv.lock into a self-contained
 # virtual environment, the runtime image carries only that environment.
-FROM python:3.11-slim AS builder
+FROM python:3.14-slim AS builder
 COPY --from=ghcr.io/astral-sh/uv:0.11.16 /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -11,7 +11,7 @@ COPY pyproject.toml uv.lock README.md LICENSE /app/
 COPY tsf_anonymizer/ /app/tsf_anonymizer/
 RUN uv sync --frozen --no-dev --no-editable
 
-FROM python:3.11-slim
+FROM python:3.14-slim
 LABEL org.opencontainers.image.title="tsf-anonymizer" \
       org.opencontainers.image.description="Anonymize PAN-OS tech support files and prove, by an independent comparison, that nothing but identifiers was lost." \
       org.opencontainers.image.source="https://github.com/tbortolossi/tsf-anonymizer" \
