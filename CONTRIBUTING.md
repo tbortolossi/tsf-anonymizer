@@ -32,15 +32,20 @@ environment, the lockfile, running commands and bumping the version. No
 ```bash
 git clone https://github.com/tbortolossi/tsf-anonymizer.git
 cd tsf-anonymizer
-uv sync --all-groups        # creates .venv from uv.lock, installs the package editable
-uv run pre-commit install   # ruff + lockfile check before every commit
+make setup                  # uv sync --all-groups, pre-commit hook, Playwright's Chromium
 make check                  # lint + tests + lockfile — what CI runs
 ```
+
+`make setup` is three commands: `uv sync --all-groups` (creates `.venv` from
+`uv.lock`, installs the package editable), `uv run pre-commit install` (ruff
+and the lockfile check before every commit) and `uv run playwright install
+chromium` (only `make screenshots` needs it).
 
 `make` (or `make help`) lists every target. The ones you will use:
 
 | target | what it does |
 | --- | --- |
+| `make setup` | `.venv` from the lockfile, pre-commit hook, Playwright browser |
 | `make test` | `uv run pytest` |
 | `make lint` | `uv run ruff check .` |
 | `make check` | lint + tests + `uv lock --check` — the CI gate |
@@ -70,8 +75,8 @@ Python 3.11 is the floor (`.python-version`); CI also runs 3.12, 3.13 and 3.14.
    `BREAKING CHANGE:` footer.
 4. **Open the PR early**, as a draft if it is not ready; the template's
    checklist is the definition of done. CI must be green: lint, tests on
-   three Pythons, the Docker build and the UI smoke test that produces the
-   documentation screenshots.
+   four Pythons (3.11 to 3.14), the Docker build and the UI smoke test that
+   produces the documentation screenshots.
 5. **Squash-merge**, with the PR title as the commit subject, then delete
    the branch. `master` is linear and every commit on it is a green,
    self-contained change.
@@ -103,8 +108,11 @@ and not the other. So a fix comes in three parts:
 - `docs/user-guide.md` walks through the web UI with screenshots generated
   from the mock archive — `make screenshots` regenerates them, commit the
   PNGs with the change that altered the UI.
-- `docs/architecture.md` explains the pipeline; `docs/TSF-GUIDE.md` explains
-  tech support files themselves.
+- `docs/architecture.md` explains the pipeline;
+  `.claude/skills/read-tsf/TSF-GUIDE.md` explains tech support files
+  themselves (`docs/TSF-GUIDE.md` only points to it — a symlink would not
+  render on github.com). `docs/social-preview.png` is the repository's social
+  card, uploaded by hand in *Settings → Social preview*.
 - `CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com/):
   add a line under *Unreleased* in the PR that makes the change.
 

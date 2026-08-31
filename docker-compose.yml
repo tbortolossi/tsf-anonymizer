@@ -26,7 +26,8 @@ services:
       TSF_USERNAME: "${TSF_USERNAME:-admin}"
       # How many archives run at once, and how many processes each one's
       # compare pass uses. Empty means "decide from the core count"
-      # (cpu/4 archives, capped at 4, then the cores left over each).
+      # (cpu/4 archives, capped at 4, then the cores left over each, also
+      # capped at 4).
       TSF_WORKERS: "${TSF_WORKERS:-}"
       TSF_COMPARE_WORKERS: "${TSF_COMPARE_WORKERS:-}"
       TSF_ANON_WORKERS: "${TSF_ANON_WORKERS:-}"

@@ -369,7 +369,7 @@ Two rules on how to write it:
 - **Keep `TSF-GUIDE.md` (next to this file) in step.** It is the human-facing
   version of the same knowledge — the file map and per-problem log tables live
   there, the method lives here; when one gains a section the other needs a
-  look. `docs/TSF-GUIDE.md` is a symlink to it.
+  look. `docs/TSF-GUIDE.md` is a pointer page to it, not a copy.
 
 Say in one line what you added, so the person reading your analysis knows the
 skill moved.

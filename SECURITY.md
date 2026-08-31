@@ -63,9 +63,11 @@ The web UI's threat model is also documented and deliberate:
   revocation, no per-user audit trail. Whoever has the password can download
   the un-anonymized archive and its mapping. Anything wider than a trusted
   LAN belongs behind a reverse proxy that adds what is missing.
-- **Bound to loopback by default**, TLS mandatory as soon as a certificate
-  is configured and *fail-closed* when it is missing. `TSF_BIND_ADDR` and
-  `TSF_TLS_CERT=` (empty) are explicit opt-outs.
+- **The container is published on loopback by default**, TLS mandatory as
+  soon as a certificate is configured and *fail-closed* when it is missing.
+  `TSF_BIND_ADDR` and `TSF_TLS_CERT=` (empty) are explicit opt-outs. The bare
+  `tsf-anonymizer serve` listens on `0.0.0.0` (it warns), so pass
+  `--host 127.0.0.1` when the CLI is not behind something else.
 - **The self-signed CA** is trusted only where you imported it. A browser
   warning clicked through proves nothing about who answered.
 

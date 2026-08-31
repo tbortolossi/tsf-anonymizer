@@ -48,7 +48,8 @@ tests/           pytest; test_core.py, test_compare.py, test_web.py
                  analyze a TSF (symptom→file→grep map distilled from TAC-MAN's
                  tsf-agent); TSF-GUIDE.md next to it is the human-facing file
                  map — keep the two consistent when either changes.
-                 docs/TSF-GUIDE.md is a symlink to the latter.
+                 docs/TSF-GUIDE.md is a one-line pointer to the latter (a
+                 symlink does not render on github.com).
 Dockerfile, docker-compose.yml
 ```
 
@@ -140,7 +141,7 @@ actually contain, so **every analysis ends with an update to
 about first. The checklist of what to write lives at the end of that file
 ("Before you finish — feed this file"), where it is loaded exactly when a TSF
 is being read; keep it there rather than duplicating it here, and keep
-`docs/TSF-GUIDE.md` in step with it. What the *anonymizer* got wrong on that
+`.claude/skills/read-tsf/TSF-GUIDE.md` in step with it. What the *anonymizer* got wrong on that
 TSF belongs in `.claude/rules/anonymizer-invariants.md` instead — an
 invariant or a known limitation, plus a test in `tests/`. Genericize
 everything: no customer hostname, IP, serial, user or company name enters the

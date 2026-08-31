@@ -42,7 +42,7 @@ account, device — needs the mapping sidecar, which stays with the owner.
 - [Run it](#run-it) · [Docker Compose](#docker-compose-recommended) · [Try it without a real TSF](#try-it-without-a-real-tsf) · [Batches](#batches)
 - [Measured on a real TSF](#measured-on-a-real-tsf)
 - [Known limitations](#known-limitations)
-- [Docs](docs/user-guide.md): [user guide](docs/user-guide.md) · [architecture](docs/architecture.md) · [what a TSF contains](docs/TSF-GUIDE.md)
+- [Docs](docs/user-guide.md): [user guide](docs/user-guide.md) · [architecture](docs/architecture.md) · [what a TSF contains](.claude/skills/read-tsf/TSF-GUIDE.md)
 - [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md) · [Changelog](CHANGELOG.md)
 
 ## What it does
@@ -104,7 +104,7 @@ the mapping and the reports remain. If the check finds problems, the original
 is kept for review and the job says why — a *delete original now* button does
 it once you have looked. CLI: `--verify --delete-original`.
 
-New to TSFs? [docs/TSF-GUIDE.md](docs/TSF-GUIDE.md) explains what a tech
+New to TSFs? [TSF-GUIDE.md](.claude/skills/read-tsf/TSF-GUIDE.md) explains what a tech
 support file contains, where each kind of information lives, which daemon
 log to read for which problem, and how to read an anonymized one. The
 [user guide](docs/user-guide.md) walks through the UI screen by screen;
