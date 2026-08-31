@@ -60,6 +60,8 @@ Two dates matter and they are not the same:
 ./opt/pancfg/mgmt/healthchecks/            ← periodic health snapshots (.cli, .xml)
 ./opt/pancfg/mgmt/updates/{cur,old}content/global/global.xml  ← the App-ID/Threat DB (37 MB, ignore)
 ./var/log/pan/                             ← DAEMON LOGS (see §4)
+./opt/var.dp<n>/log/pan/                   ← per-dataplane logs (PA-5200); opt/var.cp/ = control plane
+./opt/var/s<slot>/{dp<n>,cp,lfp<n>}/log/pan/  ← PA-7000: per slot — dataplanes, card CP, log processing cards
 ./var/log/pan/crashinfo/                   ← *.info sidecars, one per crash (absent = no crash)
 ./var/log/{messages,audit/,nginx/,ntpstats/,sa/}  ← Linux side: kernel, auth, web, NTP, sar
 ./opt/panrepo/logs/                        ← boot history: bios.log, reboot.log, swm.log, history.log
@@ -126,7 +128,7 @@ writes `ikemgr-ng.log` while `ikemgr.log` stays present and idle; same for
 | performance / drops | `mp-monitor.log`, `dp-monitor.log`, `dp-sessperf_mon.log` | `> show running resource-monitor`, `show counter global filter delta yes`, `debug dataplane pool statistics` |
 | content / AV updates | `paninstaller_content.log`, `curlog_out_*`, `contentd.log`, `md_*.log` | `> request content upgrade info`, `opt/pancfg/mgmt/global/*info.xml` |
 | WildFire | `wildfire-monitor.log`, `wildfire-upload.log`, `wf_curl.log` | `> show wildfire status` |
-| logging / log forwarding | `logrcvr.log`, `varrcvr.log`, `logging-services.log`, `logpurger.log` | `> show logging-status`, `debug log-receiver statistics` |
+| logging / log forwarding | `logrcvr.log`, `varrcvr.log`, `logging-services.log`, `logpurger.log` — on a PA-7000, under the log processing cards `opt/var/s<slot>/lfp<n>/log/pan/` (`logrcvr.log`, `syslog-ng.log`, `lfp-monitor.log`) | `> show logging-status`, `debug log-receiver statistics`; `redis_useridd.log`/`redis_mgmt.log` can be the biggest files of the TSF (200 MB seen) |
 | reports | `reportd.log`, `report_gen.log`, `genreport.log`, `indexgen.log` | |
 | SSL decryption / certificates | `sslmgr.log`, `device_certgen.log`, `uia_tsa_cert.log` | `> show device-certificate status`, `debug sslmgr statistics` |
 | DHCP / DNS proxy | `pan_dhcpd.log`, `dhclient_debug.log`, `dnsproxy_go.log` | |
@@ -228,7 +230,12 @@ Binary files (`rule-hit-count.bin`, `*.dat`, sqlite DBs, `wtmp`/`btmp`/
 `lastlog`, and `sslvpn-task.log*.gz` — a binary record format that embeds the
 source IP and username of every GlobalProtect request) are copied through
 unchanged; the integrity report lists any that still embed identifiers. With
-the **redact binaries** option, such a member's payload is replaced by the
-one-line marker `[tsf-anonymizer] binary payload redacted…` — the original
-is gone from the archive, not hidden — and the verification checks that
-each redaction was warranted.
+**redact binaries** — on by default — such a member's payload is replaced by
+the one-line marker `[tsf-anonymizer] binary payload redacted…`; the original
+is gone from the archive, not hidden, and the verification checks that each
+redaction was warranted. Every redacted family has a text twin that is
+anonymized normally (`saNN` → `sarNN`, `rule-hit-count.bin` →
+`rule-hit-count-db.txt`, `sslvpn-task` → `show_log_globalprotect.txt`),
+except `wtmp`/`btmp`/`lastlog`: the admin login history is the one thing an
+anonymized archive no longer carries — `show_log_system.txt` and `authd.log`
+cover the same question.

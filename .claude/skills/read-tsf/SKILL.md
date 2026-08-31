@@ -142,7 +142,13 @@ older 5000) do not:
   per DP), and `sysd.log`/`sdb.txt` name components `s<slot>.dp<n>`
   (`cfg.net.s6.eth2@252.acl` = slot 6, interface eth2, VLAN 252). Each DP
   root may carry `log/pan/memdump/hwbuf-*.raw` — 100 MB hardware-buffer dumps,
-  binary, only for a buffer post-mortem. Always `ls -d opt/var.dp* opt/var/s*/dp*` first, and
+  binary, only for a buffer post-mortem. A slot holds more than dataplanes:
+  `opt/var/s<slot>/cp/` (the card's control processor), and on a PA-7000 the
+  **log processing cards** `opt/var/s<slot>/lfp<n>/log/pan/` — `logrcvr.log`,
+  `syslog-ng.log` (150 MB seen), `lfp-monitor.log` (same sectioned-snapshot
+  format as `dp-monitor.log`), `evtmgr_logrcvr_lfp<n>_snapshot`. On a
+  chassis, a log-forwarding or log-receiver problem lives *there*, not in
+  `var/log/pan/logrcvr.log`. Always `ls -d opt/var.dp* opt/var/s*/dp* opt/var/s*/lfp*` first, and
   analyse **per plane, never the aggregate** — on a PA-7000 the classic
   finding is one line card at 90 % while the others idle (traffic imbalance),
   invisible in any average. Do not assume which planes exist from the model:
@@ -183,7 +189,7 @@ its own state is" without parsing anything. Then, per domain (P0 files first
 | **VPN site-à-site** | `ikemgr-ng.log`* | `keymgr*.log`, `> show vpn ike-sa / ipsec-sa / flow` | `failed to get sainfo`=Phase2 proxy-ID mismatch · `no proposal chosen`=no common crypto · `AUTHENTICATION_FAILED`=PSK (case-sensitive!) or cert · `TS_UNACCEPTABLE`=IKEv2 selector mismatch · SPI mismatch=peer rebooted, stale SA · `DPD: peer dead`=connectivity, NOT negotiation. Phase 1 must establish before any Phase 2 diagnosis. |
 | **HA / failover** | `ha_agent.log`, `> show high-availability all` | `path-monitoring`, `state-synchronization`, `brdagent.log` | Classify the cause: heartbeat_loss (HA1 flap/peer down) · link_monitoring (NIC → check failure-condition any/all) · path_monitoring · **commit within 120 s of failover = spurious** (commits pause heartbeats 5–15 s) · process_restart. Preemption disabled = no auto-failback. |
 | **GlobalProtect** | `gpsvc.log`, `show_log_globalprotect.txt`, `gp_broker.log` | `sslvpn-access.log`, `sslvpn_ngx_error.log`, `rasmgr.log` | Split by WHERE the client stops: portal (config fetch) → auth → gateway (tunnel) → data. `Authentication failed` in gpsvc = **not a GP problem**, pivot to authd. Portal-vs-gateway auth-profile mismatch = auth OK then fails seconds later. |
-| **Auth** | `authd.log`, `useridd.log` | `show_log_system.txt`, `sslmgr.log` (certs) | LDAP `rc=49`=bad bind credentials; RADIUS timeouts; SAML clock skew. |
+| **Auth** | `authd.log`, `useridd.log` | `show_log_system.txt`, `sslmgr.log` (certs) | LDAP `rc=49`=bad bind credentials; RADIUS timeouts; SAML clock skew. **An exposed GP portal is brute-forced**: `grep -c "failed authentication for user" tmp/cli/logs/show_log_system.txt` then `grep -o "for user '[^']*'" … \| sort \| uniq -c \| sort -rn \| head` — guessed names (`error`, `request`, `port`, `cli`, `usr`, `test`, `admin`) and one source IP per burst are a scanner, not a customer problem; the `From:` IP of the same lines in `authd.log` says where it comes from. Real users fail with their real names, a few times, from a few IPs. |
 | **User-ID** | `useridd.log`, `distributord.log` | `> show user ip-user-mapping…` | Identification ≠ authentication: nobody fails a login, policy just mis-applies / user shows `unknown`. A login failing = auth domain instead. |
 | **Crash / reboot** | `crashinfo/`, `reboot.log`, `sysd.log` | `messages`, `mce.log`, `bios.log`, `history.log` | `grep -E "panic|oops|segfault|watchdog|Killed process"`. PID change in `mp-monitor.log` = daemon restart without reboot. **After any upgrade, check for crashes even if the symptom isn't crash-shaped.** |
 | **CPU** | `dp-monitor.log`, `mp-monitor.log`, `> show running resource-monitor` | `var/log/sa/sar*` (31-day history) | DP CPU = traffic-side (sessions, decryption, App-ID); MP CPU = reports/logging/configd. DP > 80 % sustained 3+ snapshots = critical. Correlate spikes with commits/content updates. |
@@ -311,11 +317,17 @@ a hostname, `userNNN` a user, `ZONE-0012`/`RULE-0045`/`GW-0002`… named objects
 (prefix = category), same-length digits starting `9` a serial. Correlation
 still works — "peer `203.0.113.7` on `GW-0002`" is the same peer everywhere.
 Member names are rewritten with the same mapping — the command dump reads
-`tmp/cli/techsupport_host001_<date>.txt`. A binary member whose payload is
-the one-line `[tsf-anonymizer] binary payload redacted…` was deliberately
-emptied because it embedded identifiers (`sslvpn-task.log*.gz` typically);
-its original is gone from the archive, not hidden. The `*.mapping.json`
-sidecar reverses it all and must never travel with the anonymized archive.
+`tmp/cli/techsupport_host001_<date>.txt`. Binary members that embedded
+identifiers are, **by default**, replaced by the one-line
+`[tsf-anonymizer] binary payload redacted…`: expect it in `var/log/sa/saNN`
+(read the `sarNN` text twins instead), `rule-hit-count.bin` (use
+`rule-hit-count-db.txt`), `sslvpn-access/sslvpn-task.log*` (use
+`show_log_globalprotect.txt`) and `var/log/wtmp`/`btmp`/`lastlog` — the
+admin login history, which has no twin: for "who logged in, when, from
+where" use `show_log_system.txt` (`grep -i "logged in\|auth"`) and
+`authd.log`. The original is gone from the archive, not hidden. The
+`*.mapping.json` sidecar reverses it all and must never travel with the
+anonymized archive.
 
 ## Before you finish — feed this file
 
