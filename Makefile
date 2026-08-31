@@ -20,8 +20,9 @@ setup: ## create .venv from uv.lock (all groups) and install the pre-commit hook
 test: ## run the test suite
 	$(UV) run pytest
 
-lint: ## ruff
+lint: ## ruff + the real-identifier guard
 	$(UV) run ruff check .
+	$(UV) run python scripts/check-identifiers.py
 
 check: lint test ## what CI runs: lint, tests, lockfile in sync with pyproject.toml
 	$(UV) lock --check

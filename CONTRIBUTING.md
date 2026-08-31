@@ -57,6 +57,28 @@ chromium` (only `make screenshots` needs it).
 Python 3.11 is the floor (`.python-version`); CI also runs 3.12, 3.13 and 3.14.
 `uv python install 3.11` fetches an interpreter if the machine has none.
 
+## Nothing real in the tree
+
+Real tech support files are customer material — and your own lab's is still
+*yours*. Nothing from one enters a test, a comment, a doc or a commit: not a
+hostname, an IP, a serial, a login, a certificate name. Reproduce with the
+synthetic vocabulary the mock uses (`acme-corp.fr`, `001901000123`,
+`home-lab.example`, `203.0.113.x`, `acme\jdupont`).
+
+`scripts/check-identifiers.py` enforces it — as a pre-commit hook, in
+`make lint` and in CI. It flags routable IPv4s, host names and e-mails
+outside `scripts/identifier-allowlist.txt` (the accepted synthetic and
+vendor names — extend it when you add a *synthetic* value), twelve-digit
+serial shapes and `DOMAIN\user` logins. Put your own identifiers — domains,
+serials, logins, personal e-mail — in a git-ignored `.identifier-denylist`
+at the repository root (or `~/.config/tsf-anonymizer/denylist`), one per
+line: anything listed there fails the commit wherever it appears, and
+`--author` fails when the git identity matches, so a personal address never
+signs a commit. Use your GitHub noreply address
+(`git config user.email <id>+<login>@users.noreply.github.com`) and turn on
+*Keep my email addresses private* + *Block command line pushes that expose
+my email* in GitHub's e-mail settings.
+
 ## Workflow: issue → branch → pull request → squash merge
 
 1. **Open an issue first** for anything that is not a typo — the templates

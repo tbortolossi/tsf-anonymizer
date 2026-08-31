@@ -1,0 +1,74 @@
+# Values scripts/check-identifiers.py accepts. One per line, case-insensitive,
+# `#` starts a comment. A host name passes when it or any parent domain is
+# here. Everything below is synthetic vocabulary or a vendor the docs cite —
+# nothing from a real tech support file belongs in this file.
+
+# --- the mock archive and the test fixtures (tsf_anonymizer/mock.py, tests/)
+acme-corp.local
+acme-corp.fr
+acme.local
+acme.fr
+acme                    # NetBIOS domain in DOMAIN\user fixtures
+domain                  # the literal DOMAIN\user placeholder in the docs
+corp                    # corp\jdoe in tests
+corp.local
+tsf.lan                 # the self-signed certificate's name (scripts/make-tls-cert.sh)
+example.com             # RFC 2606 second-level names
+example.net
+example.org
+test.com                # quoted next to example.com in core.py's vocabulary
+example-corp.fr
+mail-corp.ru
+anon.internal           # the pseudonym domain the anonymizer hands out
+001901000123            # mock serial
+001901000124            # mock HA peer serial
+001901000456            # test serial
+8.8.8.8                 # public resolver quoted as an example
+
+# --- twelve-digit strings that are NOT serials (documented in core.py)
+040509422026            # busybox date MMDDhhmmYYYY
+000100628656            # logdb sequence number, pan.<n>.log
+000000024894            # packet counter
+000000000021
+000000000000
+000000000001
+
+# --- odd but synthetic shapes from real-TSF-inspired tests
+163.com                 # `x@163.com`, the placeholder quoted in the e-mail invariant
+mail.ru                 # `@Mail.Ru`, the bare-domain-after-@ fixture
+cfg.net                 # cfg.net.s6.eth2@252.acl — an ACL name, not an address
+252.acl
+vlan.acl
+pool.ntp.org
+
+# --- vendors and services the docs, workflows and metadata link to
+github.com
+githubusercontent.com
+ghcr.io
+shields.io
+paloaltonetworks.com
+python.org
+astral.sh
+docker.com
+keepachangelog.com
+semver.org
+pytest.org
+readthedocs.io
+apache.org
+contributor-covenant.org
+conventionalcommits.org
+playwright.dev
+anthropic.com
+claude.com
+mozilla.org
+opensource.org
+w3.org                  # xmlns in the SVG icons
+# SaaS names the anonymizer treats as vocabulary, not identity (core.py)
+microsoft.com
+microsoftonline.com
+office365.com
+google.com
+cloudflare.com
+amazonaws.com
+akamai.com
+ntp.org

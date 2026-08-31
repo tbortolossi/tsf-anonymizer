@@ -20,3 +20,10 @@ repos:
       - id: trailing-whitespace
         exclude: \.md$
       - id: check-merge-conflict
+  - repo: local
+    hooks:
+      - id: check-identifiers
+        name: no real identifiers (IPs, hosts, e-mails, serials, denylist, author)
+        entry: uv run python scripts/check-identifiers.py --author
+        language: system
+        types: [text]

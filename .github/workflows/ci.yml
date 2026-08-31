@@ -28,6 +28,8 @@ jobs:
       - run: uv sync --group dev
       - run: uv lock --check
       - run: uv run ruff check --output-format=github .
+      - name: No real identifiers in the tree
+        run: uv run python scripts/check-identifiers.py
 
   test:
     name: Tests (py${{ matrix.python }})

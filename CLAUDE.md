@@ -100,6 +100,10 @@ follows is only what it does not say or what an agent gets wrong.
 - **An identifier that survives anonymization is a *security* report**
   (SECURITY.md), not an issue. Nothing from a real TSF ever enters an issue,
   a commit, a test or a doc — the mock archive is the reproducer to extend.
+  `scripts/check-identifiers.py` (pre-commit, `make lint`, CI) fails on a
+  routable IP, an unlisted host/e-mail, a serial shape or a `DOMAIN\user`;
+  a synthetic value it does not know goes in `scripts/identifier-allowlist.txt`,
+  a real one is replaced and added to the git-ignored `.identifier-denylist`.
 
 ## Doctrine — what every invariant follows
 
