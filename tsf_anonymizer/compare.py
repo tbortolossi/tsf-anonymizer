@@ -30,7 +30,6 @@ from __future__ import annotations
 import difflib
 import gzip
 import ipaddress
-import itertools
 import multiprocessing
 import re
 import tarfile
@@ -485,13 +484,28 @@ _RIB_ROW_RE = re.compile(
     r"^\s*(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\s+(?:\S+\s+)?(\d{1,3}(?:\.\d{1,3}){3})?")
 
 
+_PRESERVED_SPACES = tuple(ipaddress.ip_network(c) for c in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"))
+
+
+def _in_preserved(net) -> bool:
+    """Prefix preservation is guaranteed for RFC 1918/CGNAT only; public
+    space keeps /24 grouping but not aggregation (documented). A relation is
+    load-bearing for the check iff every network involved is private."""
+    return net.version == 4 and any(net.subnet_of(p) for p in _PRESERVED_SPACES)
+
+
 def _routing_view(tree: Path) -> dict | None:
     """One side's routing topology, re-derived from that tree alone: the
-    connected networks (config layer3 IPs), and the routes of the config's
-    static-route entries plus the RIB rows of both `show routing route`
-    formats (classic and advanced-routing). The same code runs on the
-    original and on the anonymized tree — no mapping, no anonymizer."""
-    cfgs = sorted(tree.rglob("running-config.xml"))
+    connected networks (config layer3 IPs + the RIB's connected rows), and
+    the routes of the config's static-route entries plus the RIB rows of
+    both `show routing route` formats (classic and advanced-routing). The
+    same code runs on the original and on the anonymized tree — no mapping,
+    no anonymizer. A `.merged-running-config.xml` wins over
+    `running-config.xml`: on a Panorama-managed device the latter ships an
+    empty <interface> section (real box, 0 connected networks found)."""
+    cfgs = (sorted(tree.rglob(".merged-running-config.xml"))
+            or sorted(tree.rglob("running-config.xml")))
     if not cfgs:
         return None
     try:
@@ -517,7 +531,7 @@ def _routing_view(tree: Path) -> dict | None:
             nh = e.findtext("nexthop/ip-address")
             try:
                 routes.append((ipaddress.ip_network(dest, strict=False),
-                               ipaddress.ip_address(nh) if nh else None))
+                               ipaddress.ip_address(nh) if nh else None, dest))
             except ValueError:
                 continue
     for ts in sorted((tree / "tmp" / "cli").glob("techsupport_*.txt")):
@@ -536,16 +550,45 @@ def _routing_view(tree: Path) -> dict | None:
                     nh_addr = ipaddress.ip_address(rm.group(2)) if rm.group(2) else None
                 except ValueError:
                     continue
-                routes.append((dest_net, nh_addr))
+                routes.append((dest_net, nh_addr, rm.group(1)))
+                # a "C"-flagged / connected row is a connected network too —
+                # the only source of them on a Panorama-managed box whose
+                # shipped configs carry no <interface> addresses at all
+                if nh_addr is None and re.search(r"\bA?\s*C\b|\bconnected\b", line):
+                    connected.append(dest_net)
+    # Containment over unique networks via ancestor sets (a real RIB has
+    # 6 903 rows: 24 M O(n^2) pairs took minutes; ancestors are n x #plens).
+    uniq: list = []
+    index: dict = {}
+    for d, _, raw in routes:
+        if raw not in index:
+            index[raw] = len(uniq)
+            uniq.append(d)
+    by_plen: dict[int, dict[int, int]] = {}
+    for i, d in enumerate(uniq):
+        by_plen.setdefault(d.prefixlen, {})[int(d.network_address)] = i
+    def ancestors(net) -> list[int]:
+        a = int(net.network_address)
+        out = []
+        for plen, table in by_plen.items():
+            if plen > net.prefixlen:
+                continue
+            j = table.get(a >> (32 - plen) << (32 - plen) if plen else 0)
+            if j is not None and uniq[j].prefixlen == plen:
+                out.append(j)
+        return sorted(out)
     return {
         "routes": len(routes),
         "connected": len(connected),
-        "prefixlens": [d.prefixlen for d, _ in routes] + [c.prefixlen for c in connected],
+        "prefixlens": [d.prefixlen for d, _, _ in routes] + [c.prefixlen for c in connected],
+        "preserved": ([_in_preserved(d) for d, _, _ in routes]
+                      + [_in_preserved(c) for c in connected]),
         "nexthop_in_connected": [nh is not None and any(nh in c for c in connected)
-                                 for _, nh in routes],
-        "containment": [(d1.subnet_of(d2), d2.subnet_of(d1)) for (d1, _), (d2, _)
-                        in itertools.combinations(routes, 2)],
-        "connected_in_route": [c.subnet_of(d) for c in connected for d, _ in routes],
+                                 for _, nh, _ in routes],
+        "route_of": [index[raw] for _, _, raw in routes],
+        "containment": [ancestors(d) for d in uniq],
+        "uniq_preserved": [_in_preserved(d) for d in uniq],
+        "connected_in_route": [c.subnet_of(d) for c in connected for d in uniq],
     }
 
 
@@ -560,19 +603,37 @@ def check_routing_coherence(orig_dir: Path, anon_dir: Path) -> dict:
         return out
     out.update(checked=True, routes=o["routes"], connected=o["connected"])
     mismatches: list[str] = []
-    if o["routes"] != a["routes"] or o["connected"] != a["connected"]:
+    public = 0
+    if (o["routes"] != a["routes"] or o["connected"] != a["connected"]
+            or o["route_of"] != a["route_of"]):
         mismatches.append(
             f"structure differs: {o['routes']} routes / {o['connected']} connected"
             f" vs {a['routes']} / {a['connected']}")
     else:
-        for key, label in (("prefixlens", "prefix length"),
-                           ("nexthop_in_connected", "nexthop-in-connected-subnet"),
-                           ("containment", "route-containment"),
-                           ("connected_in_route", "connected-network-in-route")):
-            bad = sum(1 for x, y in zip(o[key], a[key], strict=True) if x != y)
+        for key, label, keep in (
+                ("prefixlens", "prefix length", o["preserved"]),
+                ("nexthop_in_connected", "nexthop-in-connected-subnet",
+                 o["preserved"][:o["routes"]]),
+                ("containment", "route-containment", o["uniq_preserved"]),
+                ("connected_in_route", "connected-network-in-route", None)):
+            if keep is None:  # connected x uniq grid: private iff both are
+                keep = [cp and up for cp in o["preserved"][o["routes"]:]
+                        for up in o["uniq_preserved"]]
+            bad = pub = 0
+            for x, y, p in zip(o[key], a[key], keep, strict=True):
+                if x != y:
+                    if p:
+                        bad += 1
+                    else:
+                        pub += 1
+            public += pub
             if bad:
                 mismatches.append(f"{bad} {label} relation(s) hold on one side only")
     out["mismatches"] = mismatches
+    # Public aggregation (anything beyond the per-/24 grouping) is the
+    # documented trade of mapping public space into 240/4: counted, shown,
+    # but not an error — private structure is the guarantee.
+    out["public_divergences"] = public
     out["ok"] = not mismatches
     return out
 
