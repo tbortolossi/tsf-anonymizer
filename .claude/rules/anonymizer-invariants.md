@@ -25,6 +25,30 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   `re.sub(lambda)` over every token ran 11+ minutes on a real 155 MB TSF
   (1.2 GB of text). Boundaries: `(?<![\w.\-])name(?![\w\-])` — a name is
   never replaced inside a word or a hyphenated compound.
+- **A case-insensitive trie scans a lowered copy of the text, not the text
+  under `re.IGNORECASE`.** The flag costs 2.3x on a trie of thousands of keys
+  (2 096 ms against 917 ms + 48 ms of `text.lower()`, on a real 31 MB log),
+  and it is paid three times per file: the FQDN pass, and the compare's
+  `apply` *and* `find_leaks`. The keys of both case-insensitive tables
+  (`_fqdn_low`, `MappingIndex.forward_ci`) are lowercase, so the same trie
+  compiled *without* the flag finds the same spans in `text.lower()`, and the
+  output is cut from the *original* text at those offsets (`_sub_lowered`) —
+  the surrounding case is never touched. Sound only where the two agree
+  exactly, which is what `lowered_for_ci_scan` decides: ASCII text always;
+  otherwise anything holding U+0130 (its lowercase is *two* characters, which
+  would shift every span after it), U+0131 (`re` matches it against "i",
+  `lower()` leaves it alone) or U+212A (lowers to "k", moving a character
+  from outside the `[A-Za-z0-9]` boundary class to inside it) keeps the
+  IGNORECASE path, and so does anything a future Unicode release makes
+  longer in lowercase (the length check). 818 of 822 text files of a real
+  TSF are pure ASCII; none of the other four held a hazard. Both halves do
+  this, with the same fallback — a boundary the two sides do not share is a
+  future unexplained-or-leak report.
+- **Every point that grows `fqdn_map` recompiles the lowercase trie.**
+  `build_patterns` moves an object name embedding a FQDN into the FQDN table
+  *after* the first compile; `_compile_fqdn_patterns` is called at both sites
+  because a stale lowercase table rewrote the first label of such a name and
+  left the rest of it — the site name, on a real PA-1420 — in clear.
 - **`extract_archive` returns the archive's original `TarInfo`s and widens
   modes only on the disk copy.** Real TSFs ship files in mode 0000; the
   working copy needs u+rw, the output archive must keep 0000.

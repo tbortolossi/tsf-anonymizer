@@ -304,6 +304,70 @@ _EMAIL_RE = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# Case-insensitive matching without the case-insensitive engine.
+#
+# re.IGNORECASE costs 2.3x on a trie of thousands of keys: measured on a real
+# 31 MB log, the FQDN trie ran 2 096 ms with the flag and 917 ms without it
+# over `text.lower()`, which itself costs 48 ms. The keys of the two
+# case-insensitive tables (FQDNs, e-mails) are lowercase, so the same trie
+# compiled *without* the flag finds the same spans in a lowered copy — and the
+# replacement is then cut out of the *original* text at those spans.
+#
+# "The same spans" is exact, not approximate. Python's re under IGNORECASE
+# equates every ASCII letter with its case pair and, beyond ASCII, exactly
+# three codepoints matter here: U+0130 (its lower() is two characters, which
+# would shift every span after it), U+0131 (re matches it against "i", lower()
+# leaves it alone) and U+212A (lowers to "k", turning a character outside the
+# [A-Za-z0-9] boundary classes into one inside them). Text holding any of the
+# three keeps the IGNORECASE path. On a real TSF, 818 of 822 text files are
+# pure ASCII and cannot hold one; none of the other four did.
+# ---------------------------------------------------------------------------
+
+_CASE_HAZARDS = ("\u0130", "\u0131", "\u212a")
+
+
+def lowered_for_ci_scan(text: str) -> str | None:
+    """`text.lower()` when a case-*sensitive* scan over it finds exactly what a
+    case-insensitive scan over `text` would, else None (use the flag instead).
+
+    The length check is the belt to the hazard list's braces: any future
+    codepoint whose lowercase is longer than itself is refused on sight rather
+    than silently shifting every span after it.
+    """
+    if text.isascii():
+        return text.lower()
+    if any(h in text for h in _CASE_HAZARDS):
+        return None
+    low = text.lower()
+    return low if len(low) == len(text) else None
+
+
+def _sub_lowered(rx: re.Pattern, low: str, text: str,
+                 replacement: Callable[[re.Match, int, int], str | None]) -> tuple[str, int]:
+    """Scan `low`, cut the output from `text` at the same offsets.
+
+    `replacement` returns the string a hit becomes, or None to leave it as it
+    is. Returns the new text and the number of replacements — a hit that the
+    caller declines is not one.
+    """
+    out: list[str] = []
+    pos = hits = 0
+    for m in rx.finditer(low):
+        start, end = m.span()
+        fake = replacement(m, start, end)
+        if fake is None:
+            continue
+        out.append(text[pos:start])
+        out.append(fake)
+        pos = end
+        hits += 1
+    if not hits:
+        return text, 0
+    out.append(text[pos:])
+    return "".join(out), hits
+
+
 def _valid_ipv4_octets(ip: str) -> bool:
     return all(p.isdigit() and 0 <= int(p) <= 255 for p in ip.split("."))
 
@@ -351,6 +415,8 @@ class Anonymizer:
         self._obj_re: re.Pattern | None = None
         self._cs_table: dict[str, str] = {}   # objects + usernames behind _obj_re
         self._fqdn_re: re.Pattern | None = None
+        self._fqdn_low_re: re.Pattern | None = None   # same trie, no IGNORECASE
+        self._fqdn_low: dict[str, str] = {}           # fqdn_map, keys lowercased
         self._known_serial_re: re.Pattern | None = None
         self._user_trie_re: re.Pattern | None = None
         self._built_for: tuple = ()
@@ -641,6 +707,25 @@ class Anonymizer:
 
     # -- Build compiled patterns (call once after all prescan) --------------
 
+    def _compile_fqdn_patterns(self) -> None:
+        """(Re)compile the FQDN trie from `fqdn_map`.
+
+        One trie over lowercase keys, compiled twice: without the
+        IGNORECASE flag for the lowered-text scan (the fast path, see
+        `lowered_for_ci_scan`) and with it for the text that scan cannot
+        serve. The same pattern for both, so they cannot drift apart.
+
+        Called at every point `fqdn_map` changes inside `build_patterns` —
+        the object keys that move into the FQDN pass arrive after the first
+        compile, and a stale lowercase table would rewrite the first label
+        of such a name and leave the rest in clear.
+        """
+        self._fqdn_low = {k.lower(): v for k, v in self.fqdn_map.items()}
+        pattern = (r"(?<![A-Za-z0-9<])(?<!<\/)" + trie_regex(self._fqdn_low)
+                   + r"(?:(?![A-Za-z0-9=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)")
+        self._fqdn_re = re.compile(pattern, re.IGNORECASE)
+        self._fqdn_low_re = re.compile(pattern)
+
     def build_patterns(self) -> None:
         """Compile the replacement regexes. Call once after the prescan, and
         again after registering more names (from_mapping does)."""
@@ -663,13 +748,10 @@ class Anonymizer:
             # (the admin UI's DNS name, 1 379 nginx lines) and
             # `<hostname>-PBP-ALERTE` survived a real run under the object
             # rule "never inside a hyphenated compound".
-            self._fqdn_re = re.compile(
-                r"(?<![A-Za-z0-9<])(?<!<\/)" + trie_regex(self.fqdn_map)
-                + r"(?:(?![A-Za-z0-9=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)",
-                re.IGNORECASE,
-            )
+            self._compile_fqdn_patterns()
         else:
-            self._fqdn_re = None
+            self._fqdn_re = self._fqdn_low_re = None
+            self._fqdn_low = {}
         # An object whose name *embeds* a FQDN can never win from the object
         # pass: the FQDN pass rewrites that part first and the whole-name key
         # is dead — a mapping entry that never fires, and thousands of lines
@@ -691,11 +773,7 @@ class Anonymizer:
         if self._fqdn_re is not None:
             for name in [n for n in self.named_obj_map if self._fqdn_re.search(n)]:
                 self.fqdn_map[name.lower()] = self.named_obj_map.pop(name)
-            self._fqdn_re = re.compile(
-                r"(?<![A-Za-z0-9<])(?<!<\/)" + trie_regex(self.fqdn_map)
-                + r"(?:(?![A-Za-z0-9=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)",
-                re.IGNORECASE,
-            )
+            self._compile_fqdn_patterns()   # the trie just gained those keys
         # One case-sensitive trie for objects and usernames (objects win a
         # same-key collision, as in the compare's MappingIndex).
         self._cs_table = {**self.user_map, **self.named_obj_map}
@@ -825,17 +903,30 @@ class Anonymizer:
         if self._fqdn_re is None:
             return text
 
-        def replace_match(m: re.Match) -> str:
-            fake = self.fqdn_map.get(m.group(0).lower())
-            if fake is None:
-                return m.group(0)
+        def keep(start: int, end: int) -> bool:
             # "-" is a separator for hostnames (adm-<host>), with one
             # exception: `-key>` is the tail of an XML tag name (<equal-to>).
-            if m.start() and text[m.start() - 1] == "-" and text[m.end():m.end() + 1] == ">":
-                return m.group(0)
-            self._count("fqdns")
-            return fake
-        return self._fqdn_re.sub(replace_match, text)
+            return not (start and text[start - 1] == "-" and text[end:end + 1] == ">")
+
+        low = lowered_for_ci_scan(text)
+        if low is None:   # rare: see lowered_for_ci_scan
+            def replace_match(m: re.Match) -> str:
+                fake = self._fqdn_low.get(m.group(0).lower())
+                if fake is None or not keep(m.start(), m.end()):
+                    return m.group(0)
+                self._count("fqdns")
+                return fake
+            return self._fqdn_re.sub(replace_match, text)
+
+        def replacement(m: re.Match, start: int, end: int) -> str | None:
+            # `low` is lowercase, so the key needs no folding here.
+            fake = self._fqdn_low.get(m.group(0))
+            return fake if fake is not None and keep(start, end) else None
+
+        text, hits = _sub_lowered(self._fqdn_low_re, low, text, replacement)
+        if hits:
+            self.last_counts["fqdns"] = self.last_counts.get("fqdns", 0) + hits
+        return text
 
     def _replace_named_objects(self, text: str) -> str:
         """Named objects *and* usernames, one trie: the longest key wins at

@@ -44,8 +44,10 @@ from .core import (
     BINARY_EXTENSIONS,
     MAPPING_CATEGORIES,
     REDACTED_PAYLOAD,
+    _sub_lowered,
     extract_archive,
     is_binary_bytes,
+    lowered_for_ci_scan,
     mapped_member_name,
     trie_regex,
 )
@@ -138,11 +140,16 @@ class MappingIndex:
         # separator for them (a hostname cannot contain one; PAN-OS glues the
         # device name with underscores in techsupport_<name>_<date>.txt) —
         # mirrors the core's boundaries exactly.
-        self._ci_re = (re.compile(
-            r"(?<![A-Za-z0-9<])(?<!<\/)" + trie_regex(self.forward_ci)
-            + r"(?:(?![A-Za-z0-9=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)",
-            re.IGNORECASE)
-            if self.forward_ci else None)
+        # Compiled twice from one pattern: without IGNORECASE for the scan of
+        # a lowered copy of the text (the fast path — the flag costs 2.3x on a
+        # trie this size, and this is the most expensive of the three passes,
+        # run once by `apply` and once by `find_leaks`), with it for the text
+        # that scan cannot serve. `forward_ci` is keyed lowercase already.
+        ci_pattern = (r"(?<![A-Za-z0-9<])(?<!<\/)" + trie_regex(self.forward_ci)
+                      + r"(?:(?![A-Za-z0-9=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)"
+                      ) if self.forward_ci else ""
+        self._ci_re = re.compile(ci_pattern, re.IGNORECASE) if ci_pattern else None
+        self._ci_low_re = re.compile(ci_pattern) if ci_pattern else None
         # Minimum key length that the leak scan will bother with. Below 3 the
         # false-positive rate makes the report useless.
         self.min_leak_len = 3
@@ -171,12 +178,22 @@ class MappingIndex:
         if self._ci_re is not None:
             src = text
 
-            def ci(m: re.Match) -> str:
+            def keep(start: int, end: int) -> bool:
                 # mirrors the core: `-key>` is an XML tag name, not a hostname
-                if m.start() and src[m.start() - 1] == "-" and src[m.end():m.end() + 1] == ">":
-                    return m.group(0)
-                return self.forward_ci.get(m.group(0).lower(), m.group(0))
-            text = self._ci_re.sub(ci, text)
+                return not (start and src[start - 1] == "-" and src[end:end + 1] == ">")
+
+            low = lowered_for_ci_scan(text)
+            if low is None:   # rare: see lowered_for_ci_scan
+                def ci(m: re.Match) -> str:
+                    if not keep(m.start(), m.end()):
+                        return m.group(0)
+                    return self.forward_ci.get(m.group(0).lower(), m.group(0))
+                text = self._ci_re.sub(ci, text)
+            else:
+                text = _sub_lowered(
+                    self._ci_low_re, low, text,
+                    # `low` is lowercase, so the key needs no folding here.
+                    lambda m, s, e: self.forward_ci.get(m.group(0)) if keep(s, e) else None)[0]
         if self._cs_re is not None:
             text = self._cs_re.sub(lambda m: self.forward.get(m.group(0), m.group(0)), text)
         if self._num_re is not None:
@@ -194,8 +211,12 @@ class MappingIndex:
                 if len(k) >= self.min_leak_len and k not in self._collision_keys:
                     hits[k] = hits.get(k, 0) + 1
         if self._ci_re is not None:
-            for m in self._ci_re.finditer(text):
-                k = m.group(0).lower()
+            low = lowered_for_ci_scan(text)
+            # The keys are lowercase, so a hit found in the lowered copy needs
+            # no folding; the IGNORECASE fallback still does.
+            for m in (self._ci_low_re.finditer(low) if low is not None
+                      else self._ci_re.finditer(text)):
+                k = m.group(0) if low is not None else m.group(0).lower()
                 if len(k) >= self.min_leak_len and k not in self._collision_keys:
                     hits[k] = hits.get(k, 0) + 1
         return hits

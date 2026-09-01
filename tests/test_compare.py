@@ -411,6 +411,33 @@ class TestBoundaryParity:
         assert idx.find_leaks("value connect-method here") == {"connect-method": 1}
 
 
+class TestCaseInsensitiveScanOverLoweredText:
+    """The compare's case-insensitive trie scans a lowered copy of the text,
+    like the core's. Both halves keep the IGNORECASE fallback for the text
+    that scan cannot serve — the boundaries must be identical either way."""
+
+    def test_a_key_is_applied_and_not_a_leak_whatever_its_case(self):
+        idx = MappingIndex({"fqdns": {"vpn.home-lab.example": "host001.anon.internal"}})
+        assert idx.apply("VPN.Home-Lab.Example x") == "host001.anon.internal x"
+        assert idx.find_leaks("seen at VPN.HOME-LAB.EXAMPLE") == {"vpn.home-lab.example": 1}
+        assert idx.find_leaks("seen at host001.anon.internal") == {}
+
+    @pytest.mark.parametrize("hazard", ["\u0130", "\u0131", "\u212a"])
+    def test_the_case_hazards_fall_back_to_the_flag_in_both_halves(self, hazard):
+        from tsf_anonymizer.core import lowered_for_ci_scan
+        idx = MappingIndex({"fqdns": {"vpn.home-lab.example": "host001.anon.internal"}})
+        text = f"{hazard} VPN.Home-Lab.Example"
+        assert lowered_for_ci_scan(text) is None
+        assert idx.apply(text) == f"{hazard} host001.anon.internal"
+        assert idx.find_leaks(text) == {"vpn.home-lab.example": 1}
+
+    def test_the_xml_tag_tail_exception_survives_the_lowered_scan(self):
+        """`-key>` is the tail of an XML tag name, not a hyphen-separated
+        hostname — the one span the ci pass declines, in both halves."""
+        idx = MappingIndex({"fqdns": {"to": "host001.anon.internal"}})
+        assert idx.apply("<equal-to>1</equal-to>") == "<equal-to>1</equal-to>"
+
+
 def test_fqdn_after_a_dot_is_explained():
     idx = MappingIndex({"fqdns": {"home-lab.example": "host001.anon.internal"}})
     assert idx.apply("*.home-lab.example sub.home-lab.example") == "*.host001.anon.internal sub.host001.anon.internal"
