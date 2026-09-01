@@ -23,6 +23,7 @@ anon.internal           # the pseudonym domain the anonymizer hands out
 001901000123            # mock serial
 001901000124            # mock HA peer serial
 001901000456            # test serial
+001901000789            # test serial the prescan never registers
 8.8.8.8                 # public resolver quoted as an example
 
 # --- twelve-digit strings that are NOT serials (documented in core.py)

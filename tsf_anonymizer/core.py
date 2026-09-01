@@ -778,6 +778,12 @@ class Anonymizer:
 
     # -- Full text replacement ----------------------------------------------
 
+    def _cannot_match(self, rx: re.Pattern, text: str) -> bool:
+        """True when `rx` provably finds nothing in `text` — see
+        `_REQUIRED_LITERAL`. A pattern that claims no literal never skips."""
+        literal = _REQUIRED_LITERAL.get(rx)
+        return literal is not None and literal not in text
+
     def _count(self, key: str) -> None:
         self.last_counts[key] = self.last_counts.get(key, 0) + 1
 
@@ -803,7 +809,7 @@ class Anonymizer:
         (direct API use, no prescan), it is how usernames get discovered at
         all — and a newly discovered one is replaced everywhere at the next
         rebuild (`_built_for`)."""
-        if self.frozen:
+        if self.frozen or self._cannot_match(self._user_re, text):
             return text
 
         def replace_match(m: re.Match) -> str:
@@ -816,6 +822,9 @@ class Anonymizer:
         return self._user_re.sub(replace_match, text)
 
     def _replace_emails(self, text: str) -> str:
+        if self._cannot_match(self._email_re, text):
+            return text
+
         def replace_match(m: re.Match) -> str:
             self._count("emails")
             return self.anon_email(m.group(1), m.group(2))
@@ -870,6 +879,25 @@ class Anonymizer:
 
         if self._known_serial_re is not None:
             text = self._known_serial_re.sub(replace_known, text)
+        if self.frozen:
+            # The fallback is discovery, and frozen means discovery is over:
+            # `prescan_text_identities` ran this very regex over the original
+            # of every text file and registered what it found, so the known
+            # trie above — whose boundaries are the same, minus the busybox
+            # date exclusion — has already replaced every serial this pass
+            # could rewrite. What is left for it to match is a token no pass
+            # may allocate for, and `anon_serial` would hand back unchanged.
+            #
+            # It cannot even find a *new* one: a serial is 12 or 15 digits,
+            # and no earlier pass can leave a replacement glued to a digit —
+            # e-mails match on \b, FQDNs refuse an alphanumeric on either
+            # side, objects refuse a word character, and the IP regex refuses
+            # a trailing digit. So the digits of the rewritten text are the
+            # digits of the original, in the same runs.
+            #
+            # 1 212 ms per 31 MB of real log, for nothing. Same reasoning as
+            # the phrasing pass above, which the same prescan retired.
+            return text
         return self._serial_re.sub(replace_match, text)
 
     def anonymize_text(self, text: str) -> str:
@@ -1553,6 +1581,30 @@ _HOSTNAME_PHRASE_RE = re.compile(
 )
 
 
+# A pattern whose every *match* contains a literal cannot match a text that
+# does not hold that literal, and `"hostname" in text` is a C-level scan: 12 ms
+# against 359 ms for the regex itself on a real 31 MB log. It pays because a
+# TSF is mostly not about people — on one real archive the literal is absent
+# from 72 % of the text for `hostname`, 50 % for `@` and 38 % for `user`, and
+# on another (4.2 GB of text) from 70 %, 42 % and 25 %.
+#
+# The property each entry claims is "the literal is part of every match", not
+# merely "the pattern mentions it" — that is what makes skipping the scan
+# sound, and what `TestRequiredLiterals` asserts. None of the three patterns
+# is case-insensitive, so the literal is matched exactly as written.
+_REQUIRED_LITERAL = {
+    _USER_PHRASE_RE: "user",
+    _EMAIL_RE: "@",
+    _HOSTNAME_PHRASE_RE: "hostname",
+}
+
+
+def _scan(rx: re.Pattern, text: str):
+    """`rx.finditer(text)`, skipped when the text cannot hold a match."""
+    literal = _REQUIRED_LITERAL[rx]
+    return rx.finditer(text) if literal in text else ()
+
+
 def _looks_like_device_name(value: str) -> bool:
     return (any(c.isdigit() or c in ".-" for c in value)
             and not _FILE_SUFFIX_RE.search(value) and not _IP_LIKE_RE.match(value))
@@ -1587,11 +1639,11 @@ def _detect_in_file(path) -> list[tuple]:
         return []
     text = _decode(raw)
     found: dict[tuple, None] = {}
-    for m in _USER_PHRASE_RE.finditer(text):
+    for m in _scan(_USER_PHRASE_RE, text):
         found.setdefault(("user", m.group(1)))
-    for m in _EMAIL_RE.finditer(text):
+    for m in _scan(_EMAIL_RE, text):
         found.setdefault(("email", m.group(1), m.group(2)))
-    for m in _HOSTNAME_PHRASE_RE.finditer(text):
+    for m in _scan(_HOSTNAME_PHRASE_RE, text):
         if _looks_like_device_name(m.group(1)):
             found.setdefault(("host", m.group(1)))
     for m in _IP_RE.finditer(text):

@@ -8,6 +8,16 @@ change what is mapped, a patch bump only fixes).
 ## [Unreleased]
 
 ### Changed
+- Passes that cannot match are no longer run. The username, e-mail and
+  hostname patterns are preceded by a check for the literal every one of
+  their matches contains, and the frozen rewrite skips the serial *fallback*
+  regex, whose work the text prescan has already done (the known-serial trie
+  still runs, and an unfrozen anonymizer still discovers serials with it).
+  Measured on a real archive: the literal is absent from 72 % of the text for
+  `hostname`, 50 % for `@` and 38 % for `user`, and the serial fallback cost
+  1 212 ms per 31 MB of log for nothing. Output unchanged — byte-identical
+  anonymized trees on the real corpus, and identical detection findings file
+  by file.
 - IP pseudonyms now preserve prefix structure (minor: changes what fakes
   look like). Private addresses stay inside their own RFC 1918/CGNAT class
   with the host octet kept (`10.1.2.3` → `10.x.y.3`), driven by a keyed PRF

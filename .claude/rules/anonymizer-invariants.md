@@ -25,6 +25,29 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   `re.sub(lambda)` over every token ran 11+ minutes on a real 155 MB TSF
   (1.2 GB of text). Boundaries: `(?<![\w.\-])name(?![\w\-])` — a name is
   never replaced inside a word or a hyphenated compound.
+- **A pass that cannot match is not run.** The literal every match of
+  `_USER_PHRASE_RE`, `_EMAIL_RE` and `_HOSTNAME_PHRASE_RE` contains (`user`,
+  `@`, `hostname` — none of the three is case-insensitive) is checked with a
+  C-level `in` first: 12 ms against 359 ms for the regex itself on a real
+  31 MB log, and a TSF is mostly not about people — on one real archive the
+  literal is absent from 72 % of the text for `hostname`, 50 % for `@` and
+  38 % for `user`. `_REQUIRED_LITERAL` states the property that makes this
+  sound — the literal is part of every *match*, not merely mentioned in the
+  pattern — and a test asserts it. A pattern that gains an alternative
+  without its literal must leave the table.
+- **The serial fallback is discovery, and a frozen rewrite has none left.**
+  `prescan_text_identities` runs `_SERIAL_FALLBACK_RE` over the original of
+  every text file, so by rewrite time the known-serial trie (same boundaries,
+  minus the busybox-date exclusion) already replaces every serial the
+  fallback could; what is left for it to match is a token `anon_serial` would
+  hand back unchanged. It cannot find a new one either: no earlier pass can
+  leave a replacement glued to a digit (e-mails match on `\b`, FQDNs refuse
+  an alphanumeric on either side, objects refuse a word character, the IP
+  regex refuses a trailing digit), so the digit runs of the rewritten text
+  are the digit runs of the original. 1 212 ms per 31 MB of real log for
+  nothing — the same reasoning that retired the username phrasing pass.
+  Unfrozen (direct API use, no prescan) the fallback is still how a serial is
+  discovered at all.
 - **`extract_archive` returns the archive's original `TarInfo`s and widens
   modes only on the disk copy.** Real TSFs ship files in mode 0000; the
   working copy needs u+rw, the output archive must keep 0000.
