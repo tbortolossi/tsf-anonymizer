@@ -42,9 +42,16 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   context intact, so the vendor-catalog guardrails above still apply; a bare
   regex sweep over `<entry name=…>` would have re-registered the catalog.
 - **A fake value is never an input to a later pass.** `Anonymizer._fakes`
-  holds every pseudonym handed out; `anon_user`, `anon_ip`, `anon_serial` and
+  holds every pseudonym handed out; `anon_user`, `anon_serial` and
   `register_named_object` return a fake unchanged. Without it, `user 'Zone-A'`
   became `OBJ-0002` then `user001`, and config and logs no longer agreed.
+  **Exception, learned the hard way: `anon_ip` maps such an original
+  anyway.** With same-class fakes a real 10.x equal to an already-handed
+  pseudonym is a *customer address*, and skipping it left it in clear and
+  outside the mapping — invisible to the leak scan (which only knows the
+  mapping), caught on a real TSF by the routing-coherence check. The tree +
+  /24 probe guarantee the new pseudonym repeats nothing; the string
+  ambiguity is exactly what `MappingIndex.collisions` reports.
 - **Fakes are shaped to not collide with originals**: serials start with 9,
   fake IPs skip any address already seen as an original. When a collision
   still happens (the customer uses 100.64/10), `MappingIndex.collisions`
@@ -73,6 +80,14 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   they are only excluded from the leak scan, where the same string is
   somebody's pseudonym. Dropping them from `forward`, the first design,
   made every occurrence of such a key an "unexplained" line.
+- **The routing check trusts private relations only, and reads the right
+  config.** Public space keeps /24 grouping, not aggregation — a public /16
+  ⊃ /24 relation is a counted *divergence*, never an error, or every real
+  compare is red with the documented trade. `.merged-running-config.xml`
+  wins over `running-config.xml` (a Panorama-managed PA-5410 ships an empty
+  `<interface>` section — 0 connected networks found), and C-flagged RIB
+  rows are connected networks too. Containment is compared as per-network
+  ancestor sets, not O(n²) pairs — a real RIB has 6 903 rows.
 - **The compare checks routing coherence structurally.** `_routing_view`
   re-derives from each tree alone (config layer3 networks, static routes,
   both RIB formats) the relations the prefix tree exists to preserve, and

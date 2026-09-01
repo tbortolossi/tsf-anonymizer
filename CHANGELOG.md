@@ -22,6 +22,18 @@ change what is mapped, a patch bump only fixes).
   are still excluded from the leak scan and reported as collisions).
 
 ### Fixed
+- An original address equal to an already-handed-out pseudonym is now
+  mapped instead of skipped. With same-class fakes the old skip left a real
+  private address in clear and outside the mapping — invisible to the leak
+  scan, caught on a real TSF by the new routing-coherence check. The
+  compare reports the string ambiguity as a *collision*, as before.
+- The routing-coherence check scopes its verdict to the private relations
+  prefix preservation guarantees; divergences that involve public space
+  (aggregation beyond the per-/24 grouping) are counted and shown, not
+  errors. It prefers `.merged-running-config.xml` (Panorama-managed boxes
+  ship an empty `<interface>` section in `running-config.xml`), takes
+  connected networks from the RIB's C-flagged rows too, and compares
+  containment as ancestor sets instead of O(n²) pairs (6 903-row real RIB).
 - The fake-IP generators are injective again: the private one merged `.0`/`.1`
   host octets every 256th allocation and the public one cycled over the 762
   RFC 5737 addresses — on one real archive 54 197 of 84 971 distinct IPs

@@ -98,13 +98,19 @@ separately from leaks.
 ## Routing coherence
 
 `_routing_view` re-derives, from one tree alone, the connected networks
-(config layer3 IPs) and the routes (config static routes + both RIB
-formats of the techsupport txt); `check_routing_coherence` requires every
-structural relation — nexthop ∈ connected subnet, route ⊆ route,
-connected ⊆ route, prefix lengths — to hold on the anonymized side iff it
-holds on the original. No mapping involved: this is the check that fails
-if prefix preservation ever regresses, which per-line explanation cannot
-see. Summary key `routing`, one line in the CLI output, a KPI in the UI.
+(config layer3 IPs — `.merged-running-config.xml` preferred on managed
+devices — plus the RIB's C-flagged rows) and the routes (config static
+routes + both RIB formats of the techsupport txt);
+`check_routing_coherence` requires every **private** structural relation —
+nexthop ∈ connected subnet, route ⊆ route (compared as ancestor sets, not
+O(n²) pairs), connected ⊆ route, prefix lengths — to hold on the
+anonymized side iff it holds on the original; public-involved divergences
+are counted separately (`public_divergences`), the documented trade of the
+per-/24 public grouping. No mapping involved: this is the check that
+fails if prefix preservation ever regresses, which per-line explanation
+cannot see — on its first real run it caught a genuine leak (an original
+equal to a handed-out pseudonym, skipped in clear). Summary key `routing`,
+one line in the CLI output, a KPI in the UI.
 
 ## The mapping sidecar
 
