@@ -156,6 +156,11 @@ class Job:
         return asdict(self)
 
 
+def _is_pinned(param: int | None, env: str) -> bool:
+    """Did the operator ask for a specific per-job process count?"""
+    return param is not None or bool(int(os.getenv(env) or 0))
+
+
 def _worker_counts(workers: int | None, compare_workers: int | None,
                    anon_workers: int | None = None) -> tuple[int, int, int]:
     """How many archives at a time, and how many processes each one's heavy
@@ -168,6 +173,11 @@ def _worker_counts(workers: int | None, compare_workers: int | None,
     unless set explicitly. The anonymize and compare phases of one job never
     overlap, so they share the same per-job process budget by default
     (`TSF_ANON_WORKERS` overrides).
+
+    These are *floors*, not ceilings: what they describe is a machine whose
+    every archive slot is busy. `JobStore._phase_workers` raises them to the
+    idle machine's fair share when fewer archives can actually run — see
+    there.
     """
     cpu = os.cpu_count() or 4
     workers = workers if workers is not None else int(os.getenv("TSF_WORKERS") or 0)
@@ -192,13 +202,19 @@ class JobStore:
         self._lock = threading.Lock()
         self.workers, self.compare_workers, self.anon_workers = _worker_counts(
             workers, compare_workers, anon_workers)
+        self.cpu = os.cpu_count() or 4
+        # An explicit per-job count is an operator pinning the load: honour it
+        # exactly. Only the derived defaults adapt to how busy the machine is.
+        self._adaptive = not (_is_pinned(compare_workers, "TSF_COMPARE_WORKERS")
+                              or _is_pinned(anon_workers, "TSF_ANON_WORKERS"))
         self._executor = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="tsf-job")
         # Jobs waiting for a free worker *or* for the job they seed from.
         self._pending: list[Job] = []
         self._running: set[str] = set()
         self._load()
-        logger.info("job store: %d worker(s), %d anonymize + %d compare process(es) each",
-                    self.workers, self.anon_workers, self.compare_workers)
+        logger.info("job store: %d worker(s), %d anonymize + %d compare process(es) each"
+                    "%s", self.workers, self.anon_workers, self.compare_workers,
+                    f", up to {self.cpu} when fewer archives run" if self._adaptive else "")
 
     # -- persistence --------------------------------------------------------
 
@@ -336,6 +352,32 @@ class JobStore:
             prev_id = prev.seed_from
         return True
 
+    def _phase_workers(self, floor: int) -> int:
+        """Processes for one heavy phase of one job, sized at the moment the
+        phase starts.
+
+        `TSF_WORKERS` × the per-job count is the machine when every archive
+        slot is busy — but a lone upload then used a quarter of the cores and
+        left the rest idle, and a batch of one firewall is a *chain*: its jobs
+        run one after the other, so the count that shares the CPU between four
+        of them is three quarters wasted for the whole batch. The share is
+        taken over what can actually run right now — jobs running, plus queued
+        jobs whose chain is clear — never below the configured floor (the
+        adaptive path can only add cores, never remove them) and never above
+        the core count.
+
+        A job that starts while another is mid-phase does oversubscribe the
+        CPU until that phase ends; that costs some scheduling, where the
+        alternative costs idle cores on every single-archive run. An explicit
+        `TSF_ANON_WORKERS` / `TSF_COMPARE_WORKERS` turns this off.
+        """
+        if not self._adaptive:
+            return floor
+        with self._lock:
+            active = len(self._running) + sum(1 for j in self._pending if self._chain_clear(j))
+        slots = max(1, min(self.workers, active))
+        return max(floor, min(self.cpu, self.cpu // slots))
+
     def _pump(self) -> None:
         """Start every pending job whose chain is clear, up to the worker count.
 
@@ -465,10 +507,12 @@ class JobStore:
         output_tgz = d / "output" / default_output_path(input_tgz).name
         progress = self._progress_fn(job)
 
+        anon_workers = self._phase_workers(self.anon_workers)
+        logger.info("job %s: anonymizing with %d process(es)", job.id, anon_workers)
         report, mapping = anonymize_tsf(
             input_tgz, output_tgz, seed_mapping=seed,
             work_root=d / "work", keep_trees=True, progress=progress,
-            workers=self.anon_workers, redact_binaries=job.redact_binaries,
+            workers=anon_workers, redact_binaries=job.redact_binaries,
         )
         job.anonymize_summary = {k: v for k, v in report.to_dict().items() if k != "files"}
         (d / "output" / "anonymize-report.json").write_text(
@@ -481,8 +525,10 @@ class JobStore:
         job.trees_kept = True
         self._save(job)
 
+        cmp_workers = self._phase_workers(self.compare_workers)
+        logger.info("job %s: comparing with %d process(es)", job.id, cmp_workers)
         cmp = compare_trees(d / "work" / "orig", d / "work" / "anon", mapping, progress,
-                            workers=self.compare_workers)
+                            workers=cmp_workers)
         cmp.archive = compare_members(input_tgz, output_tgz, progress, mapping)
         progress("finished", 1, 1, "")  # closes out the last phase's duration
         (d / "output" / "integrity-report.json").write_text(
@@ -518,9 +564,11 @@ class JobStore:
         mapping_path = d / "input" / "mapping.json"
         mapping = json.loads(mapping_path.read_text(encoding="utf-8")) if mapping_path.is_file() else {}
         progress = self._progress_fn(job)
+        cmp_workers = self._phase_workers(self.compare_workers)
+        logger.info("job %s: comparing with %d process(es)", job.id, cmp_workers)
         cmp = compare_archives(orig, anon, mapping, work_root=d / "work",
                                keep_trees=True, progress=progress,
-                               workers=self.compare_workers)
+                               workers=cmp_workers)
         progress("finished", 1, 1, "")  # closes out the last phase's duration
         (d / "output" / "integrity-report.json").write_text(
             json.dumps(cmp.to_dict(), indent=2), encoding="utf-8")

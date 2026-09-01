@@ -217,9 +217,16 @@ A batch of unrelated firewalls fans out; archives chained to the same firewall
 still run in order, because a job may not start before the one it seeds from
 has finished.
 
+The per-job counts are **floors**: they describe a machine whose every
+archive slot is busy, and a phase that starts while fewer archives can run
+takes the idle share instead — up to every core for a lone upload, or for a
+batch of one firewall, whose jobs are chained and run one at a time anyway.
+The job log says what each phase settled on.
+
 All three are empty by default in `docker-compose.yml`, which means "decide
 from the core count"; set them to pin the load, e.g. `TSF_WORKERS=2` on a
-small host. `GET /api/health` reports what the service settled on.
+small host — an explicit per-job count also turns the adaptation off.
+`GET /api/health` reports what the service settled on.
 
 If a job was interrupted — a restart in the middle of a batch — **run again**
 on its page requeues it from the upload already on disk

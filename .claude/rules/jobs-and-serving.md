@@ -70,6 +70,18 @@ here with its test and a CHANGELOG line, never only fixed.
   threads only *orchestrate*: CPU work on threads serialises on the GIL (a
   4-job batch ran on one core, and one job's regex pass starved another's
   extract into looking hung), so every heavy phase runs in worker processes.
+- **The per-job process count is a floor, not a ceiling.** `TSF_WORKERS` x the
+  per-job count is the machine only when every archive slot is busy: a lone
+  upload ran its rewrite on a quarter of the cores with the rest idle, and a
+  batch of *one firewall* is a chain — its jobs run one after the other, so
+  splitting the CPU four ways wasted three quarters of it for the whole batch.
+  `_phase_workers` sizes each heavy phase when it starts, over what can
+  actually run right now (running jobs plus queued jobs whose chain is clear),
+  never below the configured floor and never above the core count. A job that
+  starts while another is mid-phase oversubscribes the CPU until that phase
+  ends — scheduling cost against idle cores on every single-archive run. An
+  explicit `TSF_ANON_WORKERS` / `TSF_COMPARE_WORKERS` pins the load and turns
+  the adaptation off; the count each phase settled on is in the job log.
 - **Every run keeps its own log.** `_capture_log` tees the package logger into
   `output/job.log` for the duration of one job (they run one at a time, so one
   handler is filtered to that job's own thread, so concurrent jobs do not bleed
