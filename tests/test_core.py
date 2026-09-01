@@ -1056,6 +1056,96 @@ class TestBinaryHeuristic:
         assert not is_binary_file(p)
 
 
+class TestRequiredLiterals:
+    """Detection skips a regex whose literal the text does not hold. What
+    makes that sound is a stronger property than "the pattern mentions it":
+    the literal is part of *every* match."""
+
+    @pytest.mark.parametrize("text", [
+        "authenticated for user 'jmartin'",
+        "for user 'jmartin' from 10.0.0.1",
+        "non-admin user 'jmartin' logged in",
+        "username: 'jmartin'",
+        "user thru radius 'jmartin'",
+        "Failed authentication for user 'jmartin'.  Reason: Invalid",
+    ])
+    def test_every_user_phrase_match_contains_the_literal(self, text):
+        from tsf_anonymizer.core import _REQUIRED_LITERAL, _USER_PHRASE_RE
+        matches = list(_USER_PHRASE_RE.finditer(text))
+        assert matches
+        assert all(_REQUIRED_LITERAL[_USER_PHRASE_RE] in m.group(0) for m in matches)
+
+    @pytest.mark.parametrize("text", [
+        "contact bob.martin@home-lab.example please",
+        "<contact>ops@home-lab.example</contact>",
+    ])
+    def test_every_email_match_contains_the_literal(self, text):
+        from tsf_anonymizer.core import _EMAIL_RE, _REQUIRED_LITERAL
+        matches = list(_EMAIL_RE.finditer(text))
+        assert matches
+        assert all(_REQUIRED_LITERAL[_EMAIL_RE] in m.group(0) for m in matches)
+
+    @pytest.mark.parametrize("text", [
+        "hostname fw-edge-01, interface ethernet1/8.100",
+        'hostname="fw-edge-01"',
+        "hostname: fw-edge-01",
+    ])
+    def test_every_hostname_phrase_match_contains_the_literal(self, text):
+        from tsf_anonymizer.core import _HOSTNAME_PHRASE_RE, _REQUIRED_LITERAL
+        matches = list(_HOSTNAME_PHRASE_RE.finditer(text))
+        assert matches
+        assert all(_REQUIRED_LITERAL[_HOSTNAME_PHRASE_RE] in m.group(0) for m in matches)
+
+    def test_the_skip_returns_what_the_scan_would(self, tmp_path):
+        """`_scan` on a text without the literal must equal the full scan."""
+        from tsf_anonymizer.core import _REQUIRED_LITERAL, _detect_in_file
+        p = tmp_path / "counters.log"
+        p.write_text("total packets 12345 at 10.0.0.1 on ethernet1/1\n" * 20)
+        text = p.read_text()
+        assert not any(lit in text for lit in _REQUIRED_LITERAL.values())
+        found = _detect_in_file(p)
+        # the IP and the serial-shaped counter are still found; nothing else
+        assert ("ip", "10.0.0.1") in found
+        assert not [f for f in found if f[0] in ("user", "email", "host")]
+
+    def test_a_username_is_still_discovered_when_the_literal_is_there(self, tmp_path):
+        from tsf_anonymizer.core import _detect_in_file
+        p = tmp_path / "auth.log"
+        p.write_text("Feb  3 10:00:01 authentication failed for user 'jmartin'\n")
+        assert ("user", "jmartin") in _detect_in_file(p)
+
+
+class TestFrozenSerialFallback:
+    """Frozen means discovery is over: the fallback regex is the discovery
+    half of the serial pass, and re-running it at rewrite time costs 1.2 s per
+    31 MB of real log to find what the known-serial trie has already
+    replaced."""
+
+    def test_a_known_serial_is_still_replaced_when_frozen(self, anon):
+        fake = anon.anon_serial("001901000456")
+        anon.build_patterns()
+        anon.frozen = True
+        assert anon.anonymize_text("serial 001901000456 here") == f"serial {fake} here"
+
+    def test_an_undiscovered_serial_is_left_alone_either_way(self, anon):
+        """Frozen, the fallback could only hand the token back unchanged —
+        which is exactly what skipping it does. The output is the same; what
+        the frozen run no longer records is a miss it could not act on."""
+        anon.anon_serial("001901000456")   # something in the map
+        anon.build_patterns()
+        anon.frozen = True
+        out = anon.anonymize_text("serial 001901000789 was never seen")
+        assert out == "serial 001901000789 was never seen"
+
+    def test_the_unfrozen_api_still_discovers(self, anon):
+        """Direct API use with no prescan: the fallback is how a serial is
+        found at all, and that path is untouched."""
+        anon.build_patterns()
+        out = anon.anonymize_text("serial 001901000456 here")
+        assert out != "serial 001901000456 here"
+        assert anon.serial_map["001901000456"] in out
+
+
 def test_brute_force_word_port_is_not_a_username(anon):
     line = "failed authentication for user 'port'.  Reason: Invalid username/password."
     assert anon.anonymize_text(line) == line
