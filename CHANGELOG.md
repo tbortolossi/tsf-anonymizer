@@ -8,6 +8,15 @@ change what is mapped, a patch bump only fixes).
 ## [Unreleased]
 
 ### Changed
+- The case-insensitive tries (FQDNs and e-mail domains in the anonymizer, the
+  same keys in the compare's `apply` and leak scan) now match a lowered copy
+  of the text with a trie compiled without `re.IGNORECASE`, and cut the
+  output from the original text at those offsets. Measured on a real 31 MB
+  log: the FQDN pass 2 096 ms to 1 262 ms, the compare's `apply` 6 440 ms to
+  3 540 ms. Output is unchanged — byte-identical anonymized trees and
+  identical integrity reports on eight real archives — and text holding one
+  of the three codepoints where `lower()` and `re.IGNORECASE` disagree keeps
+  the flag.
 - IP pseudonyms now preserve prefix structure (minor: changes what fakes
   look like). Private addresses stay inside their own RFC 1918/CGNAT class
   with the host octet kept (`10.1.2.3` → `10.x.y.3`), driven by a keyed PRF

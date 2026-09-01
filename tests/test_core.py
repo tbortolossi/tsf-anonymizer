@@ -1056,6 +1056,64 @@ class TestBinaryHeuristic:
         assert not is_binary_file(p)
 
 
+class TestCaseInsensitiveScanOverLoweredText:
+    """The FQDN pass matches a lowered copy of the text with a trie compiled
+    *without* IGNORECASE (2.3x cheaper). That is only sound while the two
+    find the same spans — see `lowered_for_ci_scan`."""
+
+    def test_a_fqdn_is_rewritten_whatever_its_case(self, anon):
+        anon.register_fqdn("vpn.home-lab.example")
+        anon.build_patterns()
+        out = anon.anonymize_text("VPN.Home-Lab.Example vpn.HOME-LAB.example vpn.home-lab.example")
+        fake = anon.fqdn_map["vpn.home-lab.example"]
+        assert out == f"{fake} {fake} {fake}"
+        assert anon.last_counts["fqdns"] == 3
+
+    def test_the_case_of_the_surrounding_text_is_untouched(self, anon):
+        anon.register_fqdn("vpn.home-lab.example")
+        anon.build_patterns()
+        fake = anon.fqdn_map["vpn.home-lab.example"]
+        assert anon.anonymize_text("GET /Portal FROM VPN.HOME-LAB.EXAMPLE OK") == \
+            f"GET /Portal FROM {fake} OK"
+
+    @pytest.mark.parametrize("hazard", ["\u0130", "\u0131", "\u212a"])
+    def test_the_three_case_hazards_take_the_ignorecase_path(self, anon, hazard):
+        """Text these characters appear in cannot be scanned lowered: their
+        lowercase is longer (U+0130) or breaks the equivalence re.IGNORECASE
+        applies (U+0131 matches "i", U+212A lowers into the boundary class).
+        The pass must still replace, through the flag."""
+        from tsf_anonymizer.core import lowered_for_ci_scan
+        anon.register_fqdn("vpn.home-lab.example")
+        anon.build_patterns()
+        fake = anon.fqdn_map["vpn.home-lab.example"]
+        text = f"user {hazard} reached VPN.Home-Lab.Example"
+        assert lowered_for_ci_scan(text) is None
+        assert anon.anonymize_text(text) == f"user {hazard} reached {fake}"
+
+    def test_the_guard_accepts_ordinary_accented_text(self):
+        from tsf_anonymizer.core import lowered_for_ci_scan
+        text = "Zone São Paulo — ÉTÉ, Ökonomie, ЖУРНАЛ"
+        low = lowered_for_ci_scan(text)
+        assert low is not None and len(low) == len(text) and low == text.lower()
+
+    def test_an_uppercase_key_in_a_seeded_mapping_still_matches(self):
+        """`from_mapping` takes the sidecar as it finds it; a hand-edited or
+        older mapping may carry an uppercase FQDN key, and the lowered scan
+        would never see it if the trie kept that spelling."""
+        anon = Anonymizer.from_mapping({"fqdns": {"VPN.Home-Lab.Example": "host001.anon.internal"}})
+        assert anon.anonymize_text("ping vpn.home-lab.example") == "ping host001.anon.internal"
+        assert anon.anonymize_text("ping VPN.HOME-LAB.EXAMPLE") == "ping host001.anon.internal"
+
+    def test_a_name_moved_into_the_fqdn_pass_is_rewritten_whole(self, anon):
+        """`build_patterns` moves an object name embedding a FQDN into the
+        FQDN table *after* the first compile; the lowercase trie has to be
+        rebuilt with it, or only the first label is replaced."""
+        anon.register_fqdn("enloe")
+        fake = anon.register_named_object("Enloe Domain controllers", "srv-prof")
+        anon.build_patterns()
+        assert anon.anonymize_text("profile 'ENLOE DOMAIN CONTROLLERS'") == f"profile '{fake}'"
+
+
 def test_brute_force_word_port_is_not_a_username(anon):
     line = "failed authentication for user 'port'.  Reason: Invalid username/password."
     assert anon.anonymize_text(line) == line
