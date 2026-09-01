@@ -545,6 +545,13 @@ class Anonymizer:
             return fqdn
         if low in BUILTIN_OBJECTS:
             return fqdn
+        # An interface name is never a FQDN: `vlan.800` / `tunnel.2` are
+        # FQDN-shaped, and a subinterface <entry name="vlan.800"> under
+        # <units> became hostNNN.anon.internal inside zone <member> elements
+        # on a real TSF. The object route already refuses interfaces; every
+        # FQDN harvest route funnels through here.
+        if _is_panos_interface(low):
+            return fqdn
         if low in self.fqdn_map:
             return self.fqdn_map[low]
         self._fqdn_counter += 1

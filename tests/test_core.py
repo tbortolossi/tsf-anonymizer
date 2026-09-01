@@ -1071,3 +1071,27 @@ def test_member_renaming_never_touches_directories(tmp_path, tsf):
         == "./tmp/cli/user001_netstat.txt"
     assert mapped_member_name(lambda s: "X", ".") == "."
     assert mapped_member_name(lambda s: "X", "./tmp/cli") == "./tmp/X"   # only the last component
+
+
+class TestInterfaceNamesAreNeverFqdns:
+    """A subinterface <entry name="vlan.800"> under <units> is FQDN-shaped
+    (`word.word`), and the FQDN route had no interface guard: one became
+    hostNNN.anon.internal inside zone <member> elements on a real TSF."""
+
+    def test_interface_unit_entry_names_are_not_registered_as_fqdns(self, tmp_path, anon):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><devices><network><interface>"
+                     "<vlan><units><entry name='vlan.800'/></units></vlan>"
+                     "<tunnel><units><entry name='tunnel.2'/></units></tunnel>"
+                     "</interface></network></devices></c>")
+        prescan_config_xml(p, anon)
+        anon.build_patterns()
+        assert not anon.fqdn_map and not anon.named_obj_map
+        out = anon.anonymize_text("<member>vlan.800</member><member>tunnel.2</member>")
+        assert "vlan.800" in out and "tunnel.2" in out
+
+    @pytest.mark.parametrize("intf", ["tunnel.2", "vlan.800", "loopback.10", "ae1.100"])
+    def test_fqdn_route_preserves_interface_names(self, anon, intf):
+        anon.register_fqdn(intf)
+        assert anon.anon_fqdn(intf) == intf
+        assert not anon.fqdn_map
