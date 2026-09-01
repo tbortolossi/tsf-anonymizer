@@ -171,6 +171,17 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   raw grep of the anonymized real TSF while the compare reported 0 leaks,
   because the apex was never a mapping key. **The compare only knows the
   mapping** — a raw grep for the customer's name is the check it cannot do.
+- **An interface name is never a FQDN — interfaces are preserved everywhere,
+  zone members included.** `vlan.800` and `tunnel.2` are FQDN-shaped
+  (`word.word`), and a subinterface `<entry name="vlan.800">` under `<units>`
+  went through `_register_entry_name`'s FQDN branch on a real TSF: every zone
+  `<member>vlan.800</member>` came out as `<member>hostNNN.anon.internal</member>`,
+  breaking the zone↔interface correlation every reader relies on. The object
+  route always refused interfaces (`_is_panos_interface` in
+  `register_named_object`); `anon_fqdn` now refuses them too, which covers
+  every FQDN harvest route (entry names, `hostname X` phrases, sensitive
+  fields) in one place. The compare needs no mirror — no mapping key, nothing
+  to apply or explain. Test: `TestInterfaceNamesAreNeverFqdns`.
 - **Under an identity container, any spelling is an identity.**
   `_IDENTITY_PARENTS` (users, admin, zone, address, certificate, server…)
   bypasses the lowercase-word vocabulary heuristic, which had swallowed a

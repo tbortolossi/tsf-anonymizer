@@ -22,6 +22,11 @@ change what is mapped, a patch bump only fixes).
   are still excluded from the leak scan and reported as collisions).
 
 ### Fixed
+- PAN-OS interface names are preserved on the FQDN route too: `vlan.800` /
+  `tunnel.2` are FQDN-shaped, and a subinterface entry name registered
+  through the FQDN branch rewrote every zone `<member>` holding it into
+  `hostNNN.anon.internal` on a real TSF. `anon_fqdn` now refuses interface
+  names, as `register_named_object` always did.
 - The fake-IP generators are injective again: the private one merged `.0`/`.1`
   host octets every 256th allocation and the public one cycled over the 762
   RFC 5737 addresses — on one real archive 54 197 of 84 971 distinct IPs
