@@ -526,16 +526,18 @@ where" use `show_log_system.txt` (`grep -i "logged in\|auth"`) and
 `*.mapping.json` sidecar reverses it all and must never travel with the
 anonymized archive.
 
-Known over-anonymization (observed on real archives; reported to the
-anonymizer repo): common English words can be replaced even inside command
-echoes and free text (`> show chassis inventory` → `> show chassis
-user72321`, `Connection status: up` → `user51283`, the `install` verb in
-`opt/panrepo/logs/history.log`), and interface names inside zone `<member>`
-elements may be pseudonymized despite the preserve-interfaces rule. Layout
-and numbers survive, so analysis works — but **prefer structural greps
-(section markers, counter names, `X/Y` fractions) over long fixed English
-strings**, and treat an empty fixed-string grep on an anonymized TSF as
-possibly mangled, not absent.
+Over-anonymization seen on archives made by **older versions** of this tool:
+common English words replaced inside command echoes and fixed output
+(`> show chassis inventory` → `> show chassis user72321`, `Connection
+status: up` → `user51283`, the `install` verb in
+`opt/panrepo/logs/history.log`), and interface names pseudonymized inside
+zone `<member>` elements. Both are fixed — a bare common English word is no
+longer an identity in any category, and an interface name is never a FQDN —
+but a copy you are handed may predate the fix. Layout and numbers always
+survive, so analysis works either way: **prefer structural greps (section
+markers, counter names, `X/Y` fractions) over long fixed English strings**,
+and on an old copy treat an empty fixed-string grep as possibly mangled,
+not absent.
 
 ## Before you finish — feed this file
 

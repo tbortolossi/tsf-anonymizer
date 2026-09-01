@@ -1071,3 +1071,65 @@ def test_member_renaming_never_touches_directories(tmp_path, tsf):
         == "./tmp/cli/user001_netstat.txt"
     assert mapped_member_name(lambda s: "X", ".") == "."
     assert mapped_member_name(lambda s: "X", "./tmp/cli") == "./tmp/X"   # only the last component
+
+
+class TestEnglishWordsAreNotIdentities:
+    """Real chassis TSFs: `show_log_system.txt` carries brute-force and typo
+    login guesses (`failed authentication for user 'install'`, `'up'`,
+    `'inventory'`), and a config can genuinely hold an address object named
+    `data` or a tag named `bytes`. Pseudonymizing the bare word rewrote
+    command echoes (`> show chassis inventory`), status vocabulary
+    (`Connection status: up`), fixed counter text (`size (bytes)`) and the
+    panrepo upgrade history's `install` verb — corpus-wide."""
+
+    def test_login_guess_that_is_an_english_word_is_not_a_username(self, anon):
+        for word in ("install", "up", "inventory", "the", "freed", "helps"):
+            line = f"failed authentication for user '{word}'.  Reason: Invalid username/password."
+            assert anon.anonymize_text(line) == line
+        assert not anon.user_map
+
+    def test_command_echoes_and_history_verbs_stay_readable(self, tmp_path):
+        from tsf_anonymizer.core import prescan_text_identities
+        (tmp_path / "show_log_system.txt").write_text(
+            "failed authentication for user 'install'.  Reason: Invalid username/password.\n"
+            "failed authentication for user 'inventory'.  Reason: Invalid username/password.\n")
+        (tmp_path / "history.log").write_text(
+            "install panos-11.2.10-h6    Success  05/18/26 10:04:22\n")
+        (tmp_path / "techsupport.txt").write_text(
+            "> show chassis inventory\nConnection status: up\n")
+        anon = Anonymizer()
+        prescan_text_identities(tmp_path, anon)
+        anon.build_patterns()
+        anon.frozen = True
+        for f in ("show_log_system.txt", "history.log", "techsupport.txt"):
+            text = (tmp_path / f).read_text()
+            assert anon.anonymize_text(text) == text
+        assert not anon.frozen_misses
+
+    def test_config_object_named_with_a_common_word_is_left_alone(self, tmp_path, anon):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><devices><vsys><address>"
+                     "<entry name='data'><static>10.20.30.40</static></entry>"
+                     "<entry name='SRV-Compta'><ip-netmask>10.20.30.41/32</ip-netmask></entry>"
+                     "</address><tag><entry name='bytes'/><entry name='Tag-Prod'/></tag>"
+                     "</vsys></devices></c>")
+        prescan_config_xml(p, anon)
+        anon.build_patterns()
+        assert set(anon.named_obj_map) == {"SRV-Compta", "Tag-Prod"}
+        line = "Resource monitoring sampling data (per second): size (bytes)"
+        assert anon.anonymize_text(line) == line
+
+    def test_a_username_that_is_no_english_word_is_still_replaced_everywhere(self, anon):
+        anon.anonymize_text("failed authentication for user 'jmartin'")
+        out = anon.anonymize_text("session for jmartin closed")
+        assert "jmartin" not in out
+
+    def test_an_admin_entry_named_jmartin_is_still_an_identity(self, tmp_path, anon):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><mgt-config><users><entry name='jmartin'/>"
+                     "<entry name='monitor'/></users></mgt-config></c>")
+        prescan_config_xml(p, anon)
+        anon.build_patterns()
+        # the jmartin rule holds; the documented trade is the bare word only
+        assert "jmartin" in anon.named_obj_map
+        assert "monitor" not in anon.named_obj_map

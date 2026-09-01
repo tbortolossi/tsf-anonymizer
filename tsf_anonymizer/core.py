@@ -139,6 +139,156 @@ _USER_STOPWORDS = {
     "access", "security", "firewall", "router", "switch", "ubnt", "user1",
 }
 
+# Common English words are never identities, whatever attested them — the
+# generalisation of the _USER_STOPWORDS rule ("a word that identifies nobody
+# needs no pseudonym") to *both* harvest routes, after a real chassis TSF:
+#
+# * `show_log_system.txt` carries brute-force and typo login attempts
+#   (`failed authentication for user 'install'`, `'up'`, `'inventory'`), and
+#   the replace-everywhere doctrine then rewrote every command echo
+#   (`> show chassis inventory` → `> show chassis user72321`), every
+#   `Connection status: up`, and the `install` verb of the panrepo upgrade
+#   history — the audit trail an analyst reads first.
+# * a genuine address object named `data` and a config entry named `bytes`
+#   sit under identity containers (the jmartin rule bypasses the vocabulary
+#   heuristic there), and replacing the bare words mangled fixed PAN-OS
+#   output (`Resource monitoring sampling data`, `size (bytes)`).
+#
+# Tightening the phrase anchor cannot help — the capture context *is* a
+# username field; the harm is the corpus-wide replacement of a word that
+# overwhelmingly occurs as plain English. The documented trade: a customer
+# account or object named exactly a bare common English word stays in clear
+# — consistently, so correlation still works, and the word identifies
+# nobody. A name with a digit, dot, hyphen or any other non-letter
+# (`jmartin`, `lan2`, `dc01`) is never in this set and stays an identity.
+_ENGLISH_STOPWORDS = {
+    # function words
+    "a", "about", "above", "after", "again", "against", "all", "also", "always",
+    "am", "an", "and", "any", "are", "as", "at", "back", "be", "because", "been",
+    "before", "being", "below", "between", "both", "but", "by", "came", "can",
+    "come", "could", "did", "do", "does", "done", "down", "during", "each",
+    "else", "even", "every", "few", "for", "from", "further", "get", "give",
+    "go", "goes", "going", "gone", "got", "had", "has", "have", "having", "he",
+    "her", "here", "hers", "him", "his", "how", "if", "in", "into", "is", "it",
+    "its", "itself", "just", "like", "made", "make", "many", "may", "me",
+    "might", "more", "most", "much", "must", "my", "never", "no", "none", "nor",
+    "not", "now", "of", "off", "on", "once", "one", "only", "onto", "or",
+    "other", "our", "out", "over", "own", "per", "same", "she", "should",
+    "since", "so", "some", "still", "such", "than", "that", "the", "their",
+    "them", "then", "there", "these", "they", "this", "those", "through", "to",
+    "too", "two", "under", "until", "up", "upon", "us", "very", "was", "way",
+    "we", "well", "were", "what", "when", "where", "which", "while", "who",
+    "why", "will", "with", "within", "without", "would", "yes", "yet", "you",
+    "your",
+    # verbs of logs and command output
+    "abort", "aborted", "accept", "accepted", "add", "added", "adding",
+    "allocate", "allocated", "apply", "applied", "attach", "attached", "begin",
+    "boot", "booted", "build", "built", "cancel", "cancelled", "change",
+    "changed", "check", "checked", "clean", "clear", "cleared", "close",
+    "closed", "commit", "committed", "complete", "completed", "configure",
+    "configured", "connect", "connected", "copied", "copy", "create",
+    "created", "delete", "deleted", "detach", "detect", "detected", "disable",
+    "disabled", "disconnect", "disconnected", "download", "downloaded",
+    "dropped", "enable", "enabled", "end", "ended", "enter", "exit", "expire",
+    "expired", "export", "fail", "failed", "fetch", "find", "finish",
+    "finished", "fix", "flush", "forward", "found", "free", "freed",
+    "generate", "generated", "help", "helps", "hold", "ignore", "ignored",
+    "import", "initialize", "initialized", "insert", "install", "installed",
+    "installing", "keep", "launch", "leave", "listen", "load", "loaded",
+    "loading", "lock", "locked", "lost", "mark", "match", "matched", "merge",
+    "miss", "missed", "missing", "modified", "modify", "mount", "move",
+    "moved", "notify", "open", "opened", "parse", "parsed", "pass", "passed",
+    "pause", "paused", "pending", "poll", "press", "process", "processed",
+    "pull", "push", "put", "read", "reboot", "rebooted", "receive",
+    "received", "recover", "refresh", "refreshed", "register", "registered",
+    "reject", "rejected", "release", "released", "reload", "remove",
+    "removed", "rename", "renamed", "repair", "replace", "replaced",
+    "requested", "require", "required", "reset", "restart", "restarted",
+    "restore", "resume", "resumed", "retry", "return", "returned", "revert",
+    "rollback", "run", "running", "save", "saved", "schedule", "scheduled",
+    "search", "see", "seen", "select", "selected", "send", "sending", "sent",
+    "set", "show", "shown", "shut", "shutdown", "skip", "skipped", "start",
+    "started", "starting", "stop", "stopped", "store", "stored", "submit",
+    "succeed", "succeeded", "suspend", "take", "taken", "terminate",
+    "terminated", "timeout", "track", "transfer", "trigger", "triggered",
+    "try", "trying", "unlock", "unmount", "update", "updated", "updating",
+    "upgrade", "upgraded", "upload", "uploaded", "use", "used", "using",
+    "verify", "verified", "wait", "waiting", "wake", "write", "written",
+    # nouns of fixed PAN-OS / system output
+    "action", "active", "address", "agent", "alarm", "alert", "application",
+    "archive", "attempt", "attribute", "authentication", "average",
+    "bandwidth", "batch", "bit", "bits", "board", "body", "buffer", "buffers",
+    "bus", "byte", "bytes", "cache", "capacity", "card", "cause", "chain",
+    "channel", "chassis", "client", "clock", "cluster", "code", "command",
+    "comment", "condition", "connection", "content", "context", "control",
+    "core", "cores", "counter", "counters", "cpu", "current", "cycle",
+    "dashboard", "data", "database", "date", "day", "days", "delay", "depth",
+    "description", "destination", "detail", "details", "device", "devices",
+    "direction", "disk", "drive", "driver", "duration", "engine", "entries",
+    "entry", "environment", "event", "events", "failure", "fan", "fans",
+    "fault", "feature", "field", "file", "files", "filter", "firmware",
+    "flag", "flags", "flow", "folder", "format", "frame", "frames",
+    "function", "hardware", "header", "health", "heartbeat", "history",
+    "hour", "hours", "id", "image", "index", "instance", "interface",
+    "interfaces", "interval", "inventory", "item", "items", "job", "jobs",
+    "kernel", "label", "latency", "layer", "length", "library", "license",
+    "limit", "line", "lines", "link", "list", "lists", "log", "logs",
+    "machine", "mask", "maximum", "member", "members", "memory", "message",
+    "messages", "method", "metric", "metrics", "minimum", "minute",
+    "minutes", "mode", "model", "module", "modules", "monitor",
+    "monitoring", "month", "name", "names", "network", "node", "nodes", "note", "notice", "number",
+    "numbers", "object", "objects", "offset", "option", "options", "order",
+    "output", "owner", "packet", "packets", "page", "pages", "parameter",
+    "parent", "part", "partition", "patch", "path", "peer", "percent",
+    "performance", "period", "permission", "phase", "platform", "policy",
+    "pool", "power", "prefix", "priority", "probe", "problem", "processes",
+    "processor", "profile", "progress", "property", "protocol", "quality",
+    "queue", "queues", "quota", "range", "rate", "reason", "record",
+    "records", "reference", "region", "report", "reports", "resource",
+    "resources", "response", "result", "results", "revision", "role",
+    "route", "router", "routes", "rule", "rules", "sample", "samples",
+    "sampling", "scope", "screen", "script", "second", "seconds",
+    "section", "sector", "segment", "sequence", "server", "servers",
+    "session", "sessions", "setting", "settings", "severity", "share",
+    "signal", "signature", "site", "size", "slot", "socket", "software",
+    "source", "space", "speed", "stack", "stage", "stat", "state", "states",
+    "station", "statistics", "stats", "step", "storage", "stream", "string",
+    "subject", "subnet", "summary", "switch", "table", "tables", "tag",
+    "tags", "target", "task", "tasks", "temperature", "template", "text",
+    "thread", "threads", "threshold", "ticket", "tier", "time", "timer",
+    "times", "timestamp", "timezone", "title", "token", "total", "traffic",
+    "transaction", "type", "types", "unit", "units", "uptime", "users",
+    "utility", "value", "values", "version", "versions", "view", "volume",
+    "watchdog", "week", "weeks", "window", "word", "words", "year", "years",
+    "zone", "zones",
+    # adjectives of status lines
+    "additional", "automatic", "available", "bad", "best", "better", "big",
+    "bound", "broken", "busy", "cold", "common", "correct", "critical",
+    "daily", "dead", "dirty", "double", "duplicate", "dynamic", "early",
+    "empty", "excessive", "expected", "external", "extra", "fast", "fatal",
+    "final", "fine", "first", "fresh", "full", "general", "global", "good",
+    "half", "hard", "high", "higher", "hot", "idle", "inactive",
+    "incomplete", "incorrect", "internal", "large", "larger", "last", "late",
+    "least", "left", "less", "light", "little", "long", "longer", "loose",
+    "low", "lower", "main", "major", "manual", "medium", "minor", "multiple",
+    "narrow", "native", "near", "negative", "new", "next", "normal", "ok",
+    "okay", "old", "optional", "original", "partial", "passive", "past",
+    "permanent", "physical", "positive", "possible", "previous", "primary",
+    "private", "protected", "public", "quick", "random", "raw", "ready",
+    "real", "recent", "regular", "related", "remaining", "reserved",
+    "right", "safe", "secondary", "secure", "short", "simple", "single",
+    "slow", "small", "smaller", "soft", "special", "stable", "standard",
+    "standby", "static", "strict", "strong", "top", "unavailable", "unique",
+    "unsafe", "unstable", "upper", "virtual", "visible", "weak", "wide",
+    "wrong",
+}
+
+
+def _is_english_word(name: str) -> bool:
+    """A bare common English word — never an identity, in any category."""
+    return name.isalpha() and name.lower() in _ENGLISH_STOPWORDS
+
+
 # PAN-OS hardware interface name pattern — keep as-is (not customer-identifying,
 # required for counter/interface matching downstream)
 _PANOS_INTF_RE = re.compile(
@@ -520,7 +670,11 @@ class Anonymizer:
     # -- Username anonymization ---------------------------------------------
 
     def anon_user(self, username: str) -> str:
+        # _is_english_word: `failed authentication for user 'install'` (a
+        # brute-force guess on a real TSF) must not rewrite the `install`
+        # verb of the panrepo upgrade history — see _ENGLISH_STOPWORDS.
         if (username.lower() in BUILTIN_OBJECTS or username.lower() in _USER_STOPWORDS
+                or _is_english_word(username)
                 or username in self._fakes or username.startswith(_VOCAB_PREFIXES)):
             return username
         # `user 'ehs'` where ehs is a GP portal domain: the FQDN pass owns
@@ -599,6 +753,12 @@ class Anonymizer:
         if not name or len(name) < 2:
             return name
         if name.lower() in BUILTIN_OBJECTS:
+            return name
+        # An address object named `data`, a tag named `bytes`: genuine
+        # config entries under identity containers, but replacing the bare
+        # word mangled fixed output (`size (bytes)` → `size (OBJ-9866)`)
+        # corpus-wide on a real TSF — see _ENGLISH_STOPWORDS.
+        if _is_english_word(name):
             return name
         if _is_panos_interface(name):
             return name

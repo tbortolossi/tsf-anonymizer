@@ -171,6 +171,33 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   raw grep of the anonymized real TSF while the compare reported 0 leaks,
   because the apex was never a mapping key. **The compare only knows the
   mapping** — a raw grep for the customer's name is the check it cannot do.
+- **A bare common English word is never an identity, in any category —
+  command echoes and fixed PAN-OS output vocabulary are never rewritten, and
+  neither are log verbs.** `_USER_STOPWORDS` covered the login guesses one
+  real TSF showed (`'error'`, `'request'`); a PA-7080 and a PA-5250 showed
+  the same failure with ordinary vocabulary and through *both* harvest
+  routes. `tmp/cli/logs/show_log_system.txt` carries brute-force and typo
+  attempts — `failed authentication for user 'install'`, `'up'`,
+  `'inventory'` — so `_USER_PHRASE_RE` captured them legitimately, and the
+  replace-everywhere doctrine (a username is rewritten wherever it appears,
+  not only in the phrasing that revealed it) then destroyed the command echo
+  `> show chassis inventory`, every `Connection status: up`, and the
+  `install` verb of `opt/panrepo/logs/history.log` and `op=install` in
+  audit.log — the upgrade audit trail an analyst reads first. In parallel, a
+  genuine address object named `data` and a config entry named `bytes` sit
+  under identity containers, where the jmartin rule deliberately bypasses
+  the lowercase-vocabulary heuristic: `Resource monitoring sampling data`
+  and `size (bytes)` became `sampling ADDR-17541` and `size (OBJ-9866)`.
+  Tightening the phrase anchor is not the fix — the capture context genuinely
+  *is* a username field; the harm is corpus-wide replacement of a word that
+  overwhelmingly occurs as plain English. `_ENGLISH_STOPWORDS` +
+  `_is_english_word` therefore guard the two allocation choke points,
+  `anon_user` and `register_named_object`, so nothing else in the pipeline
+  needs to know. The set holds only *bare alphabetic* words: `jmartin`,
+  `lan2`, `dc01`, `web-server-1` — anything with a digit, dot or hyphen — is
+  untouched by it and stays an identity. The compare needs no mirror: such a
+  word never becomes a mapping key, so there is nothing to apply, explain or
+  scan for. Tests: `TestEnglishWordsAreNotIdentities`.
 - **Under an identity container, any spelling is an identity.**
   `_IDENTITY_PARENTS` (users, admin, zone, address, certificate, server…)
   bypasses the lowercase-word vocabulary heuristic, which had swallowed a
@@ -242,6 +269,18 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   (deliberately duplicated boundaries, not shared code) and the compare
   verifies each redaction was warranted against the original — an
   unwarranted one is a warning, gratuitous data loss.
+- A genuine account, zone or object named *exactly* a bare common English
+  word (`data`, `monitor`, `install`) stays in clear — the deliberate price
+  of `_ENGLISH_STOPWORDS`, and the same trade `_USER_STOPWORDS` and the zone
+  named `lan` already made. It is consistent, so correlation on the copy is
+  unaffected, and such a name identifies nobody: it says nothing about who
+  the customer is, which is the line the whole tool draws. The alternative —
+  rewriting the word everywhere — destroys command echoes, counter
+  descriptions and the upgrade history, which is losing *behaviour* to
+  protect no identity. Any spelling that is not a bare word (`data-01`,
+  `svc-monitor`, `Monitor.Prod`) is unaffected and still anonymized. Tests:
+  `test_a_username_that_is_no_english_word_is_still_replaced_everywhere`,
+  `test_an_admin_entry_named_jmartin_is_still_an_identity`.
 - IPv6 untouched; usernames only in the log phrasings `_user_re` knows
   (then replaced everywhere).
 - Addresses rendered as byte arrays (`[0 0 … 255 255 10 0 0 254]` in Go
