@@ -501,3 +501,50 @@ def test_compare_prefers_the_whole_object_key_over_the_fqdn_it_embeds():
     assert idx.find_leaks(anon) == {}
     assert idx.find_leaks('cert:site-fw-xx-host014-example') == {}  # the old partial output: no key left,
     # which is exactly why a raw grep of the site prefix is the check the compare cannot do
+
+
+class TestXmlStructure:
+    """The tag-sequence check reads each document once, with expat, instead of
+    building a DOM and walking it. The verdict must be the one a full parse
+    gives — including how a namespaced tag is spelled and what counts as
+    unparseable."""
+
+    @staticmethod
+    def _by_dom(o_text: str, a_text: str) -> str:
+        import xml.etree.ElementTree as ET
+        try:
+            o_root, a_root = ET.fromstring(o_text), ET.fromstring(a_text)
+        except ET.ParseError:
+            return "unparseable"
+        return ("preserved" if [e.tag for e in o_root.iter()] == [e.tag for e in a_root.iter()]
+                else "changed")
+
+    CASES = [
+        ("<a><b/><c>x</c></a>", "<a><b/><c>y</c></a>"),                  # preserved
+        ("<a><b/></a>", "<a><c/></a>"),                                  # changed
+        ("<a><b/></a>", "<a><b/><b/></a>"),                              # changed
+        ("<a xmlns='urn:x' xmlns:p='urn:y'><p:b/><c/></a>",              # namespaces
+         "<a xmlns='urn:x' xmlns:p='urn:y'><p:b/><c/></a>"),
+        ("<a xmlns='urn:x'><b/></a>", "<a xmlns='urn:z'><b/></a>"),      # namespace changed
+        ("<a><!--c--><b/><?pi go?></a>", "<a><b/></a>"),                 # comments and PIs
+        ("<!DOCTYPE a [<!ENTITY e 'v'>]><a>&e;<b/></a>", "<a>v<b/></a>"),  # internal entity
+        ("<?xml version='1.0' encoding='UTF-8'?><a><b/></a>",            # encoding declaration
+         "<?xml version='1.0' encoding='UTF-8'?><a><b/></a>"),
+        ("<a><b>", "<a><b/></a>"),                                       # truncated original
+        ("<a><b/></a>", "<a><b>"),                                       # truncated anonymized
+        ("<a>&nope;</a>", "<a/>"),                                       # undefined entity
+        ("", ""),                                                        # empty
+    ]
+
+    @pytest.mark.parametrize("o_text,a_text", CASES)
+    def test_verdict_matches_a_full_dom_parse(self, o_text, a_text):
+        from tsf_anonymizer.compare import _xml_structure
+        assert _xml_structure(o_text, a_text) == self._by_dom(o_text, a_text)
+
+    def test_tags_are_spelled_the_way_elementtree_spells_them(self):
+        import xml.etree.ElementTree as ET
+
+        from tsf_anonymizer.compare import _xml_tags
+        doc = "<a xmlns='urn:x' xmlns:p='urn:y'><p:b/><c><p:d/></c></a>"
+        assert _xml_tags(doc) == [e.tag for e in ET.fromstring(doc).iter()]
+        assert _xml_tags(doc)[1] == "{urn:y}b"

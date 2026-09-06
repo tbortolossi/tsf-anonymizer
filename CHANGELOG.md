@@ -8,6 +8,18 @@ change what is mapped, a patch bump only fixes).
 ## [Unreleased]
 
 ### Changed
+- The XML prescan runs on the same process pool as the rest of the job
+  (`TSF_ANON_WORKERS`, `--workers`), and each XML is parsed once. A worker
+  parses one config and *reports* the identities it holds — it is handed no
+  `Anonymizer` and allocates nothing; the parent registers those findings in
+  path order, in the document order each file yielded them, so the mapping is
+  the sequential one whatever the worker count. Measured on 37 MB of
+  synthetic configs: 1.51 s to 0.57 s at four workers, mapping byte-identical
+  at 1, 4 and 8. The compare's XML structure check no longer builds a DOM to
+  read a tag sequence either — 0.83 s and +276 MB down to 0.39 s and +13 MB
+  per 22 MB pair, with the same verdict on every shape (namespaces, comments,
+  processing instructions, entities, encoding declarations, unparseable
+  documents).
 - `tsf-anonymizer serve` binds `127.0.0.1` by default instead of `0.0.0.0`
   (minor: changes what a bare `serve` is reachable from). A tool that
   handles un-anonymized archives and the mapping that reverses them should

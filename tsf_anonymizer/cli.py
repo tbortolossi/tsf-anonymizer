@@ -174,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("-o", "--output")
     a.add_argument("--seed-mapping", help="mapping.json from a previous run (same customer)")
     a.add_argument("--workers", type=int, default=int(os.getenv("TSF_ANON_WORKERS") or 1),
-                   help="processes for the text prescan and the rewrite; the mapping "
+                   help="processes for the prescans and the rewrite; the mapping "
                         "is identical whatever the count (env TSF_ANON_WORKERS)")
     a.add_argument("--redact-binaries", action="store_true",
                    help="replace binary payloads that embed mapping identifiers with a "

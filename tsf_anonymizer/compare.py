@@ -39,6 +39,7 @@ from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from xml.parsers import expat
 
 from .core import (
     BINARY_EXTENSIONS,
@@ -394,14 +395,40 @@ def analyze_text_pair(rel: str, orig_raw: bytes, anon_raw: bytes, kind: str,
     return rep
 
 
+def _xml_tags(text: str) -> list[str]:
+    """The element tags of one document, in document order, in a single pass.
+
+    The check only ever needed the tag sequence, and `ET.fromstring` +
+    `root.iter()` paid for a whole DOM to produce it: two traversals and one
+    Element per tag — 600 000 of them for a 22 MB config, twice over (both
+    sides of the pair, alive at the same time), on every worker of the pool.
+    Expat's start-element handler yields the same sequence while the parser
+    reads the text once and keeps nothing.
+
+    Tags are spelled exactly as ElementTree spells them: `ParserCreate`'s
+    `namespace_separator` plus the leading "{" is what `XMLParser._fixname`
+    does, so a namespaced tag is still `{uri}local`, and expat's own
+    ParseError message is the one ElementTree would have raised.
+    """
+    tags: list[str] = []
+    add = tags.append
+    parser = expat.ParserCreate(None, "}")
+    # Explicit, though it is also expat's default: parameter entities are
+    # never parsed and no external entity is ever fetched — the same posture
+    # ElementTree's parser has.
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    parser.StartElementHandler = lambda name, _attrs: add(
+        "{" + name if "}" in name else name)
+    parser.Parse(text, True)
+    return tags
+
+
 def _xml_structure(o_text: str, a_text: str) -> str:
     try:
-        o_root = ET.fromstring(o_text)
-        a_root = ET.fromstring(a_text)
-    except ET.ParseError:
+        o_tags = _xml_tags(o_text)
+        a_tags = _xml_tags(a_text)
+    except expat.ExpatError:
         return "unparseable"
-    o_tags = [e.tag for e in o_root.iter()]
-    a_tags = [e.tag for e in a_root.iter()]
     return "preserved" if o_tags == a_tags else "changed"
 
 
