@@ -62,6 +62,17 @@ those findings in path order, in the document order each file yielded them.
 The pseudonym counters therefore fall exactly where a sequential run would
 put them, whatever order the workers happened to finish in.
 
+**Free text is removed before any pseudonym pass.** Descriptions, comments,
+login banners and the SNMP location hold prose no pattern can pseudonymise,
+so `redact_free_text` replaces their *content* with a placeholder — one per
+line, so line counts never move — and the pseudonym passes then find nothing
+left in them. Vendor containers (`<predefined>`, `<threats>`,
+`<application-type>`, the `<global>` catalog a candidate config embeds) are
+skipped: that text explains behaviour and names nobody. The choice is written
+to the mapping sidecar (`redact_free_text`), which is how the compare — with
+its own, duplicated copy of the rule — knows to expect a placeholder rather
+than a mapped value.
+
 **One trie-regex pass per class, never a per-token callback.** Names are
 replaced through a longest-match alternation built by `trie_regex()`; the
 previous `re.sub(lambda)` took eleven minutes on a 155 MB archive. Objects

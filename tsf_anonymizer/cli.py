@@ -24,7 +24,8 @@ def cmd_anonymize(args: argparse.Namespace) -> int:
     report, mapping = anonymize_tsf(inp, None if args.mapping_only else out,
                                     mapping_only=args.mapping_only, seed_mapping=seed,
                                     progress=_progress, workers=args.workers,
-                                    redact_binaries=args.redact_binaries)
+                                    redact_binaries=args.redact_binaries,
+                                    redact_free_text=not args.keep_free_text)
     if args.mapping_only:
         print(json.dumps(mapping, indent=2, ensure_ascii=False))
         return 0
@@ -53,6 +54,8 @@ def _print_compare(rep, report_path: str | None) -> None:
     print(f"changed lines: {s['changed_lines']}  explained: {s['explained_lines']}  "
           f"unexplained: {s['unexplained_lines']}  leaks: {s['leaks_total']}  "
           f"binary files with identifiers: {s['binary_files_with_identifiers']}")
+    if s.get("free_text_survivals"):
+        print(f"free-text fields that kept their content: {s['free_text_survivals']}")
     r = s.get("routing") or {}
     if r.get("checked"):
         line = (f"routing coherence: {'OK' if r.get('ok') else 'BROKEN'} "
@@ -179,6 +182,10 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--redact-binaries", action="store_true",
                    help="replace binary payloads that embed mapping identifiers with a "
                         "marker (e.g. sslvpn-task logs) instead of shipping them untouched")
+    a.add_argument("--keep-free-text", action="store_true",
+                   help="keep the content of descriptions, comments, login banners and the "
+                        "SNMP location instead of replacing it (they are removed by default: "
+                        "no pattern recognises the people and companies operators type there)")
     a.add_argument("--mapping-only", action="store_true", help="only print what would be mapped")
     a.add_argument("--verify", action="store_true", help="run the compare mode afterwards")
     a.add_argument("--report", help="write the integrity report JSON here (with --verify)")

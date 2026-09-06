@@ -8,6 +8,33 @@ change what is mapped, a patch bump only fixes).
 ## [Unreleased]
 
 ### Added
+- **Free text is removed by default.** The content of `<description>`,
+  `<comments>`, `<comment>`, `<login-banner>` and the SNMP `<location>` — in
+  every config (running, merged, archived, candidate, audit) — and of their
+  set-format echo (`description "…"` in a `show config` dump) is replaced by
+  `REDACTED-FREE-TEXT`. Measured on real archives: 70–75 % of those fields
+  came through every pseudonym pass verbatim (1019/1363, 70/149, 516/587 on
+  three trees), carrying exactly the attribution the tool exists to strip —
+  people, companies, providers, ticket references — because none of it has a
+  shape a pattern can recognise. After the change: 0 fields keep their
+  content on the same three trees. One placeholder replaces each *line* of a
+  field, so a multi-line description stays as many lines: no replacement ever
+  contains a newline. Vendor containers (`<predefined>`, `<threats>`,
+  `<application-type>`, the `<global>` catalog a candidate config embeds) are
+  skipped — 55 % of all free-text fields on the corpus, prose that explains
+  behaviour and names nobody. The set-format side is deliberately
+  conservative: a line carrying anything else quoted (a JSON key, an escaped
+  quote, a value that runs past the end of the line) is left intact rather
+  than half-rewritten. Off with `--keep-free-text` (CLI), by unchecking
+  *Remove free text* (UI) or `redact_free_text=false` (API); the choice is
+  recorded in the mapping sidecar next to `ip_seed`.
+- The compare mirrors it from the sidecar alone, with its **own** copy of the
+  rule (never a call into the anonymizer): a removed field is an *explained*
+  change, a field that kept its content is a warning
+  (`free_text_survivals` in the summary, a KPI in the UI), and a placeholder
+  in an archive whose sidecar does not declare the removal is a warning too.
+  A line the two halves judge differently is still explained by the plain
+  mapping, so a difference of judgement can never turn into unexplained noise.
 - The compare's routing-coherence check now also proves coherence *over
   time*: `var/log/pan/routed.log*` (add/delete route events, plain or
   `.gz`-rotated), and the `show routing protocol bgp loc-rib` / `rib-out` and

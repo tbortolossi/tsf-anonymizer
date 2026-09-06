@@ -1524,3 +1524,118 @@ class TestInterfaceNamesAreNeverFqdns:
         anon.register_fqdn(intf)
         assert anon.anon_fqdn(intf) == intf
         assert not anon.fqdn_map
+
+
+class TestFreeTextRedaction:
+    """On by default: the content of descriptions, comments, login banners and
+    the SNMP location leaves the archive. It is prose an operator typed —
+    people, companies, providers, ticket references — and no pattern
+    recognises it, so nothing but removal makes the copy safe to hand on. The
+    *shape* stays: the field, its element, its line count."""
+
+    FREE_TEXT = ["Opened by Jean Dupont (Acme Corp) after the audit, ticket SR000123",
+                 "Accounting server, contact Marie Martin",
+                 "Acme Corp datacenter, rack B12",
+                 "Operated by Acme Corp, escalation to Jean Dupont."]
+
+    def _tree_text(self, archive) -> str:
+        out = []
+        with tarfile.open(archive, "r:gz") as tar:
+            for m in tar.getmembers():
+                if not m.isfile() or m.name.endswith((".bin", "/wtmp")):
+                    continue
+                raw = tar.extractfile(m).read()
+                if m.name.endswith(".gz"):
+                    raw = gzip.decompress(raw)
+                out.append(raw.decode("utf-8", "replace"))
+        return "\n".join(out)
+
+    def test_free_text_content_does_not_survive(self, tmp_path, tsf):
+        out = tmp_path / "out.tgz"
+        report, _ = anonymize_tsf(tsf, out)
+        text = self._tree_text(out)
+        for prose in self.FREE_TEXT:
+            assert prose not in text, prose
+        assert report.replacements["free_text"] >= 5
+        assert "REDACTED-FREE-TEXT" in text
+
+    def test_the_set_format_echo_goes_too(self, tmp_path, tsf):
+        out = tmp_path / "out.tgz"
+        anonymize_tsf(tsf, out)
+        cli = self._tree_text(out)
+        assert 'description "REDACTED-FREE-TEXT"' in cli
+        assert "ticket SR000123" not in cli
+
+    def test_keeping_free_text_is_one_flag_away(self, tmp_path, tsf):
+        out = tmp_path / "out.tgz"
+        _, mapping = anonymize_tsf(tsf, out, redact_free_text=False)
+        text = self._tree_text(out)
+        for prose in self.FREE_TEXT:
+            assert prose in text, prose
+        assert "REDACTED-FREE-TEXT" not in text
+        assert mapping["redact_free_text"] is False
+
+    def test_the_choice_rides_in_the_sidecar(self, tmp_path, tsf):
+        out = tmp_path / "out.tgz"
+        _, mapping = anonymize_tsf(tsf, out)
+        assert mapping["redact_free_text"] is True
+        assert json.loads(mapping_sidecar_path(out).read_text())["redact_free_text"] is True
+
+    def test_a_multi_line_description_keeps_its_line_count(self):
+        from tsf_anonymizer.core import redact_free_text
+        text = ("<config><description>first line\nsecond line\nthird</description>\n"
+                "<login-banner>one\ntwo</login-banner></config>\n")
+        out, n = redact_free_text(text)
+        assert n == 2
+        assert out.count("\n") == text.count("\n")
+        assert out.splitlines()[0] == "<config><description>REDACTED-FREE-TEXT"
+        assert "first line" not in out and "two" not in out
+
+    def test_a_replacement_never_contains_a_newline(self):
+        from tsf_anonymizer.core import FREE_TEXT_PLACEHOLDER
+        assert "\n" not in FREE_TEXT_PLACEHOLDER
+
+    def test_vendor_descriptions_under_predefined_are_kept(self, tmp_path, tsf):
+        out = tmp_path / "out.tgz"
+        anonymize_tsf(tsf, out)
+        assert "Vendor text: this description explains" in self._tree_text(out)
+
+    def test_a_nested_vendor_container_does_not_end_the_span_early(self):
+        from tsf_anonymizer.core import redact_free_text
+        text = ('<config><global><description>catalog</description>'
+                '<x><global><description>nested catalog</description></global></x>'
+                '<description>still catalog</description></global>'
+                '<rules><description>customer prose</description></rules></config>')
+        out, n = redact_free_text(text)
+        assert n == 1
+        assert out.count("catalog") == 3
+        assert "customer prose" not in out
+
+    def test_an_empty_field_is_left_alone(self):
+        from tsf_anonymizer.core import redact_free_text
+        text = "<a><comments></comments><comment>   </comment><description/></a>"
+        assert redact_free_text(text) == (text, 0)
+
+    def test_a_doubtful_text_line_is_left_intact(self):
+        """Conservative on purpose: half-rewriting a line is worse than
+        leaving it. A quote before the keyword (JSON), an escaped quote, a
+        value that runs past the end of the line — none of them match."""
+        from tsf_anonymizer.core import redact_free_text
+        for line in ('{"description": "kept"}',
+                     'weird description "a\\"b" tail',
+                     'description: "yaml is kept"',
+                     'set x description "unterminated'):
+            assert redact_free_text(line + "\n") == (line + "\n", 0), line
+
+    def test_redaction_is_idempotent(self):
+        from tsf_anonymizer.core import redact_free_text
+        once, _ = redact_free_text('<a><description>x</description></a>\nset a description "y"\n')
+        assert redact_free_text(once) == (once, 0)
+
+    def test_parallel_rewrite_redacts_exactly_like_a_sequential_one(self, tmp_path, tsf):
+        out1, out2 = tmp_path / "s.tgz", tmp_path / "p.tgz"
+        seed = {"ip_seed": "00" * 16}
+        anonymize_tsf(tsf, out1, workers=1, seed_mapping=seed)
+        anonymize_tsf(tsf, out2, workers=2, seed_mapping=seed)
+        member = "./opt/pancfg/mgmt/saved-configs/running-config.xml"
+        assert read_member(out1, member) == read_member(out2, member)

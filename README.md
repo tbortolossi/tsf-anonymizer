@@ -30,8 +30,8 @@ analysed *instead of* the original — by TAC, by a colleague, by an LLM.
 What happened is all there: sequences, timings, counters, which rule, zone,
 gateway or daemon, what was committed just before, under pseudonyms that stay
 consistent across every file. Who it happened to is not: hostnames, serials,
-IPs, users, e-mails, object names — and, by default, the binary files that
-embed them. On a security incident that means the *method* is readable on
+IPs, users, e-mails, object names, the free text an operator typed in a
+description or a banner — and, by default, the binary files that embed them. On a security incident that means the *method* is readable on
 the copy (a burst of failed logins from one pseudonymised source, the guessed
 names, what happened next) while the *attribution* — the real address,
 account, device — needs the mapping sidecar, which stays with the owner.
@@ -61,9 +61,23 @@ file (rotated `.gz` logs included) with consistent pseudonyms:
 | named object | `Zone-Prod-DMZ` | `ZONE-0012` (category prefix kept) |
 | username | `jdupont` | `user001` |
 | serial | `001901000123` | `900000000001` (same length, leading 9) |
+| free text | `<description>Opened for Jean Dupont, ticket SR12345</description>` | `<description>REDACTED-FREE-TEXT</description>` |
 
 Same original value → same pseudonym everywhere, so VPN peers, LDAP servers,
 rules and users can still be correlated across logs and config.
+
+**Free text is removed, not pseudonymised.** Rule descriptions, comments,
+login banners and the SNMP location are prose an operator typed: on real
+archives 70–75 % of them came through the pseudonym passes verbatim, carrying
+people, companies, providers and ticket references that no pattern recognises.
+Their *content* is therefore replaced by `REDACTED-FREE-TEXT` — one placeholder
+per line, so line counts never move — while the field, the element and
+everything around them stay: a reader still sees which rule was documented,
+and vendor descriptions (`<predefined>`, the App-ID/threat catalogs) are kept
+because they explain behaviour and name nobody. On by default in the UI, the
+API and the CLI; `--keep-free-text` (CLI) or unchecking *Remove free text*
+(UI) opts out, and the choice is recorded in the mapping sidecar so the
+verification knows what to expect.
 
 What is **not** touched: PAN-OS interface names (`ethernet1/1`, `ae1`, `tunnel.1`),
 built-in objects (`any`, `trust`, `vsys1`, `admin`…), vendor domains
@@ -79,7 +93,12 @@ anonymized TSF.**
 independently of the anonymizer:
 
 1. every changed line is explained by the mapping (token-level re-application,
-   then span-level inspection; what remains is *unexplained* and shown for review);
+   then span-level inspection; what remains is *unexplained* and shown for
+   review). When the sidecar says free text was removed, the compare applies
+   its **own** copy of that rule to the original before the mapping — so a
+   removed description is an explained change, a description that survived is
+   a warning, and so is a placeholder in an archive whose sidecar claims
+   nothing was removed;
 2. no mapping key survives in any text file — and binary files, which are not
    rewritten, are scanned for identifiers too and flagged as warnings. Some
    binary formats embed thousands of them (`sslvpn-task.log*.gz` carries the
@@ -293,11 +312,15 @@ as invariants in [.claude/rules/anonymizer-invariants.md](.claude/rules/anonymiz
 - **A hostname that appears only in logs and never in a config is not
   redacted.** Named objects and FQDNs are discovered from the XML prescan;
   IPs, e-mails, serials and `user '…'` patterns are matched by shape
-  everywhere. Free text (login banners, rule descriptions, comments) can
-  carry a company name nothing matches.
-- **Free text is not scanned.** Rule descriptions, comments, login banners
-  can carry a company name that nothing matches. `<contact>` / `<full-name>`
-  are anonymized.
+  everywhere. A log line that names a host no config declares keeps it.
+- **Free text is removed, so what it explained is gone with it.** Nothing in
+  a description, a comment, a login banner or the SNMP location can be
+  pseudonymised — it is prose — so the whole content leaves and the reason a
+  rule exists leaves with it. The deliberate trade, and the reason it is a
+  removal rather than a rewrite; `--keep-free-text` keeps them, and then a
+  company or person name in one of those fields survives. Free text in a
+  shape this does not know — a multi-line quoted CLI value, a line carrying
+  two quoted strings — is left intact rather than half-rewritten.
 - **A pseudonym can coincide with a real address.** Private pseudonyms live
   in the same RFC 1918 class as their originals — that is what keeps subnets
   and routes coherent — so a fake can equal an address the customer also

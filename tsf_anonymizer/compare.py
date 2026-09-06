@@ -11,6 +11,12 @@ independent questions per file:
    result is the anonymized line, the change is explained. Otherwise the
    changed spans are inspected individually, and what remains is reported as
    *unexplained* for a human to look at.
+   When the sidecar says the run removed free text (``redact_free_text``),
+   the expectation is re-derived the same way: this module applies its *own*
+   copy of the redaction to the original before the mapping, so a removed
+   description is an explained change — and a description that survived, or a
+   placeholder in an archive whose sidecar claims nothing was redacted, is a
+   warning.
 2. **Did anything identifying survive?** Every mapping key is searched in the
    anonymized text (token-level, same boundaries the anonymizer uses). Binary
    files are scanned too — they are copied through untouched, so a rule name
@@ -35,6 +41,7 @@ import re
 import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
+from bisect import bisect_right as _bisect_right
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -43,6 +50,7 @@ from xml.parsers import expat
 
 from .core import (
     BINARY_EXTENSIONS,
+    FREE_TEXT_PLACEHOLDER,
     MAPPING_CATEGORIES,
     REDACTED_PAYLOAD,
     _sub_lowered,
@@ -272,6 +280,11 @@ class MappingIndex:
 
     def __init__(self, mapping: dict) -> None:
         self.mapping = mapping
+        # Not a mapping entry: what the run did with free-text fields, stated
+        # by the sidecar next to `ip_seed`. Absent (an older sidecar, or none
+        # at all) means the archive was not redacted, and a placeholder found
+        # in it is then a warning of its own.
+        self.redact_free_text = bool(mapping.get("redact_free_text", False))
         self.forward: dict[str, str] = {}    # exact key → fake
         self.forward_ci: dict[str, str] = {}  # lowercased key → fake (fqdns, emails)
         self.category_of: dict[str, str] = {}
@@ -421,6 +434,10 @@ class FileReport:
     xml_structure: str | None = None  # preserved | changed | unparseable
     binary_identical: bool | None = None
     redacted: bool = False
+    # Free-text fields (descriptions, comments, banners, SNMP location) still
+    # carrying their content on the anonymized side, when the sidecar says the
+    # run removed them.
+    free_text_survived: int = 0
     notes: list[str] = field(default_factory=list)
 
 
@@ -473,6 +490,131 @@ def _changed_spans(a: str, b: str) -> list[tuple[int, int, int, int]]:
     return out
 
 
+# --- free text, re-derived from the sidecar --------------------------------
+#
+# When the sidecar says `redact_free_text`, the content of every free-text
+# field left the archive and a placeholder took its place. This half decides
+# what that should look like on its own: its own regexes, its own vendor-span
+# scan, nothing imported from the anonymizer but the placeholder itself — so a
+# field the anonymizer failed to redact surfaces here as a survival, and a
+# field it redacted where this side would not is still explained line by line
+# (the plain mapping path below covers it).
+_FT_XML_RE = re.compile(
+    r"<(description|comments|comment|login-banner|location)>(.*?)</\1>", re.S)
+_FT_XML_LITERALS = ("<description>", "<comments>", "<comment>",
+                    "<login-banner>", "<location>")
+_FT_SET_KEYWORDS = ("description", "comment", "login-banner", "location")
+_FT_SET_AT_RE = re.compile(
+    r'(?:description|comments|comment|login-banner|location)[ \t]+"(?P<val>[^"\n]+)"')
+_FT_VENDOR_RE = re.compile(
+    r"<(/?)(predefined|threats|application-type|global)(?=[\s/>])[^>]*>")
+
+
+def _ft_vendor_spans(text: str) -> tuple[list[tuple[int, int]], list[int]]:
+    """Vendor-catalog spans (<predefined>, <threats>, <application-type>, the
+    <global> block of a candidate config) — the text the anonymizer leaves
+    alone because it is Palo Alto's own prose, not the customer's. Depth-aware:
+    those containers nest inside themselves on real archives."""
+    spans: list[tuple[int, int]] = []
+    name: str | None = None
+    depth, start = 0, 0
+    for m in _FT_VENDOR_RE.finditer(text):
+        if m.group(0).endswith("/>"):
+            continue
+        closing, tag = m.group(1), m.group(2)
+        if name is None:
+            if not closing:
+                name, depth, start = tag, 1, m.start()
+        elif tag == name:
+            depth += -1 if closing else 1
+            if depth == 0:
+                spans.append((start, m.end()))
+                name = None
+    if name is not None:
+        spans.append((start, len(text)))
+    return spans, [s for s, _ in spans]
+
+
+def _ft_inside(spans: list[tuple[int, int]], starts: list[int], pos: int) -> bool:
+    i = _bisect_right(starts, pos)
+    return i > 0 and pos < spans[i - 1][1]
+
+
+def _ft_set_fields(text: str):
+    """`keyword "value"` occurrences that are the only quoted string on their
+    line, as (start, value start, value end, end). Found by keyword search
+    rather than by one regex over the payload: an alternation of five words
+    has no literal prefix to skip on, and a real TSF's text is gigabytes of
+    log that contains none of these fields."""
+    hits = []
+    for kw in _FT_SET_KEYWORDS:
+        i = text.find(kw)
+        while i != -1:
+            hits.append(i)
+            i = text.find(kw, i + 1)
+    for i in sorted(set(hits)):
+        if i and (text[i - 1].isalnum() or text[i - 1] in "_.-"):
+            continue
+        m = _FT_SET_AT_RE.match(text, i)
+        if m is None:
+            continue
+        line_start = text.rfind("\n", 0, i) + 1
+        line_end = text.find("\n", m.end())
+        line_end = len(text) if line_end == -1 else line_end
+        if '"' in text[line_start:i] or '"' in text[m.end():line_end]:
+            continue
+        yield i, m.start("val"), m.end("val"), m.end()
+
+
+def _ft_is_redacted(content: str) -> bool:
+    """Content that is nothing but the placeholder, one per line."""
+    return all(line.strip() in ("", FREE_TEXT_PLACEHOLDER) for line in content.split("\n"))
+
+
+def redacted_free_text(text: str) -> str:
+    """`text` as the anonymizer should have left it: every free-text field's
+    content replaced by the placeholder, one per line so the line count is
+    untouched. Returns the argument itself when nothing matched."""
+    if any(lit in text for lit in _FT_XML_LITERALS):
+        spans, starts = _ft_vendor_spans(text)
+
+        def xml_repl(m: re.Match) -> str:
+            content = m.group(2)
+            if not content.strip() or _ft_inside(spans, starts, m.start()):
+                return m.group(0)
+            new = "\n".join(FREE_TEXT_PLACEHOLDER if ln.strip() else ln
+                            for ln in content.split("\n"))
+            return f"<{m.group(1)}>{new}</{m.group(1)}>"
+
+        text = _FT_XML_RE.sub(xml_repl, text)
+    out, last = [], 0
+    for _, v_start, v_end, _ in _ft_set_fields(text):
+        out.append(text[last:v_start])
+        out.append(FREE_TEXT_PLACEHOLDER)
+        last = v_end
+    if out:
+        out.append(text[last:])
+        text = "".join(out)
+    return text
+
+
+def free_text_survivals(text: str) -> int:
+    """Free-text fields still carrying their content in an *anonymized*
+    payload. The compare cannot know what the prose said, only that something
+    other than the placeholder is where the tool promised to leave nothing."""
+    n = 0
+    if any(lit in text for lit in _FT_XML_LITERALS):
+        spans, starts = _ft_vendor_spans(text)
+        for m in _FT_XML_RE.finditer(text):
+            if not m.group(2).strip() or _ft_inside(spans, starts, m.start()):
+                continue
+            if not _ft_is_redacted(m.group(2)):
+                n += 1
+    n += sum(1 for _, v_start, v_end, _ in _ft_set_fields(text)
+             if text[v_start:v_end] != FREE_TEXT_PLACEHOLDER)
+    return n
+
+
 def _expand_to_token(s: str, start: int, end: int) -> tuple[int, int]:
     while start > 0 and (s[start - 1].isalnum() or s[start - 1] in "._-@"):
         start -= 1
@@ -517,16 +659,30 @@ def analyze_text_pair(rel: str, orig_raw: bytes, anon_raw: bytes, kind: str,
         return rep
 
     if o_text != a_text:
+        # What the original should have become: free text out (when the
+        # sidecar says the run removed it), then the mapping applied — the
+        # order the anonymizer used, re-derived here from the sidecar alone.
+        r_text = redacted_free_text(o_text) if index.redact_free_text else o_text
+        r_lines = _split_lines(r_text) if r_text is not o_text else o_lines
+        if len(r_lines) != len(o_lines):  # unreachable: the placeholder holds
+            r_text, r_lines = o_text, o_lines  # no newline. Never guess here.
         # One C-level rewrite of the whole file; a line the mapping explains is
         # then byte-equal and costs no Python at all. Only the residue goes
         # through the per-line span analysis.
-        e_lines = _split_lines(index.apply(o_text))
+        e_lines = _split_lines(index.apply(r_text))
         unexplained_pairs: list[tuple[int, str, str]] = []
-        for n, (o, a, e) in enumerate(zip(o_lines, a_lines, e_lines, strict=False), 1):
+        for n, (o, a, e, r) in enumerate(
+                zip(o_lines, a_lines, e_lines, r_lines, strict=False), 1):
             if o == a:
                 continue
             rep.changed_lines += 1
-            if e == a or explain_line(o, a, index):
+            # The last call is what keeps the two halves independent: a line
+            # this side would redact but the anonymizer left alone (a vendor
+            # container the two judge differently) is still explained by the
+            # plain mapping, instead of turning a difference of judgement into
+            # an unexplained line.
+            if e == a or explain_line(r, a, index) or (
+                    r != o and explain_line(o, a, index)):
                 rep.explained_lines += 1
             else:
                 rep.unexplained_lines += 1
@@ -544,6 +700,20 @@ def analyze_text_pair(rel: str, orig_raw: bytes, anon_raw: bytes, kind: str,
         rep.timestamps_anon = len(_TIMESTAMP_RE.findall(a_res))
         rep.numeric_orig = len(_NUMERIC_TOKEN_RE.findall(o_res))
         rep.numeric_anon = len(_NUMERIC_TOKEN_RE.findall(a_res))
+
+    # The other half of the free-text promise: not "was the change explained"
+    # but "did the content actually leave". A survivor is a warning, never an
+    # error — it is one field of prose, and the operator must see it; a
+    # placeholder in an archive whose sidecar claims nothing was redacted is
+    # the same question asked backwards.
+    if index.redact_free_text:
+        rep.free_text_survived = free_text_survivals(a_text)
+        if rep.free_text_survived:
+            rep.notes.append(f"{rep.free_text_survived} free-text field(s) kept their "
+                             f"content despite the run's free-text redaction")
+    elif FREE_TEXT_PLACEHOLDER in a_text:
+        rep.notes.append("free-text placeholder present, but the mapping does not "
+                         "declare free-text redaction")
 
     if xml and o_text != a_text:
         rep.xml_structure = _xml_structure(o_text, a_text)
@@ -1043,7 +1213,7 @@ def summarize(files: list[FileReport]) -> dict:
         "changed_lines": 0, "explained_lines": 0, "unexplained_lines": 0,
         "line_count_mismatches": 0,
         "leaks_total": 0, "files_with_leaks": 0, "binary_files_with_identifiers": 0,
-        "binary_redacted": 0,
+        "binary_redacted": 0, "free_text_survivals": 0,
         "timestamp_mismatches": 0, "numeric_mismatches": 0,
         "xml_checked": 0, "xml_structure_changed": 0,
     }
@@ -1060,6 +1230,7 @@ def summarize(files: list[FileReport]) -> dict:
                 s["binary_files_with_identifiers"] += 1
             if f.redacted:
                 s["binary_redacted"] += 1
+        s["free_text_survivals"] += f.free_text_survived
         s["changed_lines"] += f.changed_lines
         s["explained_lines"] += f.explained_lines
         s["unexplained_lines"] += f.unexplained_lines
@@ -1179,7 +1350,14 @@ def file_diff(orig_dir: Path, anon_dir: Path, rel: str, mapping: dict,
         return {"path": rel, "kind": o_kind, "binary": True,
                 "identical": o_raw == a_raw, "orig_size": len(o_raw), "anon_size": len(a_raw)}
     index = MappingIndex(mapping)
-    o_lines, a_lines = _split_lines(_decode(o_raw)), _split_lines(_decode(a_raw))
+    o_text = _decode(o_raw)
+    o_lines, a_lines = _split_lines(o_text), _split_lines(_decode(a_raw))
+    # Same expectation the report is built on: a removed description is an
+    # explained line in the diff view too, not a red one.
+    r_text = redacted_free_text(o_text) if index.redact_free_text else o_text
+    r_lines = _split_lines(r_text) if r_text is not o_text else o_lines
+    if len(r_lines) != len(o_lines):
+        r_lines = o_lines
     n = max(len(o_lines), len(a_lines))
 
     def row(i: int) -> dict:
@@ -1188,7 +1366,8 @@ def file_diff(orig_dir: Path, anon_dir: Path, rel: str, mapping: dict,
         changed = o != a
         r = {"n": i + 1, "orig": _clip(o), "anon": _clip(a), "changed": changed}
         if changed and o is not None and a is not None:
-            r["explained"] = explain_line(o, a, index)
+            r["explained"] = explain_line(o, a, index) or (
+                r_lines[i] != o and explain_line(r_lines[i], a, index))
             r["spans"] = [list(s) for s in _changed_spans(o[:_MAX_LINE_CHARS], a[:_MAX_LINE_CHARS])]
         return r
 

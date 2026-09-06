@@ -51,9 +51,11 @@ with a synthetic line that shows the pattern.
 
 The README's *Known limitations* and the *Known limitations* section of
 `.claude/rules/anonymizer-invariants.md` list what the tool does not do, on purpose or for lack of a
-reliable heuristic — hostnames that appear only in free text, IPv6,
-organisation names in certificate subjects, identifiers embedded in binary
-files (flagged by the compare, redactable with `--redact-binaries`). A report
+reliable heuristic — hostnames that appear only in a log line no config
+declares, IPv6, organisation names in certificate subjects, identifiers
+embedded in binary files (flagged by the compare, redactable with
+`--redact-binaries`), and free-text fields when a run opts out of removing
+them with `--keep-free-text`. A report
 about one of these is a welcome feature request, not a security advisory.
 
 The web UI's threat model is also documented and deliberate:
