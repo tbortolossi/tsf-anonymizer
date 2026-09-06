@@ -22,6 +22,7 @@ Derived from TAC-MAN's ``libs/anonymizer`` (Apache-2.0). What changed, and why:
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import gzip
 import hashlib
@@ -29,8 +30,10 @@ import ipaddress
 import json
 import logging
 import multiprocessing
+import os
 import re
 import secrets
+import shutil
 import tarfile
 import tempfile
 import time
@@ -48,6 +51,57 @@ ProgressFn = Callable[[str, int, int, str], None]
 
 def _noop_progress(phase: str, done: int, total: int, message: str) -> None:
     pass
+
+
+# ---------------------------------------------------------------------------
+# gzip backend: isal when available, stdlib otherwise
+# ---------------------------------------------------------------------------
+#
+# isal (the ``isal`` package, PyPI name of the ``python-isal`` project) binds
+# Intel's ISA-L and is a documented drop-in for ``gzip``/``zlib`` — same
+# streams, 2-3x the throughput on this kind of text (measured on a 565 MB
+# real TSF: extract 92s -> ~35s, repack 66s -> ~25s, single core). Imported
+# once, at module load, so a platform with no prebuilt wheel (no wheel is
+# published for every interpreter/arch combination) degrades to the stdlib
+# path instead of failing to import the package at all.
+try:
+    from isal import igzip as _igzip
+    _HAS_ISAL = True
+except ImportError:  # pragma: no cover - exercised only where the wheel is absent
+    _igzip = None
+    _HAS_ISAL = False
+
+# isal's encoder only offers levels 0-3 (ISAL_BEST_SPEED..ISAL_BEST_COMPRESSION),
+# not zlib's 0-9, so the "6, not 9" trade the rest of this module makes for
+# zlib does not carry over as a number. It carries over as a *decision*:
+# measured on TSF-shaped text, isal at level 3 (its slowest, best-ratio
+# setting) still runs ~320 MB/s against stdlib zlib's ~125 MB/s at level 6 —
+# there is no speed left on the table to buy by dropping to a faster isal
+# level, unlike zlib's 9 -> 6, so level 3 is used throughout. Whichever
+# backend compresses, the *decompressed* bytes are what compare and every
+# other reader see, and both are standard DEFLATE/gzip.
+_ISAL_GZ_LEVEL = 3
+
+
+def _gz_open(path_or_fileobj, mode: str, **kwargs):
+    """``gzip.open``, isal-backed when available. A whole-file, sequential
+    read or write only — never hand the result to something that seeks
+    backward (isal 1.8.0's ``GzipFile.seek`` can misdecode after a rewind;
+    see the outer-archive helpers below for how extract/repack stay clear of
+    that)."""
+    if _HAS_ISAL:
+        if "w" in mode and "compresslevel" not in kwargs:
+            kwargs["compresslevel"] = _ISAL_GZ_LEVEL
+        return _igzip.open(path_or_fileobj, mode, **kwargs)
+    return gzip.open(path_or_fileobj, mode, **kwargs)
+
+
+def _gzip_magic(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(2) == b"\x1f\x8b"
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -1577,14 +1631,15 @@ def process_gz_file(path: Path, anon: Anonymizer, rel: str = "") -> FileOutcome:
     rel = rel or str(path)
     try:
         misses_before = set(anon.frozen_misses)
-        with gzip.open(path, "rb") as f:
+        with _gz_open(path, "rb") as f:
             raw = f.read()
         if is_binary_bytes(raw[:4096]):
             if anon.redact_binaries and anon.binary_embeds_identifier(raw):
                 # mtime=0 keeps the redacted member byte-identical whatever
                 # worker (or run) produced it.
                 with open(path, "wb") as out:
-                    with gzip.GzipFile(fileobj=out, mode="wb", mtime=0) as gz:
+                    gz_cls = _igzip.GzipFile if _HAS_ISAL else gzip.GzipFile
+                    with gz_cls(fileobj=out, mode="wb", mtime=0) as gz:
                         gz.write(REDACTED_PAYLOAD)
                 return FileOutcome(rel, "redacted")
             return FileOutcome(rel, "gz_binary")
@@ -1592,10 +1647,11 @@ def process_gz_file(path: Path, anon: Anonymizer, rel: str = "") -> FileOutcome:
         warnings = _new_frozen_misses(anon, misses_before, rel)
         if out is None:
             return FileOutcome(rel, "unchanged", warnings=warnings)
-        # Level 6, not the gzip default of 9: measured 12 MB/s at 9 against
-        # 38 MB/s at 6 for the same output size on this kind of text — the
-        # same trade the outer repack already makes.
-        with gzip.open(path, "wb", compresslevel=6) as f:
+        # Level 6, not the gzip default of 9 (stdlib path): measured 12 MB/s
+        # at 9 against 38 MB/s at 6 for the same output size on this kind of
+        # text — the same trade the outer repack already makes. The isal
+        # path uses _ISAL_GZ_LEVEL instead (see above; _gz_open fills it in).
+        with _gz_open(path, "wb", **({} if _HAS_ISAL else {"compresslevel": 6})) as f:
             f.write(out)
         return FileOutcome(rel, "modified", dict(anon.last_counts), warnings=warnings)
     except Exception as e:
@@ -1626,6 +1682,68 @@ def _is_safe_member(member: tarfile.TarInfo, work_dir: Path) -> bool:
     return True
 
 
+@contextlib.contextmanager
+def _tar_for_read(archive: Path, progress: ProgressFn, phase: str):
+    """Yield a `tarfile.TarFile` open for random-access reading of `archive`.
+
+    `extract_archive` needs backward seeks: `getmembers()` is a full forward
+    scan to build the member list, then `extractall()` restarts near the
+    beginning for the first chunk. isal's `GzipFile` decodes 2-3x faster than
+    stdlib zlib but (as of isal 1.8.0) can misdecode after exactly that kind
+    of rewind — a `.seek()` back to a non-zero offset following a prior read,
+    confirmed against the stdlib output on this repo's mock archive. So isal
+    is only ever driven strictly forward here: when it is available and
+    `archive` is gzip-compressed, its speed goes into a single sequential
+    decompression pass into a plain, uncompressed temp `.tar` file on the
+    same volume as `archive` (never partial, never re-read); tarfile then
+    does its usual random-access reading against that ordinary file, exactly
+    as it would against an uncompressed `.tar`. Falls back to
+    `tarfile.open(archive, "r:*")` — unchanged from before this change —
+    when isal is unavailable or `archive` is not gzip-compressed (a plain
+    `.tar`, which isal cannot speed up here anyway).
+    """
+    if _HAS_ISAL and _gzip_magic(archive):
+        progress(phase, 0, 0, f"Decompressing {archive.name}")
+        fd, tmp_name = tempfile.mkstemp(dir=archive.parent, suffix=".tsf-anon-tmp.tar")
+        tmp_path = Path(tmp_name)
+        try:
+            with open(archive, "rb") as raw:
+                with _igzip.GzipFile(fileobj=raw, mode="rb") as gz, os.fdopen(fd, "wb") as tmp_f:
+                    shutil.copyfileobj(gz, tmp_f, length=1024 * 1024)
+            with tarfile.open(tmp_path, "r:") as tar:
+                yield tar
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    else:
+        with tarfile.open(archive, "r:*") as tar:
+            yield tar
+
+
+@contextlib.contextmanager
+def _tar_for_write(output: Path, compresslevel: int):
+    """Yield a `tarfile.TarFile` that writes straight into a gzip-compressed
+    `output`, isal-backed when available.
+
+    Unlike reading (`_tar_for_read`), writing an archive is purely
+    sequential — `tarfile` never seeks backward while it writes — so isal's
+    `GzipFile` is safe to drive directly here, wrapped as `tarfile`'s own
+    `fileobj` exactly the way `tarfile.TarFile.gzopen` wraps stdlib's
+    `GzipFile` for `mode="w:gz"`. No temp file needed on this side.
+    """
+    if _HAS_ISAL:
+        with open(output, "wb") as raw:
+            gz = _igzip.GzipFile(fileobj=raw, mode="wb", compresslevel=_ISAL_GZ_LEVEL)
+            tar = tarfile.TarFile.taropen(str(output), "w", gz)
+            tar._extfileobj = False  # tar.close() below also closes `gz` (flush + trailer)
+            try:
+                yield tar
+            finally:
+                tar.close()
+    else:
+        with tarfile.open(output, "w:gz", compresslevel=compresslevel) as tar:
+            yield tar
+
+
 def extract_archive(archive: Path, work_dir: Path, *,
                     progress: ProgressFn = _noop_progress,
                     phase: str = "extract") -> tuple[list[tarfile.TarInfo], int]:
@@ -1640,15 +1758,17 @@ def extract_archive(archive: Path, work_dir: Path, *,
     The extraction is driven in slices so it can say how far it is: on a real
     TSF this phase is minutes long, and a bar that only knows "started" and
     "finished" cannot be told from a hung run. Slices keep `extractall`'s own
-    semantics (directory attributes applied after their contents) and read the
-    stream forward-only, which is what keeps a gzip member cheap to reach.
+    semantics (directory attributes applied after their contents). The
+    getmembers() scan below reads the archive forward to the end, then this
+    loop restarts extraction near the beginning — a backward seek `_tar_for_read`
+    routes around when isal is doing the decoding (see its docstring).
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     members: list[tarfile.TarInfo] = []
     to_extract: list[tarfile.TarInfo] = []
     skipped = 0
     total = 0
-    with tarfile.open(archive, "r:*") as tar:
+    with _tar_for_read(archive, progress, phase) as tar:
         for m in tar.getmembers():
             m.name = m.name.lstrip("/")
             if not m.name or m.name == ".":
@@ -1692,10 +1812,11 @@ def repack_archive(members: Iterable[tarfile.TarInfo], tree: Path, output: Path,
     # ~100 updates whatever the size: a small archive still moves, a 500-member
     # one does not write job.json for every file.
     step = max(1, total // 100)
-    # Level 6, not gzip's 9: measured on a real TSF, 9 runs at 61 MB/s and 6 at
-    # 133 MB/s for the *same* output size — the last three levels buy nothing
-    # on this kind of text and cost half the repack phase.
-    with tarfile.open(output, "w:gz", compresslevel=6) as tar:
+    # Level 6, not gzip's 9 (stdlib path): measured on a real TSF, 9 runs at
+    # 61 MB/s and 6 at 133 MB/s for the *same* output size — the last three
+    # levels buy nothing on this kind of text and cost half the repack
+    # phase. The isal path uses _ISAL_GZ_LEVEL instead (see above).
+    with _tar_for_write(output, compresslevel=6) as tar:
         for m in members:
             if written % step == 0:
                 progress("repack", written, total, output.name)
@@ -1885,7 +2006,7 @@ def _detect_in_file(path) -> list[tuple]:
     path = Path(path)
     try:
         if path.suffix == ".gz":
-            with gzip.open(path, "rb") as f:
+            with _gz_open(path, "rb") as f:
                 raw = f.read()
             if is_binary_bytes(raw[:4096]):
                 return []

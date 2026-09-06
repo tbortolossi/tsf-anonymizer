@@ -279,6 +279,29 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
 - **The output archive is the input archive with payloads swapped.**
   `repack_archive` iterates the original `TarInfo` list; it must not re-walk
   the filesystem (`tar.add(dir)`), which loses order and metadata.
+- **isal decodes the outer `.tgz` and inner `.gz` payloads only in one
+  direction: forward.** `_tar_for_read` cannot hand `tarfile` an isal
+  `GzipFile` as its `fileobj` the way `_tar_for_write` safely hands it one
+  for writing: `extract_archive` calls `getmembers()` (a full forward scan
+  to the end of the archive) before `extractall()` restarts near the
+  beginning, and isal 1.8.0's `GzipFile.seek()` misdecodes after exactly
+  that rewind pattern (confirmed against the stdlib output on this repo's
+  mock archive: `.seek(0)` after a partial read, then a further read, comes
+  back scrambled). So reading only ever drives isal strictly forward: the
+  whole compressed archive is decompressed in one sequential pass into a
+  plain, uncompressed temp `.tar` on the same volume, and `tarfile` then
+  does its usual random-access reads against that ordinary file — the
+  extraction logic below is unchanged either way. Writing has no such
+  restriction (`tarfile` never seeks backward while it writes), so
+  `_tar_for_write` wraps isal's `GzipFile` directly as `tarfile`'s
+  `fileobj`, exactly as `tarfile.TarFile.gzopen` wraps stdlib's for
+  `mode="w:gz"`. Whichever backend compresses, only the *decompressed*
+  bytes are the invariant — compare only ever reads decompressed content,
+  and isal's encoder makes a different, and by design slightly larger,
+  compressed size for the same input (see CHANGELOG). Do not "simplify" the
+  read side back to wrapping isal's `GzipFile` as `tarfile`'s `fileobj`
+  without re-checking this against whatever isal version is then current —
+  that is precisely the design this note exists to head off.
 - **Serial regex matches 12 or 15 digits only.** 13 digits is an epoch in
   milliseconds; `\d{12,15}` turned every such timestamp into a fake serial.
 - **Never anonymize** PAN-OS interface names, `BUILTIN_OBJECTS` (`www`
