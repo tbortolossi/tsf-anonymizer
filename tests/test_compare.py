@@ -548,3 +548,41 @@ class TestXmlStructure:
         doc = "<a xmlns='urn:x' xmlns:p='urn:y'><p:b/><c><p:d/></c></a>"
         assert _xml_tags(doc) == [e.tag for e in ET.fromstring(doc).iter()]
         assert _xml_tags(doc)[1] == "{urn:y}b"
+
+    def test_non_utf8_byte_degrades_like_unparseable_xml(self):
+        """A text payload is decoded with errors="surrogateescape" (the
+        byte-exact round trip invariant), so a non-UTF-8 byte in an XML file
+        survives as a lone surrogate. Both `expat.Parser.Parse` and
+        `ET.fromstring` re-encode a str argument to UTF-8 before parsing it,
+        which raises UnicodeEncodeError for such a surrogate — not
+        ExpatError/ET.ParseError, so it used to escape `_xml_structure`
+        uncaught and fail the whole file's comparison instead of yielding the
+        graceful "unparseable" verdict a truncated or otherwise broken XML
+        document gets."""
+        from tsf_anonymizer.compare import _xml_structure
+        o_text = b"<a>caf\xe9</a>".decode("utf-8", errors="surrogateescape")
+        a_text = b"<a>caf\xe9</a>".decode("utf-8", errors="surrogateescape")
+        assert _xml_structure(o_text, a_text) == "unparseable"
+
+    def test_non_utf8_xml_file_still_gets_a_full_comparison_report(self, tmp_path):
+        """The bug this guards: before the fix, compare_one propagated the
+        UnicodeEncodeError out of analyze_text_pair, so a worker running this
+        pair through the pool fell into the generic worker-crash handler and
+        the file's report became a bare "comparison failed" — no leak scan,
+        no line diff, no xml_structure verdict at all. It must instead behave
+        exactly like any other unparseable XML: the rest of the analysis
+        (leak scan, line diff) still runs."""
+        from tsf_anonymizer.compare import compare_one
+        (tmp_path / "o").mkdir()
+        (tmp_path / "a").mkdir()
+        o_raw = b"<a>caf\xe9 10.0.0.5</a>"
+        a_raw = b"<a>caf\xe9 100.64.0.1</a>"
+        (tmp_path / "o" / "f.xml").write_bytes(o_raw)
+        (tmp_path / "a" / "f.xml").write_bytes(a_raw)
+        rep = compare_one("f.xml", tmp_path / "o" / "f.xml", tmp_path / "a" / "f.xml",
+                          MappingIndex(MAPPING))
+        assert rep.xml_structure == "unparseable"
+        assert rep.kind == "text"
+        assert rep.changed_lines == 1
+        assert rep.status == "anonymized"
+        assert not any("comparison failed" in n for n in rep.notes)

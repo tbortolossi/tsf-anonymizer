@@ -369,7 +369,15 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   plus a leading `{`), so a namespaced tag is still `{uri}local`, and expat's
   own error is the one ElementTree would have raised — verdicts are identical
   on comments, PIs, internal entities, encoding declarations, namespaces and
-  every unparseable shape. Test: `TestXmlStructure`.
+  every unparseable shape. `_xml_structure` also degrades to `"unparseable"`
+  on `UnicodeEncodeError`, not only `expat.ExpatError`: a payload is decoded
+  with `errors="surrogateescape"`, so a non-UTF-8 byte survives as a lone
+  surrogate, and both `expat.Parser.Parse` and `ET.fromstring` re-encode a
+  `str` argument to UTF-8 before parsing — raising `UnicodeEncodeError`, not
+  the parser's own error. Uncaught, that escaped `analyze_text_pair` and
+  turned the *whole file's* report into a bare "comparison failed" instead of
+  the same graceful verdict a truncated document gets. Test:
+  `TestXmlStructure`.
 - **Rewritten `.gz` members are recompressed at level 6, not gzip's default
   9** — measured 12 MB/s at 9 against 38 MB/s at 6 for the same output size,
   the same trade `repack_archive` already makes for the outer archive.

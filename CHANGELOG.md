@@ -94,6 +94,16 @@ change what is mapped, a patch bump only fixes).
   outer and inner `.gz` alike.
 
 ### Fixed
+- A non-UTF-8 byte in an XML payload no longer fails the whole file's
+  comparison report. Text is decoded with `errors="surrogateescape"`, so such
+  a byte survives as a lone surrogate; both `expat.Parser.Parse` and
+  `ET.fromstring` re-encode a `str` argument to UTF-8 before parsing, which
+  raises `UnicodeEncodeError` for a surrogate rather than the parser's own
+  error — uncaught, it escaped `_xml_structure` and turned the file's report
+  into a bare "comparison failed" instead of the graceful `xml_structure =
+  "unparseable"` verdict a truncated or otherwise broken document already
+  gets. `_xml_structure` now catches `UnicodeEncodeError` alongside
+  `expat.ExpatError`.
 - A bare common English word is no longer an identity, in any category:
   brute-force login guesses (`failed authentication for user 'install'`,
   `'up'`, `'inventory'`) and config entries genuinely named `data` or

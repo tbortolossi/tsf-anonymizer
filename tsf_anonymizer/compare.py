@@ -427,7 +427,14 @@ def _xml_structure(o_text: str, a_text: str) -> str:
     try:
         o_tags = _xml_tags(o_text)
         a_tags = _xml_tags(a_text)
-    except expat.ExpatError:
+    except (expat.ExpatError, UnicodeEncodeError):
+        # expat.Parser.Parse() encodes a str argument to UTF-8 before handing
+        # it to the C parser; a payload holding a non-UTF-8 byte was decoded
+        # upstream with errors="surrogateescape" (the byte-exact round trip
+        # invariant), so o_text/a_text can carry lone surrogates that UTF-8
+        # cannot encode. That raises UnicodeEncodeError, not ExpatError —
+        # degrade the same way, so one non-UTF-8 XML file costs only its own
+        # xml_structure verdict, not the whole file's comparison report.
         return "unparseable"
     return "preserved" if o_tags == a_tags else "changed"
 
