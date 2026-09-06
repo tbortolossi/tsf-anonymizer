@@ -395,7 +395,15 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   milliseconds; `\d{12,15}` turned every such timestamp into a fake serial.
 - **Never anonymize** PAN-OS interface names, `BUILTIN_OBJECTS` (`www`
   included — a service named `www` rewrote http://www.w3.org in every vendor
-  XML namespace), `VENDOR_DOMAINS`, netmasks, loopback/multicast/link-local,
+  XML namespace; routing-protocol names `bgp`/`ospf`/`ospfv3`/`rip`/`bfd`/
+  `pim`/`igmp`/`msdp`/`vrrp` included too — a real box with a service named
+  `bgp` had every `> show advanced-routing bgp loc-rib-detail` echo rewritten
+  to `… SVC-0368 …`, losing the BGP sections to any reader; the compare's
+  dynamic routing view caught it as 29 missing routes on the anonymized side.
+  Such a name stays in clear when a customer genuinely uses it — it
+  identifies nobody, the `lan`/English-stopword trade, and compounds like
+  `bgp-peering-lyon` are still identities), `VENDOR_DOMAINS`, netmasks,
+  loopback/multicast/link-local,
   or `_USER_STOPWORDS` as usernames — brute-force attempts on an exposed GP
   portal log `failed authentication for user 'error'` (also 'request',
   'block', 'usr'), and pseudonymizing those words rewrote every standalone

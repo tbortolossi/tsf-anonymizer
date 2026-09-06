@@ -91,6 +91,9 @@ via the service desk (ticket prefix SR).</login-banner>
 {addresses}
           <entry name="web server prod"><fqdn>web-prod-01.{domain}</fqdn></entry>
         </address>
+        <service>
+          <entry name="bgp"><protocol><tcp><port>179</port></tcp></protocol></entry>
+        </service>
         <rulebase><security><rules>
 {rules}
         </rules></security></rulebase>

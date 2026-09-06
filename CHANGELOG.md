@@ -63,6 +63,18 @@ change what is mapped, a patch bump only fixes).
   (`Anonymizer.from_mapping`), only *new* allocations use the tree, and
   `ip_seed` rides the sidecar unchanged.
 
+### Fixed
+- Routing-protocol names (`bgp`, `ospf`, `ospfv3`, `rip`, `bfd`, `pim`,
+  `igmp`, `msdp`, `vrrp`) joined `BUILTIN_OBJECTS` and are never identities:
+  a real box with a service object named `bgp` had every
+  `> show advanced-routing bgp loc-rib-detail` command echo rewritten to
+  `… SVC-0368 loc-rib-detail`, which lost the BGP sections to any reader of
+  the copy — caught by the routing-coherence check's dynamic view as 29
+  missing routes on the anonymized side. Such a bare name now stays in
+  clear when a customer genuinely uses it (it identifies nobody — the same
+  trade `www`, `lan` and the English stopwords already make); compounds
+  like `bgp-peering-lyon` are still mapped.
+
 ## [0.4.0] - 2026-09-06
 
 ### Changed
