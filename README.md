@@ -318,9 +318,10 @@ as invariants in [.claude/rules/anonymizer-invariants.md](.claude/rules/anonymiz
   route containing another route or a connected network, every prefix
   length — holds on the anonymized tree *iff* it holds on the original.
   Any injective mapping explains every line; only a prefix-preserving one
-  keeps these relations. Divergences involving public space (aggregation
-  beyond the per-/24 grouping) are counted and shown, not errors — that is
-  the documented trade of mapping public addresses into 240/4.
+  keeps these relations. Public space is prefix-preserved too (one keyed
+  tree over 240/4), so divergences involving public networks are expected
+  near zero; they stay counted and shown rather than errors — the rare
+  anti-collision fallback moving one address must not fail a real compare.
 - **The compare mode only knows the mapping.** It proves every change is
   mapping-driven and that no mapped value survives; it cannot know that a
   string it never mapped is the customer's name. A raw `grep` of the

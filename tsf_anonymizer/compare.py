@@ -716,9 +716,11 @@ _PRESERVED_SPACES = tuple(ipaddress.ip_network(c) for c in (
 
 
 def _in_preserved(net) -> bool:
-    """Prefix preservation is guaranteed for RFC 1918/CGNAT only; public
-    space keeps /24 grouping but not aggregation (documented). A relation is
-    load-bearing for the check iff every network involved is private."""
+    """Prefix preservation is *guaranteed* for RFC 1918/CGNAT only: a
+    relation is a hard error iff every network involved is private. Public
+    space is prefix-preserved too (same-nibble relations to any depth), but
+    the rare anti-reuse probe or generator fallback may move one address —
+    a public divergence is counted and shown, never an error."""
     return net.version == 4 and any(net.subnet_of(p) for p in _PRESERVED_SPACES)
 
 
@@ -857,9 +859,11 @@ def check_routing_coherence(orig_dir: Path, anon_dir: Path) -> dict:
             if bad:
                 mismatches.append(f"{bad} {label} relation(s) hold on one side only")
     out["mismatches"] = mismatches
-    # Public aggregation (anything beyond the per-/24 grouping) is the
-    # documented trade of mapping public space into 240/4: counted, shown,
-    # but not an error — private structure is the guarantee.
+    # Public relations are preserved by the catch-all tree too, so this is
+    # expected to be ~0; what remains is the rare anti-reuse probe or
+    # generator fallback moving one address — counted, shown, but not an
+    # error, so a rarity never reddens a real compare. Private structure
+    # stays the hard guarantee.
     out["public_divergences"] = public
     out["ok"] = not mismatches
     return out

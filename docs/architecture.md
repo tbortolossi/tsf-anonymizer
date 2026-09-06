@@ -87,7 +87,7 @@ members through the same frozen tables, file names only, never directories.
 | class | original | pseudonym | shaped so that |
 |---|---|---|---|
 | private IPv4 | `10.1.2.3` | `10.x.y.3` | same class + host octet kept: prefix-preserving (keyed PRF tree, `ip_seed` in the sidecar), so subnets and routes stay coherent |
-| public IPv4 | `8.8.8.8` | `240.x.y.z` | class E — never routable, never a real third party; one fake /24 per real /24 |
+| public IPv4 | `8.8.8.8` | `240.x.y.z` | class E — never routable, never a real third party; same keyed PRF tree (top nibble folded into the path seed), so same real prefix → same fake prefix, /4 to /32 |
 | FQDN / hostname | `fw01.acme.local` | `host007.anon.internal` | parent domains registered down to the apex |
 | e-mail | `j.dupont@acme.fr` | `user003@host002.anon.internal` | |
 | named object | `Zone-Prod-DMZ` | `ZONE-0012` | category prefix kept, so the config still reads |
@@ -114,8 +114,11 @@ routes + both RIB formats of the techsupport txt);
 nexthop ∈ connected subnet, route ⊆ route (compared as ancestor sets, not
 O(n²) pairs), connected ⊆ route, prefix lengths — to hold on the
 anonymized side iff it holds on the original; public-involved divergences
-are counted separately (`public_divergences`), the documented trade of the
-per-/24 public grouping. No mapping involved: this is the check that
+are counted separately (`public_divergences`). The catch-all public tree
+preserves those relations too, so the count is expected ≈ 0 — what remains
+is the rare anti-reuse probe or generator fallback moving one address,
+counted rather than erroring so a rarity never reddens a real compare. No
+mapping involved: this is the check that
 fails if prefix preservation ever regresses, which per-line explanation
 cannot see — on its first real run it caught a genuine leak (an original
 equal to a handed-out pseudonym, skipped in clear). Summary key `routing`,

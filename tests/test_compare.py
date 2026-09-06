@@ -285,7 +285,11 @@ class TestRoutingCoherence:
         work, mapping = trees
         r = compare_trees(work / "orig", work / "anon", mapping).summary["routing"]
         assert r["checked"] and r["ok"]
-        assert r["routes"] >= 5 and r["connected"] >= 2
+        assert r["routes"] >= 8 and r["connected"] >= 3
+        # The catch-all public tree preserves the WAN /30 nexthop and the
+        # /16 aggregate over its /24s: zero public divergences expected —
+        # only the rare anti-reuse probe / generator fallback could count.
+        assert r["public_divergences"] == 0
 
     def test_a_nexthop_moved_out_of_its_subnet_is_reported(self, trees):
         work, mapping = trees

@@ -530,6 +530,61 @@ class TestRealTsfLessons:
             by24.setdefault(ip.rsplit(".", 1)[0], set()).add(f.rsplit(".", 1)[0])
         assert all(len(s) == 1 for s in by24.values())
 
+    def test_public_fakes_preserve_shared_prefixes_at_every_depth(self, anon):
+        # Audit lesson (real corpus, 2026-09): per-/24 grouping with a host
+        # permutation broke the default route's nexthop out of its connected
+        # WAN /30 and lost 120 of 246 cross-/24 aggregate containments on one
+        # box. The catch-all tree preserves every same-nibble relation /4../32.
+        import ipaddress
+        def shared(x: str, y: str) -> int:
+            d = (int(ipaddress.ip_address(anon.anon_ip(x)))
+                 ^ int(ipaddress.ip_address(anon.anon_ip(y))))
+            return 32 - d.bit_length()
+        assert shared("203.0.113.129", "203.0.113.130") >= 30  # WAN /30 intra-host
+        assert shared("198.18.100.7", "198.18.0.0") >= 16      # /16 aggregate ⊇ /24
+        assert shared("198.18.1.2", "198.19.200.9") >= 15      # high in the tree too
+        assert anon.anon_ip("203.0.113.129") != anon.anon_ip("203.0.113.130")
+
+    def test_public_aggregate_still_contains_its_members(self, anon):
+        # The relation check_routing_coherence re-derives: a /16 RIB row must
+        # still contain its observed /24 rows and the nexthop on the copy.
+        import ipaddress
+        agg = ipaddress.ip_network(anon.anon_ip("198.18.0.0") + "/16", strict=False)
+        member = ipaddress.ip_network(anon.anon_ip("198.18.44.0") + "/24", strict=False)
+        assert member.subnet_of(agg)
+        assert ipaddress.ip_address(anon.anon_ip("198.18.7.9")) in agg
+
+    def test_different_top_nibbles_decorrelate(self, anon):
+        # Naive nibble truncation measured 88/1526 systematic /24 collisions
+        # on one real box; with the nibble folded into the PRF path seed,
+        # same-tail reals from different nibbles land in unrelated fakes.
+        fakes = [anon.anon_ip(f"{a}.77.66.55")
+                 for a in (1, 25, 42, 60, 77, 99, 130, 150, 170, 199, 210)]
+        assert len(set(fakes)) == len(fakes)
+        assert len({f.rsplit(".", 1)[0] for f in fakes}) == len(fakes)
+
+    def test_mixed_fakes_are_injective_at_a_few_thousand_ips(self, anon):
+        ips = [f"10.20.{(i >> 8) & 255}.{i & 255}" for i in range(1, 1200)]
+        ips += [f"{o}.{(i >> 4) & 255}.{i & 255}.{(i * 7) % 256}"
+                for o in (8, 23, 44, 61, 77, 91, 104, 121, 130, 147, 166, 181, 198, 203)
+                for i in range(200)]
+        uniq = list(dict.fromkeys(ips))
+        fakes = [anon.anon_ip(ip) for ip in uniq]
+        assert len(set(fakes)) == len(fakes) == len(uniq)
+
+    def test_probe_never_hands_out_network_or_broadcast_hosts(self, anon):
+        # The anti-reuse probe once handed out a .255 in a demo — a host on
+        # the broadcast address. It now skips .0 and .255 candidates.
+        import ipaddress
+        taken = anon._tree_fake(int(ipaddress.ip_address("8.8.8.8")))
+        base = int(ipaddress.ip_address(taken)) & ~0xFF
+        # every host of the fake /24 is taken except .0, .255 and .37
+        # (the tree fake itself included: its host octet can be anything)
+        anon._fakes.add(taken)
+        anon._fakes.update(str(ipaddress.ip_address(base | h))
+                           for h in range(1, 255) if h != 37)
+        assert anon.anon_ip("8.8.8.8") == str(ipaddress.ip_address(base | 37))
+
     def test_route_destination_still_contains_its_hosts(self, anon):
         import ipaddress
         out = anon.anonymize_text("route 10.20.0.0/16 nexthop 10.20.0.1 host 10.20.5.9")
