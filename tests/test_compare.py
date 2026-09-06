@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 from pathlib import Path
 
 import pytest
 from conftest import build_tsf
 
+from tsf_anonymizer import compare
 from tsf_anonymizer.compare import (
     MappingIndex,
     compare_archives,
@@ -484,6 +486,144 @@ def test_compare_explains_a_hostname_inside_a_hyphenated_compound():
     from tsf_anonymizer.compare import MappingIndex, explain_line
     idx = MappingIndex({"fqdns": {"fw-dc1": "host001"}})
     assert explain_line('host: "adm-fw-dc1"', 'host: "adm-host001"', idx)
+
+
+@pytest.mark.skipif(compare.ahocorasick is None,
+                    reason="pyahocorasick not installed: only the fallback path exists here")
+class TestScannerEquivalence:
+    """The Aho-Corasick scanner and the trie regexes are one behaviour.
+
+    The automaton is an accelerator, not a second opinion: it finds candidate
+    spans and revalidates each against the same `_Boundary` the regex splices
+    inline. That is only admissible while the two paths cannot be told apart,
+    which is what these tests assert — on the whole synthetic mock archive,
+    both trees, every payload.
+    """
+
+    @staticmethod
+    def _both(mapping: dict) -> tuple[MappingIndex, MappingIndex]:
+        compare.USE_AHOCORASICK = True
+        aho = MappingIndex(mapping)
+        compare.USE_AHOCORASICK = False
+        rex = MappingIndex(mapping)
+        compare.USE_AHOCORASICK = compare.ahocorasick is not None
+        return aho, rex
+
+    def test_the_two_paths_are_really_two(self):
+        aho, rex = self._both(MAPPING)
+        assert isinstance(aho._cs_re, compare._AhoPass)
+        assert isinstance(aho._num_re, compare._AhoPass)
+        assert isinstance(aho._ci_low_re, compare._AhoPass)
+        assert isinstance(rex._cs_re, re.Pattern)
+        assert isinstance(rex._num_re, re.Pattern)
+        assert isinstance(rex._ci_low_re, re.Pattern)
+        # the rare non-lowerable path stays a regex on both, an automaton
+        # cannot be case-insensitive
+        assert isinstance(aho._ci_re, re.Pattern)
+
+    def test_both_paths_agree_on_every_payload_of_the_mock_archive(self, tmp_path):
+        from tsf_anonymizer.mock import build_mock_tsf
+        src = build_mock_tsf(tmp_path / "mock.tgz", lines=120)
+        _, mapping = anonymize_tsf(src, tmp_path / "mock_anon.tgz",
+                                   work_root=tmp_path / "work", keep_trees=True)
+        aho, rex = self._both(mapping)
+        payloads = 0
+        rewritten = 0
+        leaks_seen = 0
+        for tree in (tmp_path / "work" / "orig", tmp_path / "work" / "anon"):
+            for p in sorted(tree.rglob("*")):
+                if not p.is_file():
+                    continue
+                raw, kind = compare._read_payload(p)
+                # binaries are scanned as latin-1 by the compare, text with
+                # surrogateescape — both go through the same two scanners
+                text = (raw.decode("utf-8", "surrogateescape")
+                        if kind in ("text", "gz_text") else raw.decode("latin-1"))
+                payloads += 1
+                a_apply, r_apply = aho.apply(text), rex.apply(text)
+                assert a_apply == r_apply, f"apply differs on {p.name}"
+                a_leaks, r_leaks = aho.find_leaks(text), rex.find_leaks(text)
+                assert a_leaks == r_leaks, f"find_leaks differs on {p.name}"
+                # insertion order decides which 50 the report keeps
+                assert list(a_leaks) == list(r_leaks), f"leak order differs on {p.name}"
+                rewritten += a_apply != text
+                leaks_seen += len(a_leaks)
+        # a run that found nothing would prove nothing
+        assert payloads >= 10 and rewritten >= 3 and leaks_seen >= 1
+
+    def test_the_whole_compare_report_is_the_same_on_both_paths(self, anonymized):
+        """Not the two scanners only: the report they feed — explained and
+        unexplained lines, leaks, notes, counts, order — is identical."""
+        _, _, mapping, work = anonymized
+        compare.USE_AHOCORASICK = True
+        one = compare_trees(work / "orig", work / "anon", mapping).to_dict()
+        compare.USE_AHOCORASICK = False
+        two = compare_trees(work / "orig", work / "anon", mapping).to_dict()
+        compare.USE_AHOCORASICK = compare.ahocorasick is not None
+        assert one == two
+
+    def test_the_two_paths_agree_on_adversarial_random_text(self):
+        """A differential fuzz over the characters the boundaries react to.
+        Synthetic and seeded — nothing here comes from a real archive; it is
+        the cheap way to reach corners a corpus happens not to hold."""
+        import random
+        alphabet = "abz019._-<>/=:@\"' \t\n|,()[]{}"
+        chunks = ["</", "//", "://", "vsys1_", "vsys7_", "2026-01-02", "1999-12-31",
+                  "İ", "ı", "K", "é", "..", "@@", "-", ">", "="]
+        cats = list(MAPPING)
+        for seed in range(60):
+            rng = random.Random(seed)
+            mapping = {c: {} for c in cats}
+            for i in range(rng.randint(1, 25)):
+                key = (".".join(str(rng.randint(0, 255)) for _ in range(4))
+                       if rng.random() < 0.3 else
+                       "".join(rng.choice("abz019._-@") for _ in range(rng.randint(1, 9))))
+                mapping[rng.choice(cats)][key] = f"FAKE{i:04d}"
+            keys = [k for c in cats for k in mapping[c]]
+            aho, rex = self._both(mapping)
+            for _ in range(8):
+                parts = []
+                for _ in range(rng.randint(1, 80)):
+                    p = rng.random()
+                    if p < 0.40:
+                        k = rng.choice(keys)
+                        parts.append(k.upper() if rng.random() < 0.2 else k)
+                    elif p < 0.62:
+                        parts.append(rng.choice(chunks))
+                    else:
+                        parts.append(rng.choice(alphabet))
+                text = "".join(parts)
+                assert aho.apply(text) == rex.apply(text), (seed, text)
+                a, r = aho.find_leaks(text), rex.find_leaks(text)
+                assert a == r and list(a) == list(r), (seed, text)
+
+    @pytest.mark.parametrize("hazard", ["İ", "ı", "K"])
+    def test_both_paths_agree_where_the_lowered_copy_cannot_serve(self, hazard):
+        aho, rex = self._both(MAPPING)
+        text = f"{hazard} DC01.Acme.Local peer 10.0.0.5 Zone-A"
+        assert aho.apply(text) == rex.apply(text)
+        assert aho.find_leaks(text) == rex.find_leaks(text)
+
+    def test_a_fast_boundary_character_never_contradicts_the_assertions(self):
+        """The automaton path skips the boundary regex when the neighbouring
+        character is outside what the assertions react to. That shortcut is
+        only sound if it can never disagree with them — checked here for every
+        ASCII neighbour against the contexts the boundaries spell out."""
+        contexts = ["", "x", "0", "_", "-", "=", ":", "://", "//", "</", "<", ".",
+                    "/", " ", "2026-01-02", "1999-12-31", "vsys1_", "é"]
+        for boundary in (MappingIndex._CS_BOUNDARY, MappingIndex._NUM_BOUNDARY,
+                         MappingIndex._CI_BOUNDARY):
+            before_rx = re.compile(boundary.before)
+            after_rx = re.compile(boundary.after)
+            fast_before = compare._fast_boundary_chars(boundary.affects_before)
+            fast_after = compare._fast_boundary_chars(boundary.affects_after)
+            assert fast_before and fast_after
+            for c in map(chr, range(128)):
+                for ctx in contexts:
+                    if c in fast_before:
+                        assert before_rx.match(ctx + c + "key", len(ctx) + 1), (c, ctx)
+                    if c in fast_after:
+                        assert after_rx.match("key" + c + ctx, 3), (c, ctx)
 
 
 def test_compare_prefers_the_whole_object_key_over_the_fqdn_it_embeds():

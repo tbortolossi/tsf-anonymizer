@@ -67,6 +67,51 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   TSF are pure ASCII; none of the other four held a hazard. Both halves do
   this, with the same fallback — a boundary the two sides do not share is a
   future unexplained-or-leak report.
+- **The compare's three passes are an Aho-Corasick automaton, and every
+  candidate it reports is revalidated against the boundary it replaces.** A
+  trie regex pays for its alternation at every position it tries; an
+  automaton walks the text once. Measured on a real 38 MB log, the three
+  `finditer` passes cost 4.1 s against 1.0 s, and building the index 0.40 s
+  against 0.04 s — paid once per compare worker process. What the automaton
+  reports is *candidates*, not matches: it knows nothing about boundaries, so
+  `web` inside `web-server-1` comes back too (200 632 raw candidates for
+  142 136 real hits on that log). `_Boundary` therefore holds each pass's
+  `before` / `after` assertion sources in **one** place: the trie-regex path
+  splices them around the alternation, the automaton path compiles them alone
+  and asserts them at the candidate span's edges (`before.match(text,
+  start)`, `after.match(text, end)`). That is the same question, because
+  every assertion is zero-width and reads only the text *around* the span,
+  never the key — a boundary that ever came to depend on which key matched
+  would break the equivalence, and is the one edit this design forbids.
+  Longest-key-first survives with its backtracking: two keys matching at one
+  position are always one a prefix of the other, so they form a chain and the
+  deepest branch the trie regex tries first is simply the longest; candidates
+  are validated *independently* and the longest **survivor** wins, because
+  when the longest key's trailing boundary fails the regex falls back to the
+  next shorter key (with an apex and a subdomain both mapped, the longer key
+  glued to one more letter fails its trailing boundary while the shorter one
+  passes it, on a dot) and so must this. Surviving spans are then walked left
+  to right, non-overlapping, as `finditer` walks them. The pass order (fqdns
+  → objects → numeric) and the lowered-copy method for case-insensitive keys
+  are untouched, and the IGNORECASE fallback stays a regex — an automaton
+  cannot be case-insensitive. `compare.USE_AHOCORASICK` is the flag: the trie
+  regexes stay the reference implementation and the fallback wherever the C
+  extension cannot be installed, and `TestScannerEquivalence` forces both
+  paths and asserts byte-identical `apply` output and identical `find_leaks`
+  findings — same keys, same *insertion order*, which decides the 50 the
+  report keeps — over every payload of the mock archive, both trees. The
+  neighbour shortcut is part of the same contract: `affects_before` /
+  `affects_after` name everything an assertion can react to (what it forbids,
+  plus the first character of every literal it spells out — `:` for `://`,
+  `/` for `</` and `//`), a neighbour outside that class skips the regex
+  call, and a test checks every ASCII neighbour in the fast set against the
+  assertions themselves. Verified on the real corpus, three archives, both
+  trees each: two of them through the whole `compare_trees` (348 and 493
+  files, `CompareReport` identical field by field), the third through `apply`
+  and `find_leaks` over 967 text payloads and 1.6 GB of text — zero
+  divergence, and a seeded differential fuzz over the characters the
+  boundaries react to on top. End to end, one real tree's compare went from
+  145 s to 61 s and another from 131 s to 55 s, single worker.
 - **Every point that grows `fqdn_map` recompiles the lowercase trie.**
   `build_patterns` moves an object name embedding a FQDN into the FQDN table
   *after* the first compile; `_compile_fqdn_patterns` is called at both sites

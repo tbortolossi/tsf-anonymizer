@@ -8,6 +8,25 @@ change what is mapped, a patch bump only fixes).
 ## [Unreleased]
 
 ### Changed
+- The compare's scan — every mapping key over every payload, which is both
+  how a line is explained and how a leak is found — now runs as an
+  Aho-Corasick automaton (new dependency: `pyahocorasick`) instead of three
+  compiled trie regexes. The automaton reports *candidates* and each one is
+  revalidated against the very same boundary assertions the regexes spliced
+  inline, so the semantics are unchanged: longest key first at a position
+  (backtracking to a shorter key whose boundary holds), pass order FQDNs →
+  objects → numeric, the lowered-copy scan for case-insensitive keys with the
+  `re.IGNORECASE` fallback where that copy cannot serve. Measured on a real
+  38 MB log, the three passes cost 1.0 s against 4.1 s, and building the
+  index over 26 828 keys 0.04 s against 0.40 s — paid once per worker
+  process; end to end, the compare of a real tree went from 145 s to 61 s
+  and of another from 131 s to 55 s (single worker). The trie regexes stay
+  the reference implementation and the fallback wherever the C extension
+  cannot be installed (`compare.USE_AHOCORASICK`); a test forces both paths
+  and asserts they produce byte-identical `apply` output, identical
+  `find_leaks` findings and an identical `CompareReport` on the mock
+  archive, and the same was verified on three real archives (both trees
+  each, 1.6 GB of text on one of them): zero divergence.
 - Passes that cannot match are no longer run. The username, e-mail and
   hostname patterns are preceded by a check for the literal every one of
   their matches contains, and the frozen rewrite skips the serial *fallback*
