@@ -467,6 +467,45 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   turned the *whole file's* report into a bare "comparison failed" instead of
   the same graceful verdict a truncated document gets. Test:
   `TestXmlStructure`.
+- **Free text is *removed*, not pseudonymised — and the placeholder is one
+  per line.** `<description>`, `<comments>`, `<comment>`, `<login-banner>`,
+  the SNMP `<location>` and their set-format echo (`description "…"`) hold
+  prose an operator typed; 70-75 % of those fields survived every pseudonym
+  pass verbatim on real archives (1019/1363, 70/149, 516/587 measured on
+  three trees), carrying the people, companies, providers and ticket
+  references no pattern can recognise. `redact_free_text` (on by default,
+  `--keep-free-text` to opt out) therefore replaces the *content* with
+  `FREE_TEXT_PLACEHOLDER`, **one placeholder per line of the field** — a
+  three-line description stays three lines, because a replacement never
+  contains a newline and the compare reads a changed line count as an error.
+  It runs *before* the pseudonym passes (`anonymize_bytes`), which is why the
+  compare's expectation is `mapping applied to the redacted original`, in
+  that order. Three properties hold the design together: (1) the choice
+  rides in the sidecar next to `ip_seed`, so the compare re-derives what to
+  expect from the mapping alone; (2) `compare.redacted_free_text` /
+  `free_text_survivals` are a **duplicated** implementation, never a call
+  into `core` — a field the anonymizer failed to redact surfaces as a
+  *survival* warning, and a placeholder without the flag as a warning of its
+  own; (3) a line the two halves judge differently is still explained by the
+  plain mapping (`explain_line` is tried on the redacted line *and* on the
+  original), so a disagreement about which container holds vendor prose can
+  never become a wall of unexplained lines. Vendor catalogs are skipped —
+  `<predefined>`, `<threats>`, `<application-type>` and the `<global>` block
+  a candidate config embeds, 759 390 of the corpus's 1 387 650 free-text
+  fields: that text explains behaviour and names nobody, and the span scan is
+  **depth-aware** because a real candidate config nests a second `<global>`
+  inside the catalog one (pairing each opening tag with the first following
+  closing tag ended the outer span 12 MB early). The set-format side is
+  conservative by design: the keyword's line must carry exactly one quoted
+  string, so a JSON key (`"description": "x"`), an escaped quote or a
+  multi-line CLI value is left intact — half-rewriting a line is worse than
+  leaving it. It is found with `str.find` per keyword plus a match at that
+  position, not one anchored regex over the payload: an alternation of five
+  words has no literal prefix to skip on and cost 35 s over the 1.5 GB of
+  text of a real TSF that matched *nothing*, against ~2 s (whole pass:
+  3.8 GB of one real tree's text in 13.7 s, 276 MB/s). Tests:
+  `TestFreeTextRedaction` in `tests/test_core.py` and `tests/test_compare.py`
+  (the two halves are asserted byte-identical on real fixtures).
 - **Rewritten `.gz` members are recompressed at level 6, not gzip's default
   9** — measured 12 MB/s at 9 against 38 MB/s at 6 for the same output size,
   the same trade `repack_archive` already makes for the outer archive.
@@ -477,8 +516,17 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   `hostname X` log phrase are not redacted (no reliable hostname heuristic
   without heavy false positives). Test:
   `test_hostname_absent_from_the_config_is_not_redacted`.
-- Free-text fields (rule descriptions, comments, login banners) are not
-  scanned for company names; `<contact>` and `<full-name>` are.
+- Free-text fields are not *scanned* for company names — nothing in prose has
+  a shape to scan for. They are removed instead (see the invariant above), so
+  what they explained is lost with them: the reason a rule exists, the change
+  a comment justified. That is the deliberate trade, and the price of
+  `--keep-free-text` is the opposite one — with the content kept, a company
+  or person name in a description survives, exactly as it did before this
+  became the default. Free text in a shape the redaction does not know (a
+  multi-line quoted CLI value, a line carrying a second quoted string) is
+  left intact rather than half-rewritten, and shows up as a *survival*
+  warning in the compare. `<contact>` and `<full-name>` are still
+  pseudonymised, not removed: they hold a value, not prose.
 - Binary files may embed identifiers; the compare report flags them as
   warnings rather than the anonymizer rewriting them. The big real-world case
   is `var/log/pan/sslvpn-access/sslvpn-task.log*.gz`: a *binary* serialized

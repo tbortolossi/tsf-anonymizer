@@ -22,6 +22,7 @@ Derived from TAC-MAN's ``libs/anonymizer`` (Apache-2.0). What changed, and why:
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import copy
 import gzip
@@ -647,6 +648,15 @@ class Anonymizer:
         self.redact_binaries = False
         self._redaction_scanner: list[re.Pattern] | None = None
 
+        # Replace the *content* of free-text fields (descriptions, comments,
+        # login banners, the SNMP location) with FREE_TEXT_PLACEHOLDER. On by
+        # default, unlike the binary redaction: prose an operator typed is
+        # where attribution survives every pattern-based pass, and the field
+        # itself — the shape a reader needs — stays. `--keep-free-text` (CLI)
+        # and the UI checkbox turn it off. The choice rides in the mapping
+        # sidecar so the compare knows what to expect.
+        self.redact_free_text = True
+
         # Prefix-preserving IP tree (see _tree_fake). Keyed per run; the key
         # rides in the mapping sidecar (`ip_seed`) so a second TSF seeded
         # from the same mapping keeps whole subnets coherent, not only the
@@ -1242,6 +1252,10 @@ class Anonymizer:
             "named_objects":  dict(self.named_obj_map),
             "serial_numbers": dict(self.serial_map),
             "ip_seed":        self.ip_seed.hex(),
+            # Not a mapping entry: what the *run* did, so the compare can tell
+            # a redacted description from an unexplained change. Same place as
+            # `ip_seed` — the sidecar is what the two halves share.
+            "redact_free_text": self.redact_free_text,
         }
 
     @classmethod
@@ -1257,6 +1271,13 @@ class Anonymizer:
         anon.email_map.update({k.lower(): v for k, v in mapping.get("emails", {}).items()})
         anon.named_obj_map.update(mapping.get("named_objects", {}))
         anon.serial_map.update(mapping.get("serial_numbers", {}))
+        # A mapping written by this tool states what the run did with free
+        # text; a caller that means otherwise (anonymize_tsf, with its own
+        # parameter) sets the attribute afterwards. This is also what makes a
+        # rewrite worker — rebuilt from `get_mapping()` — behave like its
+        # parent without an extra argument to keep in step.
+        if "redact_free_text" in mapping:
+            anon.redact_free_text = bool(mapping["redact_free_text"])
         seed = mapping.get("ip_seed")
         if isinstance(seed, str) and len(seed) == 32:
             try:
@@ -1609,6 +1630,158 @@ REDACTED_PAYLOAD = (
     b"the original embedded identifiers from the mapping.\n"
 )
 
+# ---------------------------------------------------------------------------
+# Free-text redaction
+# ---------------------------------------------------------------------------
+#
+# Descriptions, comments, login banners and the SNMP location are prose an
+# operator typed: on real archives 70-75 % of them survived the pseudonym
+# passes verbatim, and what they carry is exactly the attribution this tool
+# exists to strip — people, companies, providers, ticket references. No
+# pattern recognises that; the content itself is what leaves, replaced by a
+# fixed placeholder. What stays is the *shape*: the field, its element, its
+# line, so a reader still sees that a rule was documented and the compare
+# still sees one line for one line.
+FREE_TEXT_PLACEHOLDER = "REDACTED-FREE-TEXT"
+
+# Element content that is free text, in any config file (running, merged,
+# archived, candidate, audit). `<location>` is the SNMP system location — the
+# site name — and is spelled nowhere else in the corpus this was measured on.
+_FREE_TEXT_XML_RE = re.compile(
+    r"<(description|comments|comment|login-banner|location)>(.*?)</\1>", re.S)
+_FREE_TEXT_LITERALS = ("<description>", "<comments>", "<comment>",
+                       "<login-banner>", "<location>")
+
+# The set-format echo of the same fields (`show config` dumps, the CLI
+# sections of a techsupport txt): `description "…"`. Deliberately
+# conservative: the line must carry exactly one quoted string — nothing
+# quoted before the keyword, nothing after the value — so an escaped quote, a
+# JSON key (`"description": "x"`) or a multi-line banner leaves the line
+# untouched. A doubtful line is worth more intact than half-rewritten.
+#
+# Found with `str.find` per keyword rather than one anchored regex over the
+# whole payload: the regex form cost 35 s over the 1.5 GB of text of a real
+# TSF that matched *nothing* (an alternation of five words has no literal
+# prefix to skip on), against ~2 s here — the keyword search runs in C and
+# the Python check runs once per occurrence.
+_FREE_TEXT_SET_KEYWORDS = ("description", "comment", "login-banner", "location")
+_FREE_TEXT_SET_AT_RE = re.compile(
+    r'(?:description|comments|comment|login-banner|location)[ \t]+"(?P<val>[^"\n]+)"')
+
+
+def set_format_fields(text: str):
+    """Yield `(start, value_start, value_end, end)` for each `keyword "value"`
+    that is the only quoted string on its line — the offsets of the whole
+    field and of the value inside it, in ascending order."""
+    hits = []
+    for kw in _FREE_TEXT_SET_KEYWORDS:
+        i = text.find(kw)
+        while i != -1:
+            hits.append(i)
+            i = text.find(kw, i + 1)
+    for i in sorted(set(hits)):
+        if i and (text[i - 1].isalnum() or text[i - 1] in "_.-"):
+            continue  # inside a word: `subdescription`, `x-comment`
+        m = _FREE_TEXT_SET_AT_RE.match(text, i)
+        if m is None:
+            continue
+        line_start = text.rfind("\n", 0, i) + 1
+        line_end = text.find("\n", m.end())
+        line_end = len(text) if line_end == -1 else line_end
+        if '"' in text[line_start:i] or '"' in text[m.end():line_end]:
+            continue  # more than one quoted string on the line: leave it be
+        yield i, m.start("val"), m.end("val"), m.end()
+
+
+# Vendor catalogs are not customer prose: the App-ID / threat / content
+# descriptions under <predefined>, <threats>, <application-type> and the
+# <global> block a candidate config embeds are Palo Alto's own text, and they
+# explain behaviour a reader of the copy still wants. Measured on eight real
+# TSFs: 1 387 650 free-text fields, 759 390 of them inside such a container.
+# Skipping them halves the diff and loses nothing identifying. The compare
+# re-derives the same spans with its own copy of this scan (and stays sound
+# either way: a line this leaves alone is explained by the plain mapping).
+_VENDOR_TAG_RE = re.compile(
+    r"<(/?)(predefined|threats|application-type|global)(?=[\s/>])[^>]*>")
+
+
+def vendor_spans(text: str) -> list[tuple[int, int]]:
+    """Character spans of the vendor-catalog containers of one document.
+
+    Depth-aware on purpose: a real candidate config nests a second `<global>`
+    inside the catalog one, and pairing each opening tag with the *first*
+    following closing tag ended the outer span 12 MB early.
+    """
+    spans: list[tuple[int, int]] = []
+    name: str | None = None
+    depth, start = 0, 0
+    for m in _VENDOR_TAG_RE.finditer(text):
+        if m.group(0).endswith("/>"):
+            continue  # self-closing: no content to skip
+        closing, tag = m.group(1), m.group(2)
+        if name is None:
+            if not closing:
+                name, depth, start = tag, 1, m.start()
+        elif tag == name:
+            depth += -1 if closing else 1
+            if depth == 0:
+                spans.append((start, m.end()))
+                name = None
+    if name is not None:  # truncated document: the catalog runs to the end
+        spans.append((start, len(text)))
+    return spans
+
+
+def in_spans(spans: list[tuple[int, int]], starts: list[int], pos: int) -> bool:
+    """Is `pos` inside one of the (sorted, disjoint) `spans`?"""
+    i = bisect.bisect_right(starts, pos)
+    return i > 0 and pos < spans[i - 1][1]
+
+
+def _placeholder_for(content: str) -> str:
+    """One placeholder per line of `content` — a replacement never contains a
+    newline, so a three-line description stays three lines and the compare
+    still sees one line for one line."""
+    return "\n".join(FREE_TEXT_PLACEHOLDER if line.strip() else line
+                     for line in content.split("\n"))
+
+
+def redact_free_text(text: str) -> tuple[str, int]:
+    """Replace the content of every free-text field with the placeholder.
+
+    Returns (text, fields redacted); the input object itself comes back when
+    nothing matched, so a caller can test identity to skip further work.
+    """
+    count = 0
+    if any(lit in text for lit in _FREE_TEXT_LITERALS):
+        spans = vendor_spans(text)
+        starts = [s for s, _ in spans]
+
+        def xml_repl(m: re.Match) -> str:
+            nonlocal count
+            content = m.group(2)
+            if not content.strip() or in_spans(spans, starts, m.start()):
+                return m.group(0)
+            new = _placeholder_for(content)
+            if new == content:
+                return m.group(0)
+            count += 1
+            return f"<{m.group(1)}>{new}</{m.group(1)}>"
+
+        text = _FREE_TEXT_XML_RE.sub(xml_repl, text)
+    out, last = [], 0
+    for _, v_start, v_end, _ in set_format_fields(text):
+        if text[v_start:v_end] == FREE_TEXT_PLACEHOLDER:
+            continue
+        out.append(text[last:v_start])
+        out.append(FREE_TEXT_PLACEHOLDER)
+        last = v_end
+        count += 1
+    if out:
+        out.append(text[last:])
+        text = "".join(out)
+    return text, count
+
 
 @dataclass
 class FileOutcome:
@@ -1631,9 +1804,21 @@ def _encode(text: str) -> bytes:
 
 
 def anonymize_bytes(raw: bytes, anon: Anonymizer) -> bytes | None:
-    """Anonymize a text payload. Returns None when nothing changed."""
+    """Anonymize a text payload. Returns None when nothing changed.
+
+    Free text goes first: its content leaves whole, so there is nothing left
+    in it for the pseudonym passes to rewrite — and the compare's expectation
+    is `mapping applied to the redacted original`, in that order.
+    """
     original = _decode(raw)
-    anonymized = anon.anonymize_text(original)
+    redacted = 0
+    text = original
+    if anon.redact_free_text:
+        text, redacted = redact_free_text(original)
+    anonymized = anon.anonymize_text(text)
+    if redacted:
+        # anonymize_text() resets last_counts, so this is added after it.
+        anon.last_counts["free_text"] = redacted
     if anonymized == original:
         return None
     return _encode(anonymized)
@@ -2246,6 +2431,7 @@ def anonymize_tsf(
     progress: ProgressFn = _noop_progress,
     workers: int = 1,
     redact_binaries: bool = False,
+    redact_free_text: bool = True,
 ) -> tuple[AnonymizeReport, dict]:
     """Anonymize an archive.
 
@@ -2257,6 +2443,11 @@ def anonymize_tsf(
     over processes. The mapping and the output are the same whatever the
     count: detection feeds allocation in path order, and the rewrite runs
     with frozen tables.
+
+    ``redact_free_text`` (on by default) replaces the content of free-text
+    fields with ``FREE_TEXT_PLACEHOLDER``; the choice is written to the
+    mapping sidecar, which is how the compare tells a redaction from an
+    unexplained change.
     """
     import shutil
 
@@ -2303,6 +2494,9 @@ def anonymize_tsf(
         # depend on scheduling, which is the one thing it must never do.
         anon.frozen = True
         anon.redact_binaries = redact_binaries
+        # The caller's choice wins over whatever a seed mapping recorded, and
+        # get_mapping() then writes it to this run's sidecar for the compare.
+        anon.redact_free_text = redact_free_text
 
         if mapping_only:
             report.duration_s = time.monotonic() - t0

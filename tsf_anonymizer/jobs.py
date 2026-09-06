@@ -147,6 +147,12 @@ class Job:
     # instead of shipping them untouched. Deliberate data loss — operator's
     # choice, verified (not trusted) by the compare.
     redact_binaries: bool = False
+    # Replace the content of free-text fields (descriptions, comments, login
+    # banners, the SNMP location) with a placeholder. On by default, and the
+    # opposite trade from the binaries: what an operator types there is prose
+    # about people and companies that no pattern can pseudonymise, while the
+    # field itself — which a reader needs — stays.
+    redact_free_text: bool = True
     # Seconds spent in each phase, recorded as the run leaves it. This is the
     # observability every performance question so far had to reconstruct from
     # guesses — a slow run says *where* it was slow.
@@ -513,6 +519,7 @@ class JobStore:
             input_tgz, output_tgz, seed_mapping=seed,
             work_root=d / "work", keep_trees=True, progress=progress,
             workers=anon_workers, redact_binaries=job.redact_binaries,
+            redact_free_text=job.redact_free_text,
         )
         job.anonymize_summary = {k: v for k, v in report.to_dict().items() if k != "files"}
         (d / "output" / "anonymize-report.json").write_text(

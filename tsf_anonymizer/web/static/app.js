@@ -174,6 +174,7 @@
     const seedFile = $("input[name=seed_mapping]", form).files[0] || null;
     const del = $("input[name=delete_original]", form).checked;
     const redact = $("input[name=redact_binaries]", form).checked;
+    const redactText = $("input[name=redact_free_text]", form).checked;
     // One shared mapping is only a question when there is more than one archive.
     const policy = seedPolicy();
     const batch = picked.length > 1 ? `b${Date.now().toString(36)}` : null;
@@ -199,6 +200,7 @@
         fd.set("file", picked[i].f);
         fd.set("delete_original", del ? "true" : "false");
         fd.set("redact_binaries", redact ? "true" : "false");
+        fd.set("redact_free_text", redactText ? "true" : "false");
         if (batch) fd.set("batch", batch);
         if (group) fd.set("group", group);
         // An uploaded seed starts every chain: the first archive of each group
@@ -508,6 +510,7 @@
         ${kpi("surviving identifiers (text)", s.leaks_total, s.leaks_total ? "err" : "ok")}
         ${kpi("binaries w/ identifiers", s.binary_files_with_identifiers, s.binary_files_with_identifiers ? "warn" : "ok")}
         ${s.binary_redacted ? kpi("binaries redacted", s.binary_redacted, "warn") : ""}
+        ${s.free_text_survivals ? kpi("free text surviving", s.free_text_survivals, "warn") : ""}
         ${kpi("binary files identical", `${s.binary_identical}/${s.binary_files - (s.binary_redacted || 0)}`,
               s.binary_identical + (s.binary_redacted || 0) === s.binary_files ? "ok" : "err")}
         ${kpi("line-count mismatches", s.line_count_mismatches, s.line_count_mismatches ? "err" : "ok")}

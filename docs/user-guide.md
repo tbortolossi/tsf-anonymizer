@@ -68,7 +68,7 @@ The firewall name outlives the batch: a TSF uploaded next month under the
 same name continues that device's mapping. A `mapping.json` from an earlier
 run can also be uploaded as a seed; it wins over the chain.
 
-Two checkboxes decide what happens to the data:
+Three checkboxes decide what happens to the data:
 
 - **Delete the original after a clean verification** (on by default): once
   the compare finds no error, the un-anonymized upload and its extracted
@@ -79,6 +79,15 @@ Two checkboxes decide what happens to the data:
   values. This option replaces such payloads with a marker instead of
   shipping them — `sslvpn-task.log*.gz` is the usual case, with the source
   IP and username of every GlobalProtect request.
+- **Remove free text** (on by default): rule descriptions, comments, login
+  banners and the SNMP location are prose — people, companies, providers,
+  ticket references — that no pattern can pseudonymise, and on real archives
+  70–75 % of them came through the other passes verbatim. Their content is
+  replaced by `REDACTED-FREE-TEXT`, one placeholder per line so line counts
+  never move; the field and everything around it stay, and vendor
+  descriptions (`<predefined>`, the App-ID and threat catalogs) are kept.
+  Uncheck it to keep the text — the verification is clean either way, because
+  the choice travels in the mapping sidecar.
 
 ![Anonymize tab with two archives dropped and one mapping per firewall selected](screenshots/01-anonymize-batch.png)
 
@@ -100,8 +109,9 @@ summary of the check. The verdict comes in three shades:
 - **green** — every changed line is explained by the mapping, no mapped
   identifier survives, structure intact;
 - **amber** — consistent, with warnings to review: typically binary files
-  that embed identifiers (they are copied through untouched), or a customer
-  address that collides with the fake ranges;
+  that embed identifiers (they are copied through untouched), a customer
+  address that collides with the fake ranges, or a free-text field that kept
+  its content although the run was meant to remove it;
 - **red** — a leak, an unexplained change or a lost line. The original is
   kept whatever the checkbox said.
 
@@ -176,7 +186,8 @@ Same code, no server:
 tsf-anonymizer anonymize in.tgz --verify --report integrity.json          # anonymize + check
 tsf-anonymizer anonymize in.tgz --verify --delete-original                # … and delete on success
 tsf-anonymizer anonymize next.tgz --seed-mapping in_anon.mapping.json     # same customer, same pseudonyms
-tsf-anonymizer anonymize in.tgz --redact-binaries --workers 4             # redaction is on by default in the UI/API, a flag on the CLI
+tsf-anonymizer anonymize in.tgz --redact-binaries --workers 4             # binary redaction is on by default in the UI/API, a flag on the CLI
+tsf-anonymizer anonymize in.tgz --keep-free-text                          # keep descriptions/comments/banners (they are removed by default)
 tsf-anonymizer anonymize in.tgz --mapping-only                            # list what would be mapped, write nothing
 tsf-anonymizer compare in.tgz in_anon.tgz --mapping in_anon.mapping.json  # check alone
 tsf-anonymizer serve --port 8090 --data-dir ./data                       # the UI, open, loopback

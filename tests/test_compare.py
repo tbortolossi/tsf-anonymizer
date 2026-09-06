@@ -771,3 +771,90 @@ class TestXmlStructure:
         assert rep.changed_lines == 1
         assert rep.status == "anonymized"
         assert not any("comparison failed" in n for n in rep.notes)
+
+
+class TestFreeTextRedaction:
+    """The mirror of the anonymizer's free-text pass, re-derived from the
+    sidecar alone: a removed description is an *explained* change, one that
+    survived is a warning, and a placeholder in an archive whose sidecar
+    claims nothing was redacted is a warning too."""
+
+    CFG = "opt/pancfg/mgmt/saved-configs/running-config.xml"
+
+    def test_a_removed_description_is_explained(self, anonymized):
+        _, _, mapping, work = anonymized
+        assert mapping["redact_free_text"] is True
+        rep = compare_trees(work / "orig", work / "anon", mapping)
+        cfg = next(f for f in rep.files if f.path.endswith("running-config.xml"))
+        assert cfg.unexplained_lines == 0 and cfg.changed_lines > 0
+        assert cfg.free_text_survived == 0
+        assert rep.summary["unexplained_lines"] == 0
+        assert rep.summary["free_text_survivals"] == 0
+
+    def test_without_the_flag_the_same_change_is_unexplained(self, anonymized):
+        """The sidecar is what the two halves share: drop the flag and the
+        compare has no reason to expect a placeholder — it says so instead of
+        assuming the anonymizer was right."""
+        _, _, mapping, work = anonymized
+        blind = {k: v for k, v in mapping.items() if k != "redact_free_text"}
+        rep = compare_trees(work / "orig", work / "anon", blind)
+        cfg = next(f for f in rep.files if f.path.endswith("running-config.xml"))
+        assert cfg.unexplained_lines > 0
+        assert any("placeholder present" in n for n in cfg.notes)
+
+    def test_a_field_that_kept_its_content_is_a_warning(self, anonymized):
+        _, _, mapping, work = anonymized
+        p = work / "anon" / self.CFG
+        p.write_bytes(p.read_bytes().replace(
+            b"<comments>REDACTED-FREE-TEXT</comments>",
+            b"<comments>Accounting server, contact M. M.</comments>"))
+        rep = compare_trees(work / "orig", work / "anon", mapping)
+        cfg = next(f for f in rep.files if f.path.endswith("running-config.xml"))
+        assert cfg.free_text_survived == 1
+        assert cfg.status == "warning"
+        assert any("free-text field" in n for n in cfg.notes)
+        assert rep.summary["free_text_survivals"] == 1
+
+    def test_a_kept_free_text_run_is_clean_too(self, tmp_path):
+        tsf = build_tsf(tmp_path, "keep.tgz")
+        out = tmp_path / "keep-out.tgz"
+        _, mapping = anonymize_tsf(tsf, out, work_root=tmp_path / "kwork",
+                                   keep_trees=True, redact_free_text=False)
+        rep = compare_trees(tmp_path / "kwork/orig", tmp_path / "kwork/anon", mapping)
+        assert rep.summary["errors"] == 0
+        assert rep.summary["unexplained_lines"] == 0
+        assert rep.summary["free_text_survivals"] == 0
+
+    def test_the_two_halves_agree_on_what_a_redaction_looks_like(self):
+        """Duplicated, not shared: the expectation the compare builds must be
+        byte-identical to what the anonymizer wrote, or every redacted line
+        would be reported as unexplained."""
+        from tsf_anonymizer.compare import redacted_free_text
+        from tsf_anonymizer.core import redact_free_text
+        for text in (Path("tests/conftest.py").read_text(),
+                     '<a><description>x y</description><global><comment>v</comment></global></a>',
+                     '<a><description>one\ntwo</description></a>\nset a description "z"\n'):
+            assert redact_free_text(text)[0] == redacted_free_text(text)
+
+    def test_a_field_the_anonymizer_left_alone_is_explained_by_the_mapping(self):
+        """The two halves are allowed to disagree about which fields hold
+        customer prose. A line this side expected redacted and the anonymizer
+        merely pseudonymised is still explained by the plain mapping — a
+        difference of judgement is reported as a survival, never as an
+        unexplained line, which is the failure mode that would drown a real
+        report in noise."""
+        from tsf_anonymizer.compare import MappingIndex, analyze_text_pair
+        o = b'<config><rules><description>site 10.0.0.5</description></rules></config>'
+        a = b'<config><rules><description>site 100.64.0.1</description></rules></config>'
+        rep = analyze_text_pair("c.xml", o, a, "text",
+                                MappingIndex({**MAPPING, "redact_free_text": True}), xml=True)
+        assert rep.unexplained_lines == 0
+        assert rep.free_text_survived == 1 and rep.status == "warning"
+
+    def test_a_vendor_description_is_not_reported_as_a_survival(self):
+        from tsf_anonymizer.compare import MappingIndex, analyze_text_pair
+        o = b'<config><predefined><description>vendor 10.0.0.5</description></predefined></config>'
+        a = b'<config><predefined><description>vendor 100.64.0.1</description></predefined></config>'
+        rep = analyze_text_pair("c.xml", o, a, "text",
+                                MappingIndex({**MAPPING, "redact_free_text": True}), xml=True)
+        assert rep.unexplained_lines == 0 and rep.free_text_survived == 0

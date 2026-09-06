@@ -19,6 +19,9 @@ CONFIG_XML = """<?xml version="1.0"?>
         <serial>001901000123</serial>
         <ip-address>172.16.4.1</ip-address>
         <ntp-servers><primary-ntp-server><ntp-server-address>0.pool.ntp.org</ntp-server-address></primary-ntp-server></ntp-servers>
+        <login-banner>Authorized access only.
+Operated by Acme Corp, escalation to Jean Dupont.</login-banner>
+        <snmp-setting><snmp-system><location>Acme Corp datacenter, rack B12</location></snmp-system></snmp-setting>
       </system></deviceconfig>
       <vsys><entry name="vsys1">
         <zone>
@@ -26,12 +29,14 @@ CONFIG_XML = """<?xml version="1.0"?>
           <entry name="trust"/>
         </zone>
         <address>
-          <entry name="SRV-Compta-Paris"><ip-netmask>10.20.30.40/32</ip-netmask></entry>
+          <entry name="SRV-Compta-Paris"><ip-netmask>10.20.30.40/32</ip-netmask>
+            <comments>Accounting server, contact Marie Martin</comments></entry>
           <entry name="web server prod"><fqdn>web.acme-corp.local</fqdn></entry>
         </address>
         <rulebase><security><rules>
           <entry name="Allow-Compta-to-DMZ"><from><member>trust</member></from><to><member>Zone-Prod-DMZ</member></to>
-            <source><member>SRV-Compta-Paris</member></source><action>allow</action></entry>
+            <source><member>SRV-Compta-Paris</member></source><action>allow</action>
+            <description>Opened by Jean Dupont (Acme Corp) after the audit, ticket SR000123</description></entry>
         </rules></security></rulebase>
       </entry></vsys>
       <network><ike><gateway>
@@ -39,6 +44,10 @@ CONFIG_XML = """<?xml version="1.0"?>
       </gateway></ike></network>
     </entry>
   </devices>
+  <predefined>
+    <application><entry name="web-browsing"><description>Vendor text: this description explains
+an App-ID and is not the customer's prose.</description></entry></application>
+  </predefined>
   <shared>
     <server-profile><ldap><entry name="LDAP-Prod">
       <server><entry name="dc01"><address>dc01.acme-corp.local</address></entry></server>
@@ -86,6 +95,8 @@ model: PA-440
 sw-version: 11.1.4
 > show system files
 /opt/panlogs/tmp/techsupport/techsupport_fw-paris-01_20260407_1000.txt
+> show config running | match description
+set rulebase security rules Allow-Compta-to-DMZ description "Opened by Jean Dupont, ticket SR000123"
 """
 DEVICE_NAME = "CoreFirewallParis"
 PRESERVED = ["ethernet1/1", "'admin'", "1743840000123", "pid 4711", "metric 10", "rc=49",

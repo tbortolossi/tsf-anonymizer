@@ -539,3 +539,22 @@ def test_concurrent_saves_of_one_job_never_race_on_the_temp_file(tmp_path):
     saved = json.loads((store.job_dir(job.id) / "job.json").read_text(encoding="utf-8"))
     assert saved["id"] == job.id
     store.shutdown()
+
+
+def test_free_text_removal_is_the_default_and_can_be_turned_off(client, tmp_path):
+    """Same shape as the binary redaction, opposite default: the UI ships the
+    box checked, and unchecking it reaches the job."""
+    tsf = build_tsf(tmp_path)
+    r = client.post("/api/jobs/anonymize", files={"file": ("in.tgz", tsf.read_bytes())},
+                    data={"delete_original": "false"})
+    job = _wait(client, r.json()["id"])
+    assert job["status"] == "done" and job["redact_free_text"] is True
+    assert client.get(f"/api/jobs/{job['id']}/mapping").json()["redact_free_text"] is True
+    assert job["compare_summary"]["free_text_survivals"] == 0
+
+    r = client.post("/api/jobs/anonymize", files={"file": ("in.tgz", tsf.read_bytes())},
+                    data={"delete_original": "false", "redact_free_text": "false"})
+    kept = _wait(client, r.json()["id"])
+    assert kept["status"] == "done" and kept["redact_free_text"] is False
+    assert client.get(f"/api/jobs/{kept['id']}/mapping").json()["redact_free_text"] is False
+    assert kept["compare_summary"]["errors"] == 0

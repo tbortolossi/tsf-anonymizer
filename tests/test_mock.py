@@ -81,3 +81,28 @@ def test_mock_tsf_cli(tmp_path, capsys):
     assert out.exists() and "mock TSF" in capsys.readouterr().out
     assert main(["anonymize", str(out), "--verify", "--report", str(tmp_path / "r.json")]) == 0
     assert json.loads((tmp_path / "r.json").read_text())["summary"]["errors"] == 0
+
+
+def test_mock_free_text_is_removed_end_to_end(tmp_path):
+    """The mock carries what an operator types in a description — a person, a
+    company, a ticket — in XML and in the set-format echo of the CLI dump.
+    None of it may reach the anonymized archive, and the multi-line banner
+    must come out with its lines intact."""
+    src = build_mock_tsf(tmp_path / "in.tgz", lines=30)
+    out = tmp_path / "out.tgz"
+    report, mapping = anonymize_tsf(src, out)
+    text = _text_of(out)
+    for prose in ("Jean Dupont", "Marie Martin", "SR000123", "SR000042", "rack B12",
+                  "Acme Corp", "validated with the provider"):
+        assert prose not in text, prose
+    assert 'description "REDACTED-FREE-TEXT"' in text
+    assert mapping["redact_free_text"] is True
+    assert report.replacements["free_text"] >= 10
+    with tarfile.open(src) as tar:
+        o_cfg = tar.extractfile("./opt/pancfg/mgmt/saved-configs/running-config.xml").read()
+    with tarfile.open(out) as tar:
+        a_cfg = tar.extractfile("./opt/pancfg/mgmt/saved-configs/running-config.xml").read()
+    assert o_cfg.count(b"\n") == a_cfg.count(b"\n")
+    rep = compare_archives(src, out, mapping)
+    assert rep.ok and rep.summary["unexplained_lines"] == 0
+    assert rep.summary["free_text_survivals"] == 0

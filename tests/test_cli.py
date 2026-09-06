@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 
@@ -113,3 +114,13 @@ def test_healthcheck_reports_a_dead_server(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", boom)
     assert cli.main(["healthcheck"]) == 1
+
+
+def test_keep_free_text_flag(tmp_path, tsf):
+    """Free text leaves by default; `--keep-free-text` is the opt-out, and the
+    verification is clean either way."""
+    out = tmp_path / "keep.tgz"
+    assert cli.main(["anonymize", str(tsf), "-o", str(out), "--keep-free-text", "--verify"]) == 0
+    mapping = json.loads((tmp_path / "keep.mapping.json").read_text())
+    assert mapping["redact_free_text"] is False
+    assert b"REDACTED-FREE-TEXT" not in out.read_bytes()

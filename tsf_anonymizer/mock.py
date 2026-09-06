@@ -46,6 +46,16 @@ ADDRESSES = {
 }
 RULES = ["Allow-Compta-to-DMZ", "Allow-Users-Web", "Block-Partners-SMB", "Allow-VPN-Partners"]
 GATEWAYS = ["GW-Paris-Primary", "GW-Lyon-Backup"]
+# What an operator types in a description or a comment: a person, a company, a
+# provider, a ticket. No pattern recognises any of it, which is why the
+# content of these fields leaves the archive whole (`--keep-free-text` to opt
+# out). The mock carries them so CI proves the removal end to end.
+FREE_TEXT = [
+    "Opened by Jean Dupont (Acme Corp) after the audit, ticket SR000123",
+    "Segment for the Paris accounting team — contact Marie Martin",
+    "Do not remove: partner link ordered from the provider by Acme Corp",
+    "Temporary rule for the Lyon migration, review with Jean Dupont",
+]
 
 _CONFIG = """<?xml version="1.0"?>
 <config version="11.1.0" urldb="paloaltonetworks">
@@ -66,7 +76,12 @@ _CONFIG = """<?xml version="1.0"?>
         <default-gateway>172.16.4.254</default-gateway>
         <dns-setting><servers><primary>10.20.50.10</primary><secondary>10.20.50.11</secondary></servers></dns-setting>
         <ntp-servers><primary-ntp-server><ntp-server-address>0.pool.ntp.org</ntp-server-address></primary-ntp-server></ntp-servers>
-        <login-banner>Authorized access only.</login-banner>
+        <login-banner>Authorized access only.
+This firewall is operated by Acme Corp; incidents go to Jean Dupont, on-call
+via the service desk (ticket prefix SR).</login-banner>
+        <snmp-setting><access-setting><version><v2c><snmp-community-string>public</snmp-community-string></v2c></version></access-setting>
+          <snmp-system><location>Acme Corp datacenter, Paris 12e, rack B12</location><contact>ops@{mail_domain}</contact></snmp-system>
+        </snmp-setting>
       </system></deviceconfig>
       <vsys><entry name="vsys1">
         <zone>
@@ -90,7 +105,7 @@ _CONFIG = """<?xml version="1.0"?>
           <entry name="VR-Main">
             <interface><member>ethernet1/1</member><member>ethernet1/2</member><member>ethernet1/3</member></interface>
             <routing-table><ip><static-route>
-              <entry name="SR-Default"><destination>0.0.0.0/0</destination><nexthop><ip-address>198.18.100.2</ip-address></nexthop><interface>ethernet1/3</interface><metric>10</metric></entry>
+              <entry name="SR-Default"><destination>0.0.0.0/0</destination><nexthop><ip-address>198.18.100.2</ip-address></nexthop><interface>ethernet1/3</interface><metric>10</metric><comment>Default route to the Acme Corp uplink, ordered by Jean Dupont</comment></entry>
               <entry name="SR-Branch-Lyon"><destination>10.99.0.0/16</destination><nexthop><ip-address>10.20.40.254</ip-address></nexthop><interface>ethernet1/2</interface><metric>10</metric></entry>
             </static-route></ip></routing-table>
           </entry>
@@ -114,6 +129,7 @@ _CONFIG = """<?xml version="1.0"?>
         <entry name="dc01"><address>dc01.{domain}</address><port>636</port></entry>
         <entry name="dc02"><address>dc02.{domain}</address><port>636</port></entry>
       </server>
+      <comments>Directory hosted by Acme Corp IT, contact Marie Martin (SR000042)</comments>
       <base>DC=acme-corp,DC=local</base>
       <bind-dn>CN=svc-pan,OU=Services,DC=acme-corp,DC=local</bind-dn>
     </entry></ldap></server-profile>
@@ -141,6 +157,11 @@ app-version: 8950-9210
 uptime: 42 days, 3:17:09
 > show system files
 /opt/panlogs/tmp/techsupport/{ts_name}
+> show config running | match description
+set rulebase security rules Allow-Users-Web description "Opened by Jean Dupont (Acme Corp) after the audit, ticket SR000123"
+set address SRV-Compta-Paris description "Segment for the Paris accounting team - contact Marie Martin"
+set deviceconfig system login-banner "Authorized access only. Operated by Acme Corp."
+set snmp-setting snmp-system location "Acme Corp datacenter, Paris 12e, rack B12"
 > show interface all
 name                    id    speed/duplex/state        mac address
 ethernet1/1             16    1000/full/up              00:1b:17:00:00:10
@@ -217,16 +238,23 @@ def _indent(lines: list[str], n: int = 10) -> str:
 def render_config() -> str:
     zones = [f'<entry name="{z}"><network><layer3><member>ethernet1/{i % 2 + 1}</member></layer3></network></entry>'
              for i, z in enumerate(ZONES)]
-    addresses = [f'<entry name="{n}"><ip-netmask>{v}</ip-netmask></entry>' for n, v in ADDRESSES.items()]
+    addresses = [f'<entry name="{n}"><ip-netmask>{v}</ip-netmask>'
+                 f'<description>{FREE_TEXT[i % len(FREE_TEXT)]}</description></entry>'
+                 for i, (n, v) in enumerate(ADDRESSES.items())]
     rules = []
     for i, r in enumerate(RULES):
         src = list(ADDRESSES)[i % len(ADDRESSES)]
+        # A multi-line description on the first rule: PAN-OS keeps the
+        # newlines, and so must the anonymizer (one line in, one line out).
+        desc = (f"Ticket CHG-{1000 + i} — asked by Jean Dupont (Acme Corp),\n"
+                f"validated with the provider on 2026-03-14." if i == 0
+                else f"Ticket CHG-{1000 + i} — {FREE_TEXT[i % len(FREE_TEXT)]}")
         rules.append(
             f'<entry name="{r}"><from><member>{ZONES[i % len(ZONES)]}</member></from>'
             f'<to><member>{ZONES[(i + 1) % len(ZONES)]}</member></to>'
             f'<source><member>{src}</member></source><destination><member>any</member></destination>'
             f'<application><member>web-browsing</member></application><action>allow</action>'
-            f'<description>Ticket CHG-{1000 + i}</description></entry>')
+            f'<description>{desc}</description></entry>')
     gateways = [f'<entry name="{g}"><peer-address><ip>{PEER_PUBLIC[:-1]}{i + 7}</ip></peer-address>'
                 f'<local-address><ip>{MGMT_IP}</ip></local-address></entry>'
                 for i, g in enumerate(GATEWAYS)]
