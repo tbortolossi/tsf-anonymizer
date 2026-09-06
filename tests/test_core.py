@@ -1144,6 +1144,62 @@ class TestFrozenSerialFallback:
         out = anon.anonymize_text("serial 001901000456 here")
         assert out != "serial 001901000456 here"
         assert anon.serial_map["001901000456"] in out
+class TestCaseInsensitiveScanOverLoweredText:
+    """The FQDN pass matches a lowered copy of the text with a trie compiled
+    *without* IGNORECASE (2.3x cheaper). That is only sound while the two
+    find the same spans — see `lowered_for_ci_scan`."""
+
+    def test_a_fqdn_is_rewritten_whatever_its_case(self, anon):
+        anon.register_fqdn("vpn.home-lab.example")
+        anon.build_patterns()
+        out = anon.anonymize_text("VPN.Home-Lab.Example vpn.HOME-LAB.example vpn.home-lab.example")
+        fake = anon.fqdn_map["vpn.home-lab.example"]
+        assert out == f"{fake} {fake} {fake}"
+        assert anon.last_counts["fqdns"] == 3
+
+    def test_the_case_of_the_surrounding_text_is_untouched(self, anon):
+        anon.register_fqdn("vpn.home-lab.example")
+        anon.build_patterns()
+        fake = anon.fqdn_map["vpn.home-lab.example"]
+        assert anon.anonymize_text("GET /Portal FROM VPN.HOME-LAB.EXAMPLE OK") == \
+            f"GET /Portal FROM {fake} OK"
+
+    @pytest.mark.parametrize("hazard", ["\u0130", "\u0131", "\u212a"])
+    def test_the_three_case_hazards_take_the_ignorecase_path(self, anon, hazard):
+        """Text these characters appear in cannot be scanned lowered: their
+        lowercase is longer (U+0130) or breaks the equivalence re.IGNORECASE
+        applies (U+0131 matches "i", U+212A lowers into the boundary class).
+        The pass must still replace, through the flag."""
+        from tsf_anonymizer.core import lowered_for_ci_scan
+        anon.register_fqdn("vpn.home-lab.example")
+        anon.build_patterns()
+        fake = anon.fqdn_map["vpn.home-lab.example"]
+        text = f"user {hazard} reached VPN.Home-Lab.Example"
+        assert lowered_for_ci_scan(text) is None
+        assert anon.anonymize_text(text) == f"user {hazard} reached {fake}"
+
+    def test_the_guard_accepts_ordinary_accented_text(self):
+        from tsf_anonymizer.core import lowered_for_ci_scan
+        text = "Zone São Paulo — ÉTÉ, Ökonomie, ЖУРНАЛ"
+        low = lowered_for_ci_scan(text)
+        assert low is not None and len(low) == len(text) and low == text.lower()
+
+    def test_an_uppercase_key_in_a_seeded_mapping_still_matches(self):
+        """`from_mapping` takes the sidecar as it finds it; a hand-edited or
+        older mapping may carry an uppercase FQDN key, and the lowered scan
+        would never see it if the trie kept that spelling."""
+        anon = Anonymizer.from_mapping({"fqdns": {"VPN.Home-Lab.Example": "host001.anon.internal"}})
+        assert anon.anonymize_text("ping vpn.home-lab.example") == "ping host001.anon.internal"
+        assert anon.anonymize_text("ping VPN.HOME-LAB.EXAMPLE") == "ping host001.anon.internal"
+
+    def test_a_name_moved_into_the_fqdn_pass_is_rewritten_whole(self, anon):
+        """`build_patterns` moves an object name embedding a FQDN into the
+        FQDN table *after* the first compile; the lowercase trie has to be
+        rebuilt with it, or only the first label is replaced."""
+        anon.register_fqdn("enloe")
+        fake = anon.register_named_object("Enloe Domain controllers", "srv-prof")
+        anon.build_patterns()
+        assert anon.anonymize_text("profile 'ENLOE DOMAIN CONTROLLERS'") == f"profile '{fake}'"
 
 
 def test_brute_force_word_port_is_not_a_username(anon):
@@ -1170,3 +1226,89 @@ def test_member_renaming_never_touches_directories(tmp_path, tsf):
         == "./tmp/cli/user001_netstat.txt"
     assert mapped_member_name(lambda s: "X", ".") == "."
     assert mapped_member_name(lambda s: "X", "./tmp/cli") == "./tmp/X"   # only the last component
+
+
+class TestEnglishWordsAreNotIdentities:
+    """Real chassis TSFs: `show_log_system.txt` carries brute-force and typo
+    login guesses (`failed authentication for user 'install'`, `'up'`,
+    `'inventory'`), and a config can genuinely hold an address object named
+    `data` or a tag named `bytes`. Pseudonymizing the bare word rewrote
+    command echoes (`> show chassis inventory`), status vocabulary
+    (`Connection status: up`), fixed counter text (`size (bytes)`) and the
+    panrepo upgrade history's `install` verb — corpus-wide."""
+
+    def test_login_guess_that_is_an_english_word_is_not_a_username(self, anon):
+        for word in ("install", "up", "inventory", "the", "freed", "helps"):
+            line = f"failed authentication for user '{word}'.  Reason: Invalid username/password."
+            assert anon.anonymize_text(line) == line
+        assert not anon.user_map
+
+    def test_command_echoes_and_history_verbs_stay_readable(self, tmp_path):
+        from tsf_anonymizer.core import prescan_text_identities
+        (tmp_path / "show_log_system.txt").write_text(
+            "failed authentication for user 'install'.  Reason: Invalid username/password.\n"
+            "failed authentication for user 'inventory'.  Reason: Invalid username/password.\n")
+        (tmp_path / "history.log").write_text(
+            "install panos-11.2.10-h6    Success  05/18/26 10:04:22\n")
+        (tmp_path / "techsupport.txt").write_text(
+            "> show chassis inventory\nConnection status: up\n")
+        anon = Anonymizer()
+        prescan_text_identities(tmp_path, anon)
+        anon.build_patterns()
+        anon.frozen = True
+        for f in ("show_log_system.txt", "history.log", "techsupport.txt"):
+            text = (tmp_path / f).read_text()
+            assert anon.anonymize_text(text) == text
+        assert not anon.frozen_misses
+
+    def test_config_object_named_with_a_common_word_is_left_alone(self, tmp_path, anon):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><devices><vsys><address>"
+                     "<entry name='data'><static>10.20.30.40</static></entry>"
+                     "<entry name='SRV-Compta'><ip-netmask>10.20.30.41/32</ip-netmask></entry>"
+                     "</address><tag><entry name='bytes'/><entry name='Tag-Prod'/></tag>"
+                     "</vsys></devices></c>")
+        prescan_config_xml(p, anon)
+        anon.build_patterns()
+        assert set(anon.named_obj_map) == {"SRV-Compta", "Tag-Prod"}
+        line = "Resource monitoring sampling data (per second): size (bytes)"
+        assert anon.anonymize_text(line) == line
+
+    def test_a_username_that_is_no_english_word_is_still_replaced_everywhere(self, anon):
+        anon.anonymize_text("failed authentication for user 'jmartin'")
+        out = anon.anonymize_text("session for jmartin closed")
+        assert "jmartin" not in out
+
+    def test_an_admin_entry_named_jmartin_is_still_an_identity(self, tmp_path, anon):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><mgt-config><users><entry name='jmartin'/>"
+                     "<entry name='monitor'/></users></mgt-config></c>")
+        prescan_config_xml(p, anon)
+        anon.build_patterns()
+        # the jmartin rule holds; the documented trade is the bare word only
+        assert "jmartin" in anon.named_obj_map
+        assert "monitor" not in anon.named_obj_map
+
+
+class TestInterfaceNamesAreNeverFqdns:
+    """A subinterface <entry name="vlan.800"> under <units> is FQDN-shaped
+    (`word.word`), and the FQDN route had no interface guard: one became
+    hostNNN.anon.internal inside zone <member> elements on a real TSF."""
+
+    def test_interface_unit_entry_names_are_not_registered_as_fqdns(self, tmp_path, anon):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><devices><network><interface>"
+                     "<vlan><units><entry name='vlan.800'/></units></vlan>"
+                     "<tunnel><units><entry name='tunnel.2'/></units></tunnel>"
+                     "</interface></network></devices></c>")
+        prescan_config_xml(p, anon)
+        anon.build_patterns()
+        assert not anon.fqdn_map and not anon.named_obj_map
+        out = anon.anonymize_text("<member>vlan.800</member><member>tunnel.2</member>")
+        assert "vlan.800" in out and "tunnel.2" in out
+
+    @pytest.mark.parametrize("intf", ["tunnel.2", "vlan.800", "loopback.10", "ae1.100"])
+    def test_fqdn_route_preserves_interface_names(self, anon, intf):
+        anon.register_fqdn(intf)
+        assert anon.anon_fqdn(intf) == intf
+        assert not anon.fqdn_map

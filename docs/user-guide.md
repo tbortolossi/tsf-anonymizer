@@ -218,6 +218,11 @@ A 300 MB TSF extracts to ~1.5 GB, kept twice while the trees are there.
 | `TSF_WORKERS` | `cpu/4`, max 4 | archives processed at once |
 | `TSF_ANON_WORKERS` | = compare workers | processes for one job's prescan and rewrite |
 | `TSF_COMPARE_WORKERS` | cores left over, max 4 | processes for one job's verification |
+
+The two per-job counts are floors: when fewer archives can actually run — a
+lone upload, or a batch of one firewall, which is a chain — a phase takes the
+idle share of the cores instead, up to the whole machine. Setting either
+variable pins the count and turns that off.
 | `TSF_DATA_DIR` | `/data` | where jobs live |
 | `TSF_UID` / `TSF_GID` | *(your `id -u` / `id -g`)* | compose only: the user the container runs as, so `./data` stays yours |
 
