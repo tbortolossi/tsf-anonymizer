@@ -6,6 +6,7 @@ from __future__ import annotations
 import gzip
 import json
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from conftest import build_tsf
 from tsf_anonymizer import compare
 from tsf_anonymizer.compare import (
     MappingIndex,
+    _routing_view,
     compare_archives,
     compare_members,
     compare_trees,
@@ -285,11 +287,50 @@ class TestRoutingCoherence:
         work, mapping = trees
         r = compare_trees(work / "orig", work / "anon", mapping).summary["routing"]
         assert r["checked"] and r["ok"]
-        assert r["routes"] >= 8 and r["connected"] >= 3
+        # 13 from the static config/RIB snapshot alone, plus the dynamic
+        # sources: 3 BGP loc-rib/rib-out entries, 1 OSPF LSDB type-3 row and
+        # 4 routed.log add/delete events (2 private, 2 public).
+        assert r["routes"] >= 21 and r["connected"] >= 3
         # The catch-all public tree preserves the WAN /30 nexthop and the
         # /16 aggregate over its /24s: zero public divergences expected —
         # only the rare anti-reuse probe / generator fallback could count.
         assert r["public_divergences"] == 0
+
+    def test_dynamic_sources_are_parsed(self, trees):
+        # Isolate what each new source contributes: same tree pair, before
+        # vs after routed.log and the BGP/OSPF CLI sections are blanked out.
+        work, _ = trees
+        full = _routing_view(work / "orig")
+        assert full is not None
+        stripped = work / "stripped"
+        shutil.copytree(work / "orig", stripped)
+        for rl in (stripped / "var" / "log" / "pan").glob("routed.log*"):
+            rl.unlink()
+        for ts in (stripped / "tmp" / "cli").glob("techsupport_*.txt"):
+            text = ts.read_text(encoding="utf-8", errors="surrogateescape")
+            for pat in (r"^> show (?:routing protocol|advanced-routing) bgp "
+                        r"(?:loc-rib|rib-out)(?:-detail)?.*?(?=^> |\Z)",
+                        r"^> show (?:routing protocol|advanced-routing) ospf(?:v3)? "
+                        r"dumplsdb.*?(?=^> |\Z)"):
+                text = re.sub(pat, "", text, flags=re.S | re.M)
+            ts.write_text(text, encoding="utf-8", errors="surrogateescape")
+        without = _routing_view(stripped)
+        assert without is not None
+        assert full["routes"] > without["routes"]
+
+    def test_a_broken_learned_prefix_is_reported(self, trees):
+        # The dynamic evidence must be load-bearing, not merely counted: a
+        # routed.log route event hand-edited on the anonymized side only
+        # (a private prefix, so it is a hard error, not a public divergence).
+        work, mapping = trees
+        broken = work / "broken"
+        shutil.copytree(work / "anon", broken)
+        rl = broken / "var" / "log" / "pan" / "routed.log"
+        learned = mapping["ip_addresses"]["10.99.5.0"]
+        rl.write_bytes(rl.read_bytes().replace(
+            f"{learned}/24".encode(), b"10.222.222.0/24", 1))
+        r = compare_trees(work / "orig", broken, mapping).summary["routing"]
+        assert r["checked"] and not r["ok"]
 
     def test_a_nexthop_moved_out_of_its_subnet_is_reported(self, trees):
         work, mapping = trees

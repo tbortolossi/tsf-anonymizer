@@ -7,6 +7,16 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+### Added
+- The compare's routing-coherence check now also proves coherence *over
+  time*: `var/log/pan/routed.log*` (add/delete route events, plain or
+  `.gz`-rotated), and the `show routing protocol bgp loc-rib` / `rib-out` and
+  `ospf dumplsdb` (LSDB) CLI sections, feed the same route/nexthop/containment
+  relations the static config and RIB snapshot already checked. Same
+  conservative rule as the rest of the check: a line whose prefix or nexthop
+  does not parse cleanly is skipped silently, never guessed at. No mapping,
+  no anonymizer import — same code re-derives both trees independently.
+
 ### Changed
 - Public IPv4 pseudonyms now come from the same keyed-PRF prefix tree as
   private ones: one catch-all tree over 240.0.0.0/4, with the real top

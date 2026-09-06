@@ -711,6 +711,48 @@ _RIB_ROW_RE = re.compile(
     r"^\s*(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\s+(?:\S+\s+)?(\d{1,3}(?:\.\d{1,3}){3})?")
 
 
+# Dynamic evidence, on top of the static config/RIB snapshot above: routed.log
+# route add/delete/update events, the BGP loc-rib/rib-out CLI sections (real
+# PAN-OS text: "Prefix: <net>" then, a few lines later, "Nexthop: <ip>" — not
+# always present, e.g. a locally-originated aggregate has no nexthop line),
+# and the OSPF LSDB's type-3 Summary rows (the LS ID column *is* the network,
+# "<net>     type-3 (Summary)"). All three feed the same `routes` relation the
+# static sources do — same conservative rule: a line whose prefix or nexthop
+# does not parse cleanly is skipped silently, never guessed at.
+_ROUTED_EVENT_RE = re.compile(
+    r"\b(?:add|delete)\s+route\s+(?P<net>\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})"
+    r"\s+nexthop\s+(?P<nh>\d{1,3}(?:\.\d{1,3}){3})", re.I)
+_BGP_RIB_SECTION_RE = re.compile(
+    r"^> show (?:routing protocol|advanced-routing) bgp (?:loc-rib|rib-out)"
+    r"(?:-detail)?.*?(?=^> |\Z)", re.S | re.M)
+_PREFIX_OR_NEXTHOP_RE = re.compile(
+    r"Prefix:\s*(?P<net>\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})"
+    r"|Nexthop:\s*(?P<nh>\d{1,3}(?:\.\d{1,3}){3})")
+_OSPF_LSDB_SECTION_RE = re.compile(
+    r"^> show (?:routing protocol|advanced-routing) ospf(?:v3)? dumplsdb"
+    r".*?(?=^> |\Z)", re.S | re.M)
+_LSDB_SUMMARY_RE = re.compile(
+    r"(?P<net>\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\s+type-3\b")
+
+
+def _read_text_maybe_gz(path: Path) -> str | None:
+    """A best-effort text read of a log that may be a `.gz` rotation: decides
+    text-vs-binary on the *decompressed* bytes (compressed bytes always look
+    binary), and never raises — a corrupt or unreadable rotation is simply
+    absent from the dynamic evidence, not a compare failure."""
+    try:
+        if path.suffix == ".gz":
+            with gzip.open(path, "rb") as f:
+                raw = f.read()
+        else:
+            raw = path.read_bytes()
+    except OSError:
+        return None
+    if is_binary_bytes(raw[:4096]):
+        return None
+    return raw.decode("utf-8", "surrogateescape")
+
+
 _PRESERVED_SPACES = tuple(ipaddress.ip_network(c) for c in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"))
 
@@ -727,12 +769,16 @@ def _in_preserved(net) -> bool:
 def _routing_view(tree: Path) -> dict | None:
     """One side's routing topology, re-derived from that tree alone: the
     connected networks (config layer3 IPs + the RIB's connected rows), and
-    the routes of the config's static-route entries plus the RIB rows of
-    both `show routing route` formats (classic and advanced-routing). The
-    same code runs on the original and on the anonymized tree — no mapping,
-    no anonymizer. A `.merged-running-config.xml` wins over
-    `running-config.xml`: on a Panorama-managed device the latter ships an
-    empty <interface> section (real box, 0 connected networks found)."""
+    the routes of the config's static-route entries, the RIB rows of both
+    `show routing route` formats (classic and advanced-routing), the BGP
+    loc-rib/rib-out and OSPF LSDB CLI sections, and routed.log's dated route
+    add/delete/update events — static evidence plus the dynamic proof that
+    coherence holds over time too, as routes are learned and withdrawn
+    mid-log by OSPF/BGP. The same code runs on the original and on the
+    anonymized tree — no mapping, no anonymizer. A `.merged-running-config.xml`
+    wins over `running-config.xml`: on a Panorama-managed device the latter
+    ships an empty <interface> section (real box, 0 connected networks
+    found)."""
     cfgs = (sorted(tree.rglob(".merged-running-config.xml"))
             or sorted(tree.rglob("running-config.xml")))
     if not cfgs:
@@ -785,6 +831,58 @@ def _routing_view(tree: Path) -> dict | None:
                 # shipped configs carry no <interface> addresses at all
                 if nh_addr is None and re.search(r"\bA?\s*C\b|\bconnected\b", line):
                     connected.append(dest_net)
+        # BGP loc-rib / rib-out: one compiled-regex pass per section, walking
+        # the "Prefix:" / "Nexthop:" tokens it finds in document order rather
+        # than a per-line callback — a route entry with no nexthop line (a
+        # locally-originated aggregate) is kept with nexthop=None, same as a
+        # static route with none.
+        for m in _BGP_RIB_SECTION_RE.finditer(text):
+            net = nh = raw_net = None
+            for pm in _PREFIX_OR_NEXTHOP_RE.finditer(m.group(0)):
+                if pm.group("net"):
+                    if net is not None:
+                        routes.append((net, nh, raw_net))
+                    raw_net = pm.group("net")
+                    try:
+                        net = ipaddress.ip_network(raw_net, strict=False)
+                    except ValueError:
+                        net = None
+                    nh = None
+                elif pm.group("nh") and net is not None and nh is None:
+                    try:
+                        nh = ipaddress.ip_address(pm.group("nh"))
+                    except ValueError:
+                        pass
+            if net is not None:
+                routes.append((net, nh, raw_net))
+        # OSPF LSDB: a type-3 (Summary) row's LS ID column is the network
+        # itself ("10.18.130.0/24     type-3 (Summary)"); no nexthop in a
+        # link-state row, so these enter `routes` with nexthop=None — still
+        # useful for the prefix-length and containment relations.
+        for m in _OSPF_LSDB_SECTION_RE.finditer(text):
+            for lm in _LSDB_SUMMARY_RE.finditer(m.group(0)):
+                raw_net = lm.group("net")
+                try:
+                    net = ipaddress.ip_network(raw_net, strict=False)
+                except ValueError:
+                    continue
+                routes.append((net, None, raw_net))
+    # routed.log[.old][.N.gz]: route add/delete/update events, learned or
+    # withdrawn mid-log by OSPF/BGP — the time dimension the config/RIB
+    # snapshot above cannot see. One compiled-regex pass over the whole
+    # (decompressed) file, no per-line Python callback: routed.log alone can
+    # run tens of MB.
+    for rl in sorted((tree / "var" / "log" / "pan").glob("routed.log*")):
+        text = _read_text_maybe_gz(rl)
+        if text is None:
+            continue
+        for m in _ROUTED_EVENT_RE.finditer(text):
+            try:
+                net = ipaddress.ip_network(m.group("net"), strict=False)
+                nh = ipaddress.ip_address(m.group("nh"))
+            except ValueError:
+                continue
+            routes.append((net, nh, m.group("net")))
     # Containment over unique networks via ancestor sets (a real RIB has
     # 6 903 rows: 24 M O(n^2) pairs took minutes; ancestors are n x #plens).
     uniq: list = []

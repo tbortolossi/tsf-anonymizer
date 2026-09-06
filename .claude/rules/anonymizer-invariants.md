@@ -209,6 +209,29 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   anonymized side iff it holds on the original. No mapping, no anonymizer
   import: a regression of prefix preservation fails the compare even
   though any injective mapping would still explain every line.
+- **Routing coherence is proven over time too, not only from one static
+  snapshot.** `_routing_view` also reads `var/log/pan/routed.log*` (plain or
+  `.gz`-rotated; text-vs-binary is decided on the *decompressed* bytes, the
+  same rule every other payload follows) for `add`/`delete route … nexthop …`
+  events, and the `show routing protocol bgp loc-rib` / `bgp rib-out` /
+  `ospf dumplsdb` CLI sections for their `Prefix:` / `Nexthop:` pairs and
+  LSDB type-3 (Summary) rows — routes learned and withdrawn mid-log by
+  BGP/OSPF, which a single RIB snapshot cannot show. Same conservative rule
+  as the classic RIB row parsing: a line whose prefix or nexthop does not
+  parse cleanly is skipped silently, never guessed at — real routed.log at
+  default verbosity carries no prefix-bearing line at all on most of the
+  corpus, and that is fine, not a bug, since the static sources still carry
+  the check. All three feed the *same* `raw` (literal matched text, never
+  the mask-canonicalized network string — a fake network can carry non-zero
+  host bits after prefix-preserving anonymization, and using the canonical
+  form as the dedup key silently forked one real destination into two unique
+  routes on the anonymized side only, an actual bug caught while writing
+  this feature) into the same `routes` list the static config/RIB rows use,
+  so a destination appearing in both a RIB snapshot and a routed.log event
+  collapses to the same containment entry, exactly as two RIB formats
+  already did. Performance: one compiled-regex pass per file (routed.log can
+  run tens of MB), no per-line Python callback for that source; `_routing_view`
+  still runs once per tree, never per compare worker.
 - **Serial fallback: 12 digits not starting `0000`, or `007`+12 — and never
   right after a dot.** Zero-padded counters in `show counter` output are 12
   digits too; 3 434 of them were "anonymized" on the first real run. logdb

@@ -108,8 +108,17 @@ separately from leaks.
 
 `_routing_view` re-derives, from one tree alone, the connected networks
 (config layer3 IPs — `.merged-running-config.xml` preferred on managed
-devices — plus the RIB's C-flagged rows) and the routes (config static
-routes + both RIB formats of the techsupport txt);
+devices — plus the RIB's C-flagged rows) and the routes: config static
+routes, both RIB formats of the techsupport txt, and dynamic evidence on top
+of that static snapshot — `var/log/pan/routed.log*` (plain or `.gz`-rotated)
+route add/delete events, and the `show routing protocol bgp loc-rib` /
+`bgp rib-out` / `ospf dumplsdb` CLI sections — routes learned and withdrawn
+mid-log by BGP/OSPF, which a single RIB snapshot cannot show. Every source
+feeds the same route list keyed by the literal matched text (never the
+mask-canonicalized network, which can carry non-zero host bits after
+prefix-preserving anonymization), so a destination seen in a RIB row and
+later in a routed.log event collapses to the same containment entry; a line
+whose prefix or nexthop does not parse cleanly is skipped silently.
 `check_routing_coherence` requires every **private** structural relation —
 nexthop ∈ connected subnet, route ⊆ route (compared as ancestor sets, not
 O(n²) pairs), connected ⊆ route, prefix lengths — to hold on the
