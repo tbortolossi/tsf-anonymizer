@@ -163,6 +163,35 @@ flags: A:active, E:ecmp
 destination        protocol   nexthop        distance metric flag age      interface
 198.18.9.0/24      bgp        198.18.7.7     20       0      A    00:06:27 ethernet1/1
 10.20.30.0/24      connected                 0        0      A    01:03:07 ethernet1/1
+> show routing protocol bgp loc-rib-detail
+
+VIRTUAL ROUTER: VR-Main (id 1)
+  ==========
+  ----------
+  Prefix:                        198.18.44.0/24 *
+  Nexthop:                       198.18.100.2
+  Received from:                 Peer GW-Lyon-Backup (id 2)
+  AS Path:                       65001
+  Origin:                        igp
+  ----------
+  Prefix:                        198.18.9.0/24 *
+  Received from:                 Local
+  Origin:                        igp
+  ----------
+
+total routes shown: 2
+> show routing protocol bgp rib-out-detail
+
+VIRTUAL ROUTER: VR-Main (id 1)
+  ==========
+  ----------
+  Prefix:                        198.18.9.0/24
+  Nexthop:                       198.18.7.7
+  Peer:                          GW-Paris-Primary (id 1)
+  Advertise status:              advertised
+  ----------
+
+total routes shown: 1
 > show routing protocol ospf dumplsdb
  VR Area ID    Orig RTR ID   LS ID          LSA Type          Age
   1 0.0.0.0    10.20.40.1    10.99.5.0/24   type-3 (Summary)  1322
@@ -256,8 +285,10 @@ def render_logs(rng: random.Random, lines: int) -> dict[str, str]:
 
 def render_routed_log() -> str:
     """Dated dynamic-routing events: an SPF run, then the learned route of
-    the RIB flaps (monitor Down -> delete -> Up -> add). The fixture for
-    "one pseudonym across a route's whole dated sequence"."""
+    the RIB flaps (monitor Down -> delete -> Up -> add), private and public.
+    The fixture for "one pseudonym across a route's whole dated sequence" and
+    for the compare's dynamic routing-coherence evidence (routed.log route
+    add/delete events, on top of the static config/RIB snapshot)."""
     rows = [
         ("09:12:01", "TM_SPF: start full SPF calculation rid 10.20.40.1"),
         ("09:12:01", "TM_SPF: full routing calculation finished rid 10.20.40.1"),
@@ -266,6 +297,10 @@ def render_routed_log() -> str:
         ("09:17:05", "MON: status update monitor(vr VR-Main: 10.20.40.254 > 10.99.5.9) Up"),
         ("09:17:06", "routed: add route 10.99.5.0/24 nexthop 10.20.40.77 interface ethernet1/2"),
         ("09:18:00", "TM_SPF: start full SPF calculation rid 10.20.40.1"),
+        # BGP-learned public prefix, withdrawn then re-learned over the same
+        # peering the static/RIB/loc-rib sections already carry.
+        ("09:19:10", "routed: delete route 198.18.44.0/24 nexthop 198.18.100.2 interface ethernet1/3"),
+        ("09:19:41", "routed: add route 198.18.44.0/24 nexthop 198.18.100.2 interface ethernet1/3"),
     ]
     return "".join(f"2026-04-07 {t}.000 +0200 {msg}\n" for t, msg in rows)
 
