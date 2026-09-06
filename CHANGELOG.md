@@ -22,6 +22,11 @@ change what is mapped, a patch bump only fixes).
   are still excluded from the leak scan and reported as collisions).
 
 ### Fixed
+- PAN-OS interface names are preserved on the FQDN route too: `vlan.800` /
+  `tunnel.2` are FQDN-shaped, and a subinterface entry name registered
+  through the FQDN branch rewrote every zone `<member>` holding it into
+  `hostNNN.anon.internal` on a real TSF. `anon_fqdn` now refuses interface
+  names, as `register_named_object` always did.
 - An original address equal to an already-handed-out pseudonym is now
   mapped instead of skipped. With same-class fakes the old skip left a real
   private address in clear and outside the mapping — invisible to the leak
