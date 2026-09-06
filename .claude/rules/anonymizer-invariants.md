@@ -164,22 +164,43 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   (`ip_seed` rides in the sidecar). RFC 1918/CGNAT addresses stay in their
   own class with the host octet kept (root tree node always flipped: an
   address never maps to itself — 45 identity mappings appeared on the
-  corpus before that rule); everything else maps into 240.0.0.0/4, one fake
-  /24 per real /24. The trade: a private fake can equal an address the
-  customer also uses elsewhere (0.12 % measured on 196 730 corpus IPs) —
-  reported by the compare as a *collision*, and collision keys are still
-  **applied** by `MappingIndex.apply` (the anonymizer did rewrite them);
-  they are only excluded from the leak scan, where the same string is
-  somebody's pseudonym. Dropping them from `forward`, the first design,
-  made every occurrence of such a key an "unexplained" line.
-- **The routing check trusts private relations only, and reads the right
-  config.** Public space keeps /24 grouping, not aggregation — a public /16
-  ⊃ /24 relation is a counted *divergence*, never an error, or every real
-  compare is red with the documented trade. `.merged-running-config.xml`
-  wins over `running-config.xml` (a Panorama-managed PA-5410 ships an empty
-  `<interface>` section — 0 connected networks found), and C-flagged RIB
-  rows are connected networks too. Containment is compared as per-network
-  ancestor sets, not O(n²) pairs — a real RIB has 6 903 rows.
+  corpus before that rule). Everything else goes through one catch-all tree
+  into 240.0.0.0/4: the real top nibble is folded into the PRF *path seed*
+  (`P<nibble>`, not kept in the output) and bits 4..31 — host octet
+  included — are tree-flipped walking the real bits, so two reals sharing a
+  k-bit prefix (k ≥ 4) share the fake prefix to depth k. The previous
+  scheme (one fake /24 per real /24 in first-seen order, host octet
+  permuted per /24) broke every intra-/24 and cross-/24 public relation on
+  real archives: the default route's nexthop left its own connected WAN /30
+  on both boxes measured, and 120 of 246 route-containment relations
+  (BGP/OSPF aggregates ⊇ members) were lost on one. Cross-nibble reals
+  share no prefix ≥ /4, so there is nothing to preserve there — the nibble
+  in the path makes their fakes birthday-random over 28 bits (~zero
+  collisions at TSF scale; naive nibble *truncation* measured 88/1526
+  systematic /24 collisions on one real box), and the anti-reuse probe in
+  `anon_ip` absorbs the rare rest — probed candidates skip host octets 0
+  and 255 (it once handed a demo a host on the broadcast address). A fake
+  can never equal its own original: originals inside 240/4 are
+  `is_reserved` and skipped by `anon_ip`. The trade that remains: a private
+  fake can equal an address the customer also uses elsewhere (0.12 %
+  measured on 196 730 corpus IPs) — reported by the compare as a
+  *collision*, and collision keys are still **applied** by
+  `MappingIndex.apply` (the anonymizer did rewrite them); they are only
+  excluded from the leak scan, where the same string is somebody's
+  pseudonym. Dropping them from `forward`, the first design, made every
+  occurrence of such a key an "unexplained" line.
+- **The routing check errors on private relations only, and reads the right
+  config.** Public relations are preserved by the catch-all tree too, so
+  `public_divergences` is expected ≈ 0 — but a public divergence stays a
+  counted number, never a hard error: what remains of it is the rare
+  anti-reuse probe or generator fallback moving one address, and a rarity
+  must not redden a real compare (measured after the tree landed: 0 / 0 / 0
+  divergences on three real trees that showed 101 / 5 / 0 under the /24
+  grouping). `.merged-running-config.xml` wins over `running-config.xml`
+  (a Panorama-managed PA-5410 ships an empty `<interface>` section — 0
+  connected networks found), and C-flagged RIB rows are connected networks
+  too. Containment is compared as per-network ancestor sets, not O(n²)
+  pairs — a real RIB has 6 903 rows.
 - **The compare checks routing coherence structurally.** `_routing_view`
   re-derives from each tree alone (config layer3 networks, static routes,
   both RIB formats) the relations the prefix tree exists to preserve, and

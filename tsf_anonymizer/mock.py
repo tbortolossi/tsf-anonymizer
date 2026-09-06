@@ -84,12 +84,13 @@ _CONFIG = """<?xml version="1.0"?>
         <interface><ethernet>
           <entry name="ethernet1/1"><layer3><ip><entry name="10.20.30.1/24"/></ip></layer3></entry>
           <entry name="ethernet1/2"><layer3><ip><entry name="10.20.40.1/24"/></ip></layer3></entry>
+          <entry name="ethernet1/3"><layer3><ip><entry name="198.18.100.1/30"/></ip></layer3></entry>
         </ethernet></interface>
         <virtual-router>
           <entry name="VR-Main">
-            <interface><member>ethernet1/1</member><member>ethernet1/2</member></interface>
+            <interface><member>ethernet1/1</member><member>ethernet1/2</member><member>ethernet1/3</member></interface>
             <routing-table><ip><static-route>
-              <entry name="SR-Default"><destination>0.0.0.0/0</destination><nexthop><ip-address>10.20.30.254</ip-address></nexthop><interface>ethernet1/1</interface><metric>10</metric></entry>
+              <entry name="SR-Default"><destination>0.0.0.0/0</destination><nexthop><ip-address>198.18.100.2</ip-address></nexthop><interface>ethernet1/3</interface><metric>10</metric></entry>
               <entry name="SR-Branch-Lyon"><destination>10.99.0.0/16</destination><nexthop><ip-address>10.20.40.254</ip-address></nexthop><interface>ethernet1/2</interface><metric>10</metric></entry>
             </static-route></ip></routing-table>
           </entry>
@@ -144,14 +145,18 @@ uptime: 42 days, 3:17:09
 name                    id    speed/duplex/state        mac address
 ethernet1/1             16    1000/full/up              00:1b:17:00:00:10
 ethernet1/2             17    1000/full/up              00:1b:17:00:00:11
+ethernet1/3             18    1000/full/up              00:1b:17:00:00:12
 > show routing route
 flags: A:active, C:connect, S:static, O:ospf, B:bgp, Oi:ospf intra-area
 destination        nexthop            metric flags     age   interface
-0.0.0.0/0          10.20.30.254       10     A S             ethernet1/1
+0.0.0.0/0          198.18.100.2       10     A S             ethernet1/3
 10.20.30.0/24      10.20.30.1         0      A C             ethernet1/1
 10.20.40.0/24      10.20.40.1         0      A C             ethernet1/2
 10.99.5.0/24       10.20.40.77        30     A Oi      2036  ethernet1/2
+198.18.0.0/16      198.18.100.2       20     A B       412   ethernet1/3
 198.18.9.0/24      198.18.7.7         20     A B       387   ethernet1/1
+198.18.44.0/24     198.18.100.2       20     A B       401   ethernet1/3
+198.18.100.0/30    198.18.100.1       0      A C             ethernet1/3
 > show advanced-routing route
 Logical Router: LR-Edge
 flags: A:active, E:ecmp

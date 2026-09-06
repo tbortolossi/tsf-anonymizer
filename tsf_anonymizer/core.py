@@ -653,9 +653,6 @@ class Anonymizer:
         # addresses both archives happen to share.
         self.ip_seed: bytes = secrets.token_bytes(16)
         self._flip_cache: dict[str, int] = {}
-        self._pub24: dict[int, int] = {}       # real /24 (int >> 8) -> fake /24 index
-        self._pub24_next = 0
-        self._pub_perm_cache: dict[int, list[int]] = {}
 
         self._ip_re = _IP_RE
         self._user_re = _USER_PHRASE_RE
@@ -673,16 +670,6 @@ class Anonymizer:
             self._flip_cache[path] = f
         return f
 
-    def _pub_host_perm(self, p24: int) -> list[int]:
-        """Deterministic host-octet permutation for one public /24 (pure
-        function of the seed — no random module, stable across versions)."""
-        perm = self._pub_perm_cache.get(p24)
-        if perm is None:
-            perm = sorted(range(256), key=lambda v: hashlib.blake2b(
-                b"%d:%d" % (p24, v), key=self.ip_seed, digest_size=8).digest())
-            self._pub_perm_cache[p24] = perm
-        return perm
-
     def _tree_fake(self, a: int) -> str:
         """Prefix-preserving pseudonym: same real prefix -> same fake prefix,
         so subnets, route destinations (static or learned mid-log), LSDB
@@ -694,9 +681,20 @@ class Anonymizer:
         PRF per tree node (the root node is always flipped, so an address
         never maps to itself), the host octet is kept — /25…/32 relations
         are exact, /8…/24 relations survive the permutation. Every other
-        address maps into 240.0.0.0/4 (class E — never routable, never a
-        real third party): one fake /24 per real /24 in first-seen order,
-        host octet permuted per /24."""
+        address goes through one catch-all tree into 240.0.0.0/4 (class E —
+        never routable, never a real third party): the real top nibble is
+        folded into the PRF path seed (not kept in the output) and bits
+        4..31 — host octet included — are each tree-flipped walking the real
+        bits, so two reals sharing a k-bit prefix (k >= 4) share the fake
+        prefix to depth k: WAN /30 nexthops, /16 aggregates over their /24s,
+        prefixes announced mid-log by BGP/OSPF all stay coherent, and masks
+        never change. Cross-nibble reals share no prefix >= /4 (nothing to
+        preserve) and decorrelate through the path seed, so a repeated fake
+        is birthday-random over 28 bits (~zero at TSF scale; naive nibble
+        truncation measured 88/1526 systematic /24 collisions on one real
+        box) — the anti-reuse probe in anon_ip absorbs the rare rest. A fake
+        can never equal its own original: originals inside 240/4 are
+        `is_reserved` and skipped by anon_ip before reaching the tree."""
         for prefix, plen in _TREE_CLASSES:
             if a >> (32 - plen) == prefix:
                 out = prefix << (32 - plen)
@@ -707,14 +705,13 @@ class Anonymizer:
                     out |= (real ^ flip) << (31 - bit)
                     path += "01"[real]
                 return str(ipaddress.ip_address(out | (a & 0xFF)))
-        p24 = a >> 8
-        idx = self._pub24.get(p24)
-        if idx is None:
-            idx = self._pub24_next
-            self._pub24[p24] = idx
-            self._pub24_next += 1
-        host = self._pub_host_perm(p24)[a & 0xFF]
-        return str(ipaddress.ip_address(0xF0000000 | ((idx & 0x000F_FFFF) << 8) | host))
+        out = 0xF000_0000
+        path = f"P{a >> 28}"
+        for bit in range(4, 32):
+            real = (a >> (31 - bit)) & 1
+            out |= (real ^ self._flip(path)) << (31 - bit)
+            path += "01"[real]
+        return str(ipaddress.ip_address(out))
 
     # Last-resort sequential generators — used only when the prefix tree's
     # /24 probe finds no free host (see anon_ip); injective by construction.
@@ -769,7 +766,12 @@ class Anonymizer:
             if fake in self.ip_map or fake in self._fakes:
                 base = int(ipaddress.ip_address(fake))
                 for step in range(1, 256):
-                    cand = str(ipaddress.ip_address((base & ~0xFF) | ((base + step) & 0xFF)))
+                    host = (base + step) & 0xFF
+                    if host in (0, 255):
+                        # never hand out .0/.255: a probed host on the
+                        # network/broadcast address reads as nonsense
+                        continue
+                    cand = str(ipaddress.ip_address((base & ~0xFF) | host))
                     if cand not in self.ip_map and cand not in self._fakes:
                         fake = cand
                         break
@@ -1261,18 +1263,12 @@ class Anonymizer:
                 anon.ip_seed = bytes.fromhex(seed)
             except ValueError:
                 pass  # unusable seed: keep the fresh one, pairs still apply
-        # Rebuild the public /24 allocation from the pairs so a new address
-        # in a known real /24 lands in the same fake /24.
-        for orig, fake in anon.ip_map.items():
-            try:
-                fi = int(ipaddress.ip_address(fake))
-                oi = int(ipaddress.ip_address(orig))
-            except ValueError:
-                continue
-            if fi >> 28 == 0xF:
-                idx = (fi >> 8) & 0x000F_FFFF
-                anon._pub24.setdefault(oi >> 8, idx)
-                anon._pub24_next = max(anon._pub24_next, idx + 1)
+        # Explicit pairs stay authoritative (anon_ip consults ip_map first);
+        # a *new* public address is allocated by the catch-all tree, which
+        # only needs `ip_seed` — same seed, same fake prefix, so it lands in
+        # the fake subnet its known neighbours got. A mapping written by the
+        # old per-/24 scheme keeps its pairs verbatim; only new allocations
+        # use the tree (the anti-reuse probe keeps the union injective).
         anon._priv_counter = sum(1 for v in anon.ip_map.values() if v.startswith("100."))
         anon._pub_counter = len(anon.ip_map) - anon._priv_counter
         anon._user_counter = len(anon.user_map)

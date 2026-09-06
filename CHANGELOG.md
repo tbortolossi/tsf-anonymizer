@@ -7,6 +7,25 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+### Changed
+- Public IPv4 pseudonyms now come from the same keyed-PRF prefix tree as
+  private ones: one catch-all tree over 240.0.0.0/4, with the real top
+  nibble folded into the PRF path seed and every bit down to the host octet
+  tree-flipped. Two real addresses sharing a k-bit prefix (k ≥ 4) share the
+  fake prefix to depth k, so public routing relations survive on the copy —
+  the default route's nexthop stays inside its connected WAN /30, BGP/OSPF
+  aggregates still contain their members (120 of 246 containment relations
+  were lost on one real box under the previous per-/24 grouping), and
+  prefixes announced mid-log stay coherent; masks never change. The
+  compare's `public_divergences` count is now expected ≈ 0 (measured
+  0 / 0 / 0 on three real trees that showed 101 / 5 / 0 before); it stays a
+  counted number, never a hard error. The anti-reuse probe no longer hands
+  out `.0`/`.255` host octets. Minor-worthy: this changes what public
+  pseudonyms look like, not what is mapped — a mapping sidecar written by
+  the old scheme keeps its explicit pairs verbatim when seeding a new run
+  (`Anonymizer.from_mapping`), only *new* allocations use the tree, and
+  `ip_seed` rides the sidecar unchanged.
+
 ## [0.4.0] - 2026-09-06
 
 ### Changed
