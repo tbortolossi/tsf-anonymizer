@@ -22,6 +22,19 @@ change what is mapped, a patch bump only fixes).
   are still excluded from the leak scan and reported as collisions).
 
 ### Fixed
+- A bare common English word is no longer an identity, in any category:
+  brute-force login guesses (`failed authentication for user 'install'`,
+  `'up'`, `'inventory'`) and config entries genuinely named `data` or
+  `bytes` were pseudonymized and then replaced corpus-wide, destroying
+  command echoes (`> show chassis inventory`), status vocabulary
+  (`Connection status: up`), fixed counter text (`size (bytes)`,
+  `Resource monitoring sampling data`) and the `install` verb of
+  `opt/panrepo/logs/history.log` and of audit.log on real archives. A new
+  `_ENGLISH_STOPWORDS` guard sits on the two allocation choke points
+  (`anon_user`, `register_named_object`). Trade-off, documented in the
+  invariants: an account or object named *exactly* a bare English word stays
+  in clear — it identifies nobody, and any spelling with a digit, dot or
+  hyphen (`jmartin`, `data-01`) is unaffected.
 - PAN-OS interface names are preserved on the FQDN route too: `vlan.800` /
   `tunnel.2` are FQDN-shaped, and a subinterface entry name registered
   through the FQDN branch rewrote every zone `<member>` holding it into
