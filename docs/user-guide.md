@@ -179,15 +179,17 @@ tsf-anonymizer anonymize next.tgz --seed-mapping in_anon.mapping.json     # same
 tsf-anonymizer anonymize in.tgz --redact-binaries --workers 4             # redaction is on by default in the UI/API, a flag on the CLI
 tsf-anonymizer anonymize in.tgz --mapping-only                            # list what would be mapped, write nothing
 tsf-anonymizer compare in.tgz in_anon.tgz --mapping in_anon.mapping.json  # check alone
-tsf-anonymizer serve --host 127.0.0.1 --port 8090 --data-dir ./data       # the UI, open, loopback
-tsf-anonymizer serve --ssl-certfile srv.crt --ssl-keyfile srv.key         # HTTPS (or TSF_TLS_CERT / TSF_TLS_KEY)
+tsf-anonymizer serve --port 8090 --data-dir ./data                       # the UI, open, loopback
+tsf-anonymizer serve --host 0.0.0.0 --ssl-certfile srv.crt --ssl-keyfile srv.key  # HTTPS, every interface (or TSF_TLS_CERT / TSF_TLS_KEY)
 tsf-anonymizer mock-tsf -o demo.tgz --lines 5000 --seed 7                 # a synthetic archive; same seed, same bytes
 tsf-anonymizer healthcheck --port 8090                                    # probe a local instance (the container HEALTHCHECK)
 ```
 
-`serve` listens on `0.0.0.0` unless `--host` says otherwise and warns when it
-does; it is the container that is published on loopback (`TSF_BIND_ADDR`).
-Without `TSF_PASSWORD` it runs open — fine for loopback, nothing else.
+`serve` listens on `127.0.0.1` unless `--host` says otherwise, and warns when
+an explicit `--host` exposes it without a password or TLS; the container's
+`CMD` passes `--host 0.0.0.0` (published on loopback by default through
+`TSF_BIND_ADDR` instead). Without `TSF_PASSWORD` it runs open — fine for
+loopback, nothing else.
 
 `anonymize --verify` and `compare` exit **2** when the report has errors.
 
@@ -216,7 +218,7 @@ A 300 MB TSF extracts to ~1.5 GB, kept twice while the trees are there.
 | `TSF_PORT` | `8096` | host port |
 | `TSF_TLS_CERT` / `TSF_TLS_KEY` | `/certs/server.crt` / `.key` | TLS material; a missing file stops the server; empty = plain HTTP |
 | `TSF_WORKERS` | `cpu/4`, max 4 | archives processed at once |
-| `TSF_ANON_WORKERS` | = compare workers | processes for one job's prescan and rewrite |
+| `TSF_ANON_WORKERS` | = compare workers | processes for one job's prescans (XML and text) and rewrite |
 | `TSF_COMPARE_WORKERS` | cores left over, max 4 | processes for one job's verification |
 
 The two per-job counts are floors: when fewer archives can actually run — a

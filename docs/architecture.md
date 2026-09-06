@@ -55,6 +55,13 @@ workers ran, and `workers=1` vs `workers=N` is asserted byte-identical by
 test. Anything the frozen rewrite *would* have allocated is left unchanged
 and logged as a warning — a bug to surface, never silent divergence.
 
+Both prescans are spread over processes the same way, and for the same
+reason it is sound: a worker only *parses* one file and reports the
+identities it holds — no Anonymizer, no allocation — and the parent replays
+those findings in path order, in the document order each file yielded them.
+The pseudonym counters therefore fall exactly where a sequential run would
+put them, whatever order the workers happened to finish in.
+
 **One trie-regex pass per class, never a per-token callback.** Names are
 replaced through a longest-match alternation built by `trie_regex()`; the
 previous `re.sub(lambda)` took eleven minutes on a 155 MB archive. Objects
@@ -65,7 +72,9 @@ back as bytes; `\r\n`, Latin-1 stragglers and undecodable bytes survive.
 Binary files are never rewritten (a length-prefixed format would be
 corrupted), only scanned by the compare and, on request, replaced whole by a
 marker. `.gz` members are classified on their decompressed bytes and
-recompressed at level 6. No replacement ever contains a newline, so line
+recompressed at level 6 (stdlib zlib) or its closest isal equivalent when the
+`isal` package is available — 2-3x faster on this kind of text, decompressed
+bytes identical either way. No replacement ever contains a newline, so line
 counts are invariant — the compare treats a changed line count as an error.
 
 **The output archive is the input archive with payloads swapped.**

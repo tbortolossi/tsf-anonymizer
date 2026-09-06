@@ -66,8 +66,9 @@ The web UI's threat model is also documented and deliberate:
 - **The container is published on loopback by default**, TLS mandatory as
   soon as a certificate is configured and *fail-closed* when it is missing.
   `TSF_BIND_ADDR` and `TSF_TLS_CERT=` (empty) are explicit opt-outs. The bare
-  `tsf-anonymizer serve` listens on `0.0.0.0` (it warns), so pass
-  `--host 127.0.0.1` when the CLI is not behind something else.
+  `tsf-anonymizer serve` also listens on `127.0.0.1` by default (it warns
+  when `--host` is used to expose it), so the loopback default holds
+  whether the CLI runs directly or behind the container.
 - **The self-signed CA** is trusted only where you imported it. A browser
   warning clicked through proves nothing about who answered.
 

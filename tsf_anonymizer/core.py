@@ -22,6 +22,7 @@ Derived from TAC-MAN's ``libs/anonymizer`` (Apache-2.0). What changed, and why:
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import gzip
 import hashlib
@@ -29,8 +30,10 @@ import ipaddress
 import json
 import logging
 import multiprocessing
+import os
 import re
 import secrets
+import shutil
 import tarfile
 import tempfile
 import time
@@ -48,6 +51,57 @@ ProgressFn = Callable[[str, int, int, str], None]
 
 def _noop_progress(phase: str, done: int, total: int, message: str) -> None:
     pass
+
+
+# ---------------------------------------------------------------------------
+# gzip backend: isal when available, stdlib otherwise
+# ---------------------------------------------------------------------------
+#
+# isal (the ``isal`` package, PyPI name of the ``python-isal`` project) binds
+# Intel's ISA-L and is a documented drop-in for ``gzip``/``zlib`` — same
+# streams, 2-3x the throughput on this kind of text (measured on a 565 MB
+# real TSF: extract 92s -> ~35s, repack 66s -> ~25s, single core). Imported
+# once, at module load, so a platform with no prebuilt wheel (no wheel is
+# published for every interpreter/arch combination) degrades to the stdlib
+# path instead of failing to import the package at all.
+try:
+    from isal import igzip as _igzip
+    _HAS_ISAL = True
+except ImportError:  # pragma: no cover - exercised only where the wheel is absent
+    _igzip = None
+    _HAS_ISAL = False
+
+# isal's encoder only offers levels 0-3 (ISAL_BEST_SPEED..ISAL_BEST_COMPRESSION),
+# not zlib's 0-9, so the "6, not 9" trade the rest of this module makes for
+# zlib does not carry over as a number. It carries over as a *decision*:
+# measured on TSF-shaped text, isal at level 3 (its slowest, best-ratio
+# setting) still runs ~320 MB/s against stdlib zlib's ~125 MB/s at level 6 —
+# there is no speed left on the table to buy by dropping to a faster isal
+# level, unlike zlib's 9 -> 6, so level 3 is used throughout. Whichever
+# backend compresses, the *decompressed* bytes are what compare and every
+# other reader see, and both are standard DEFLATE/gzip.
+_ISAL_GZ_LEVEL = 3
+
+
+def _gz_open(path_or_fileobj, mode: str, **kwargs):
+    """``gzip.open``, isal-backed when available. A whole-file, sequential
+    read or write only — never hand the result to something that seeks
+    backward (isal 1.8.0's ``GzipFile.seek`` can misdecode after a rewind;
+    see the outer-archive helpers below for how extract/repack stay clear of
+    that)."""
+    if _HAS_ISAL:
+        if "w" in mode and "compresslevel" not in kwargs:
+            kwargs["compresslevel"] = _ISAL_GZ_LEVEL
+        return _igzip.open(path_or_fileobj, mode, **kwargs)
+    return gzip.open(path_or_fileobj, mode, **kwargs)
+
+
+def _gzip_magic(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(2) == b"\x1f\x8b"
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -1264,15 +1318,17 @@ _EMAIL_IN_TEXT_RE = _EMAIL_RE
 _IPV4_ONLY_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
-def _extract_cert_identifiers(text: str, anon: Anonymizer) -> None:
+def _cert_identifiers(text: str) -> list[str]:
     """Only the CN, and only when it is a hostname. O/OU/L/ST are prose
     ("GeoTrust Inc.", "Network Solutions L.L.C.") — the trusted root store in
     every config carries hundreds of public CA names, none of them customer
     identifiers, and registering them as FQDNs produced nothing but noise."""
+    out = []
     for m in _CERT_CN_RE.finditer(text):
         val = m.group(1).strip().strip('"')
         if "." in val and " " not in val and not _IPV4_ONLY_RE.match(val):
-            anon.register_fqdn(val)
+            out.append(val)
+    return out
 
 
 # DN components that are plain words, not identifiers. Registering "local" as
@@ -1283,15 +1339,17 @@ _DC_STOPWORDS = {
 }
 
 
-def _extract_dn_identifiers(text: str, anon: Anonymizer) -> None:
+def _dn_identifiers(text: str) -> list[str]:
     parts = [m.group(1) for m in _DC_COMPONENT_RE.finditer(text)]
-    if parts:
-        anon.register_fqdn(".".join(parts))
-        # The last component is the TLD-ish suffix ("local", "com"): skip it.
-        for part in parts[:-1]:
-            low = part.lower()
-            if len(part) > 2 and low not in BUILTIN_OBJECTS and low not in _DC_STOPWORDS:
-                anon.register_fqdn(part)
+    if not parts:
+        return []
+    out = [".".join(parts)]
+    # The last component is the TLD-ish suffix ("local", "com"): skip it.
+    for part in parts[:-1]:
+        low = part.lower()
+        if len(part) > 2 and low not in BUILTIN_OBJECTS and low not in _DC_STOPWORDS:
+            out.append(part)
+    return out
 
 
 # Entry names that are PAN-OS vocabulary rather than customer identifiers.
@@ -1347,69 +1405,83 @@ _DOMAIN_USER_NAME_RE = re.compile(
 )
 
 
-def _register_entry_name(name_attr: str | None, parent_tag: str, anon: Anonymizer) -> None:
+# Detection below, registration further down: the XML prescan follows the
+# same detect-then-freeze split as the text prescan. Everything down to
+# `_detect_in_config_xml` is a pure function of one file — no Anonymizer, no
+# allocation — so it can run in a worker process; the parent replays the
+# findings in path order, which is what keeps the pseudonym counters (and so
+# the mapping) independent of how the work was scheduled.
+#
+# A finding is a tuple whose first item is its kind: ("fqdn", value),
+# ("user", value), ("obj", value, category), ("email", local, domain),
+# ("serial", value). The *classification* — vocabulary heuristics, DOMAIN\user
+# decomposition, FQDN-vs-IP, which category an entry's parent gives it — stays
+# with the parse, where the CPU is; only the allocation crosses back.
+
+
+def _detect_entry_name(name_attr: str | None, parent_tag: str) -> list[tuple]:
     if not (name_attr and len(name_attr) >= 2 and name_attr.lower() not in BUILTIN_OBJECTS
             and not _is_vocabulary(name_attr, parent_tag)):
-        return
+        return []
     name_attr = name_attr.strip()
     du = _DOMAIN_USER_NAME_RE.match(name_attr)
     if du:
         domain, user = du.group(1), du.group(2)
+        out: list[tuple] = []
         # A stopword domain ("corp", "local") is generic, like a zone named
         # "lan" — the user part is the identity either way.
         if domain.lower() not in _DC_STOPWORDS and domain.lower() not in BUILTIN_OBJECTS:
-            anon.register_fqdn(domain)
+            out.append(("fqdn", domain))
         # A trailing "$" is the machine-account marker, not part of the name:
         # kept in the key, the whole key never fired (an object pass had
         # already rewritten the name in front of it) — one unexplained line
         # on a real TSF, and the "$" survives in the output regardless.
-        anon.anon_user(user.rstrip("$"))
-        return
+        out.append(("user", user.rstrip("$")))
+        return out
     if _IP_LIKE_RE.match(name_attr):
-        pass  # an address object named by its IP: the IP pass owns it
-    elif _FQDN_LIKE_RE.match(name_attr) and not name_attr.lower().endswith((".log", ".xml")):
-        anon.register_fqdn(name_attr)  # one identity, one pseudonym
-    else:
-        category = "obj"
-        for obj_tag, cat in NAMED_OBJ_PATHS:
-            if parent_tag == obj_tag:
-                category = cat
-                break
-        anon.register_named_object(name_attr, category)
+        return []  # an address object named by its IP: the IP pass owns it
+    if _FQDN_LIKE_RE.match(name_attr) and not name_attr.lower().endswith((".log", ".xml")):
+        return [("fqdn", name_attr)]  # one identity, one pseudonym
+    category = "obj"
+    for obj_tag, cat in NAMED_OBJ_PATHS:
+        if parent_tag == obj_tag:
+            category = cat
+            break
+    return [("obj", name_attr, category)]
 
 
-def _register_sensitive_field(tag: str, val: str, anon: Anonymizer) -> None:
+def _detect_sensitive_field(tag: str, val: str) -> list[tuple]:
     field_type = SENSITIVE_XML_FIELDS.get(tag)
     if not field_type:
-        return
+        return []
     # _IP_LIKE_RE, not _IPV4_ONLY_RE: an <address> holding "10.18.2.254/24"
     # is the IP pass's territory too — registered as a "FQDN" it became
     # host005.anon.internal and the /24 was lost (real TSF).
     if field_type == "fqdn":
         if "." in val and not val.startswith("DC=") and not _IP_LIKE_RE.match(val):
-            anon.register_fqdn(val)
+            return [("fqdn", val)]
     elif field_type == "host":
         if len(val) > 2 and val.lower() not in BUILTIN_OBJECTS and not _IP_LIKE_RE.match(val):
-            anon.register_fqdn(val)
+            return [("fqdn", val)]
     elif field_type == "cert":
-        _extract_cert_identifiers(val, anon)
+        return [("fqdn", v) for v in _cert_identifiers(val)]
     elif field_type == "dn":
-        _extract_dn_identifiers(val, anon)
+        return [("fqdn", v) for v in _dn_identifiers(val)]
     elif field_type == "domain":
         if len(val) > 2 and val.lower() not in BUILTIN_OBJECTS:
-            anon.register_fqdn(val)
+            return [("fqdn", val)]
     elif field_type == "email":
-        for m in _EMAIL_IN_TEXT_RE.finditer(val):
-            anon.anon_email(m.group(1), m.group(2))
+        return [("email", m.group(1), m.group(2)) for m in _EMAIL_IN_TEXT_RE.finditer(val)]
     elif field_type == "serial":
         if val.isdigit() and 8 <= len(val) <= 16:
-            anon.anon_serial(val)
+            return [("serial", val)]
     elif field_type == "person":
         if len(val) > 1 and val.lower() not in BUILTIN_OBJECTS:
-            anon.register_named_object(val, "user")
+            return [("obj", val, "user")]
+    return []
 
 
-def _walk_xml(elem: ET.Element, anon: Anonymizer, parent_tag: str = "") -> None:
+def _walk_xml(elem: ET.Element, out: list[tuple], parent_tag: str = "") -> None:
     tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
     if tag in _SKIP_SUBTREES:
         return
@@ -1421,16 +1493,16 @@ def _walk_xml(elem: ET.Element, anon: Anonymizer, parent_tag: str = "") -> None:
         return
 
     if tag == "entry":
-        _register_entry_name(elem.get("name"), parent_tag, anon)
+        out.extend(_detect_entry_name(elem.get("name"), parent_tag))
 
     if elem.text and elem.text.strip():
-        _register_sensitive_field(tag, elem.text.strip(), anon)
+        out.extend(_detect_sensitive_field(tag, elem.text.strip()))
 
     for child in elem:
-        _walk_xml(child, anon, parent_tag=tag)
+        _walk_xml(child, out, parent_tag=tag)
 
 
-def _salvage_prescan_xml(xml_path: Path, anon: Anonymizer) -> None:
+def _salvage_prescan_xml(xml_path: Path, out: list[tuple], warnings: list[str]) -> None:
     """Prescan the parseable prefix of a malformed XML — most often a
     truncated or rejected candidate config (`failed_candidatecfg.xml`).
 
@@ -1467,31 +1539,65 @@ def _salvage_prescan_xml(xml_path: Path, anon: Anonymizer) -> None:
                         elif tag in _SKIP_SUBTREES or (tag == "global" and parent == "config"):
                             skip_depth = 1
                         elif tag == "entry":
-                            _register_entry_name(elem.get("name"), parent, anon)
+                            out.extend(_detect_entry_name(elem.get("name"), parent))
                     else:
                         if stack:
                             stack.pop()
                         if skip_depth:
                             skip_depth -= 1
                         elif elem.text and elem.text.strip():
-                            _register_sensitive_field(tag, elem.text.strip(), anon)
+                            out.extend(_detect_sensitive_field(tag, elem.text.strip()))
                 if stop:
                     break
     except Exception as e:  # salvage is best-effort by definition
-        logger.warning("prescan: salvage of %s stopped early: %s", xml_path.name, e)
+        warnings.append(f"prescan: salvage of {xml_path.name} stopped early: {e}")
+
+
+def _detect_in_config_xml(xml_path) -> tuple[list[tuple], list[str]]:
+    """Every identity one XML config reveals, in document order, plus the
+    lines the parent should log. Pure and stateless — it is what a prescan
+    worker process runs, and the parent registers the result."""
+    xml_path = Path(xml_path)
+    out: list[tuple] = []
+    warnings: list[str] = []
+    try:
+        tree = ET.parse(xml_path)
+        _walk_xml(tree.getroot(), out)
+    except ET.ParseError as e:
+        warnings.append(f"prescan: could not parse {xml_path.name} ({e}) — "
+                        f"salvaging the parseable prefix")
+        # ET.parse is all-or-nothing, so nothing was collected — cleared
+        # anyway, so the salvage always starts from an empty list.
+        out.clear()
+        _salvage_prescan_xml(xml_path, out, warnings)
+    return out, warnings
+
+
+def _register_xml_findings(anon: Anonymizer, findings: Iterable[tuple]) -> None:
+    """Allocate a pseudonym for each finding, in the order it was found. Runs
+    in the parent and nowhere else — see the doctrine above."""
+    for f in findings:
+        kind = f[0]
+        if kind == "fqdn":
+            anon.register_fqdn(f[1])
+        elif kind == "user":
+            anon.anon_user(f[1])
+        elif kind == "obj":
+            anon.register_named_object(f[1], f[2])
+        elif kind == "email":
+            anon.anon_email(f[1], f[2])
+        elif kind == "serial":
+            anon.anon_serial(f[1])
 
 
 def prescan_config_xml(xml_path: Path, anon: Anonymizer) -> tuple[int, int]:
     """Returns (objects added, fqdns added)."""
     before = len(anon.named_obj_map)
     before_fqdn = len(anon.fqdn_map)
-    try:
-        tree = ET.parse(xml_path)
-        _walk_xml(tree.getroot(), anon)
-    except ET.ParseError as e:
-        logger.warning("prescan: could not parse %s (%s) — salvaging the parseable prefix",
-                       xml_path.name, e)
-        _salvage_prescan_xml(xml_path, anon)
+    findings, warnings = _detect_in_config_xml(xml_path)
+    for w in warnings:
+        logger.warning("%s", w)
+    _register_xml_findings(anon, findings)
     return len(anon.named_obj_map) - before, len(anon.fqdn_map) - before_fqdn
 
 
@@ -1577,14 +1683,15 @@ def process_gz_file(path: Path, anon: Anonymizer, rel: str = "") -> FileOutcome:
     rel = rel or str(path)
     try:
         misses_before = set(anon.frozen_misses)
-        with gzip.open(path, "rb") as f:
+        with _gz_open(path, "rb") as f:
             raw = f.read()
         if is_binary_bytes(raw[:4096]):
             if anon.redact_binaries and anon.binary_embeds_identifier(raw):
                 # mtime=0 keeps the redacted member byte-identical whatever
                 # worker (or run) produced it.
                 with open(path, "wb") as out:
-                    with gzip.GzipFile(fileobj=out, mode="wb", mtime=0) as gz:
+                    gz_cls = _igzip.GzipFile if _HAS_ISAL else gzip.GzipFile
+                    with gz_cls(fileobj=out, mode="wb", mtime=0) as gz:
                         gz.write(REDACTED_PAYLOAD)
                 return FileOutcome(rel, "redacted")
             return FileOutcome(rel, "gz_binary")
@@ -1592,10 +1699,11 @@ def process_gz_file(path: Path, anon: Anonymizer, rel: str = "") -> FileOutcome:
         warnings = _new_frozen_misses(anon, misses_before, rel)
         if out is None:
             return FileOutcome(rel, "unchanged", warnings=warnings)
-        # Level 6, not the gzip default of 9: measured 12 MB/s at 9 against
-        # 38 MB/s at 6 for the same output size on this kind of text — the
-        # same trade the outer repack already makes.
-        with gzip.open(path, "wb", compresslevel=6) as f:
+        # Level 6, not the gzip default of 9 (stdlib path): measured 12 MB/s
+        # at 9 against 38 MB/s at 6 for the same output size on this kind of
+        # text — the same trade the outer repack already makes. The isal
+        # path uses _ISAL_GZ_LEVEL instead (see above; _gz_open fills it in).
+        with _gz_open(path, "wb", **({} if _HAS_ISAL else {"compresslevel": 6})) as f:
             f.write(out)
         return FileOutcome(rel, "modified", dict(anon.last_counts), warnings=warnings)
     except Exception as e:
@@ -1626,6 +1734,68 @@ def _is_safe_member(member: tarfile.TarInfo, work_dir: Path) -> bool:
     return True
 
 
+@contextlib.contextmanager
+def _tar_for_read(archive: Path, progress: ProgressFn, phase: str):
+    """Yield a `tarfile.TarFile` open for random-access reading of `archive`.
+
+    `extract_archive` needs backward seeks: `getmembers()` is a full forward
+    scan to build the member list, then `extractall()` restarts near the
+    beginning for the first chunk. isal's `GzipFile` decodes 2-3x faster than
+    stdlib zlib but (as of isal 1.8.0) can misdecode after exactly that kind
+    of rewind — a `.seek()` back to a non-zero offset following a prior read,
+    confirmed against the stdlib output on this repo's mock archive. So isal
+    is only ever driven strictly forward here: when it is available and
+    `archive` is gzip-compressed, its speed goes into a single sequential
+    decompression pass into a plain, uncompressed temp `.tar` file on the
+    same volume as `archive` (never partial, never re-read); tarfile then
+    does its usual random-access reading against that ordinary file, exactly
+    as it would against an uncompressed `.tar`. Falls back to
+    `tarfile.open(archive, "r:*")` — unchanged from before this change —
+    when isal is unavailable or `archive` is not gzip-compressed (a plain
+    `.tar`, which isal cannot speed up here anyway).
+    """
+    if _HAS_ISAL and _gzip_magic(archive):
+        progress(phase, 0, 0, f"Decompressing {archive.name}")
+        fd, tmp_name = tempfile.mkstemp(dir=archive.parent, suffix=".tsf-anon-tmp.tar")
+        tmp_path = Path(tmp_name)
+        try:
+            with open(archive, "rb") as raw:
+                with _igzip.GzipFile(fileobj=raw, mode="rb") as gz, os.fdopen(fd, "wb") as tmp_f:
+                    shutil.copyfileobj(gz, tmp_f, length=1024 * 1024)
+            with tarfile.open(tmp_path, "r:") as tar:
+                yield tar
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    else:
+        with tarfile.open(archive, "r:*") as tar:
+            yield tar
+
+
+@contextlib.contextmanager
+def _tar_for_write(output: Path, compresslevel: int):
+    """Yield a `tarfile.TarFile` that writes straight into a gzip-compressed
+    `output`, isal-backed when available.
+
+    Unlike reading (`_tar_for_read`), writing an archive is purely
+    sequential — `tarfile` never seeks backward while it writes — so isal's
+    `GzipFile` is safe to drive directly here, wrapped as `tarfile`'s own
+    `fileobj` exactly the way `tarfile.TarFile.gzopen` wraps stdlib's
+    `GzipFile` for `mode="w:gz"`. No temp file needed on this side.
+    """
+    if _HAS_ISAL:
+        with open(output, "wb") as raw:
+            gz = _igzip.GzipFile(fileobj=raw, mode="wb", compresslevel=_ISAL_GZ_LEVEL)
+            tar = tarfile.TarFile.taropen(str(output), "w", gz)
+            tar._extfileobj = False  # tar.close() below also closes `gz` (flush + trailer)
+            try:
+                yield tar
+            finally:
+                tar.close()
+    else:
+        with tarfile.open(output, "w:gz", compresslevel=compresslevel) as tar:
+            yield tar
+
+
 def extract_archive(archive: Path, work_dir: Path, *,
                     progress: ProgressFn = _noop_progress,
                     phase: str = "extract") -> tuple[list[tarfile.TarInfo], int]:
@@ -1640,15 +1810,17 @@ def extract_archive(archive: Path, work_dir: Path, *,
     The extraction is driven in slices so it can say how far it is: on a real
     TSF this phase is minutes long, and a bar that only knows "started" and
     "finished" cannot be told from a hung run. Slices keep `extractall`'s own
-    semantics (directory attributes applied after their contents) and read the
-    stream forward-only, which is what keeps a gzip member cheap to reach.
+    semantics (directory attributes applied after their contents). The
+    getmembers() scan below reads the archive forward to the end, then this
+    loop restarts extraction near the beginning — a backward seek `_tar_for_read`
+    routes around when isal is doing the decoding (see its docstring).
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     members: list[tarfile.TarInfo] = []
     to_extract: list[tarfile.TarInfo] = []
     skipped = 0
     total = 0
-    with tarfile.open(archive, "r:*") as tar:
+    with _tar_for_read(archive, progress, phase) as tar:
         for m in tar.getmembers():
             m.name = m.name.lstrip("/")
             if not m.name or m.name == ".":
@@ -1692,10 +1864,11 @@ def repack_archive(members: Iterable[tarfile.TarInfo], tree: Path, output: Path,
     # ~100 updates whatever the size: a small archive still moves, a 500-member
     # one does not write job.json for every file.
     step = max(1, total // 100)
-    # Level 6, not gzip's 9: measured on a real TSF, 9 runs at 61 MB/s and 6 at
-    # 133 MB/s for the *same* output size — the last three levels buy nothing
-    # on this kind of text and cost half the repack phase.
-    with tarfile.open(output, "w:gz", compresslevel=6) as tar:
+    # Level 6, not gzip's 9 (stdlib path): measured on a real TSF, 9 runs at
+    # 61 MB/s and 6 at 133 MB/s for the *same* output size — the last three
+    # levels buy nothing on this kind of text and cost half the repack
+    # phase. The isal path uses _ISAL_GZ_LEVEL instead (see above).
+    with _tar_for_write(output, compresslevel=6) as tar:
         for m in members:
             if written % step == 0:
                 progress("repack", written, total, output.name)
@@ -1805,22 +1978,51 @@ def _prescan_system_info(tree: Path, anon: Anonymizer) -> int:
     return found
 
 
-def prescan_tree(tree: Path, anon: Anonymizer, progress: ProgressFn = _noop_progress) -> int:
+# A config bigger than this is not read at all: a 200 MB XML is not a
+# customer configuration, and ET.parse would hold the whole DOM in memory.
+_PRESCAN_MAX_BYTES = 200 * 1024 * 1024
+
+
+def prescan_tree(tree: Path, anon: Anonymizer, progress: ProgressFn = _noop_progress,
+                 workers: int = 1) -> int:
     """Prescan every customer-config XML in the tree. Running/candidate configs
     first so they own the categories; other XMLs then only add what they
     introduce. Vendor content (App-ID catalog, URL DB, report templates) is
-    skipped — see _is_prescan_candidate / _SKIP_SUBTREES."""
+    skipped — see _is_prescan_candidate / _SKIP_SUBTREES.
+
+    `workers` > 1 fans the *parsing* out over processes; registration always
+    happens here, in the same file order and the same document order a
+    sequential run would use, so the mapping does not depend on scheduling.
+    """
     _prescan_system_info(tree, anon)
     primary = sorted(tree.rglob("running-config.xml")) + sorted(tree.rglob("candidate-config.xml"))
     seen = set(primary)
     others = [p for p in sorted(tree.rglob("*.xml")) if p not in seen and _is_prescan_candidate(p)]
     files = primary + others
-    for i, cfg in enumerate(files, 1):
-        if cfg.stat().st_size > 200 * 1024 * 1024:
-            continue
-        added_obj, added_fqdn = prescan_config_xml(cfg, anon)
+    todo = [(i, cfg) for i, cfg in enumerate(files, 1)
+            if cfg.stat().st_size <= _PRESCAN_MAX_BYTES]
+
+    def _apply(i: int, cfg: Path, findings: list[tuple], warnings: list[str]) -> None:
+        for w in warnings:  # logged here, where a worker's records would be lost
+            logger.warning("%s", w)
+        before, before_fqdn = len(anon.named_obj_map), len(anon.fqdn_map)
+        _register_xml_findings(anon, findings)
         progress("prescan", i, len(files),
-                 f"{cfg.name}: +{added_obj} objects, +{added_fqdn} FQDNs")
+                 f"{cfg.name}: +{len(anon.named_obj_map) - before} objects, "
+                 f"+{len(anon.fqdn_map) - before_fqdn} FQDNs")
+
+    if workers > 1 and len(todo) > 1:
+        # forkserver, not fork: this runs on a worker thread of a live server,
+        # and forking a threaded process inherits locks held by other threads.
+        ctx = multiprocessing.get_context("forkserver")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
+            results = pool.map(_detect_in_config_xml, [str(cfg) for _, cfg in todo],
+                               chunksize=1)
+            for (i, cfg), (findings, warnings) in zip(todo, results, strict=True):
+                _apply(i, cfg, findings, warnings)
+    else:
+        for i, cfg in todo:
+            _apply(i, cfg, *_detect_in_config_xml(cfg))
     return len(files)
 
 
@@ -1885,7 +2087,7 @@ def _detect_in_file(path) -> list[tuple]:
     path = Path(path)
     try:
         if path.suffix == ".gz":
-            with gzip.open(path, "rb") as f:
+            with _gz_open(path, "rb") as f:
                 raw = f.read()
             if is_binary_bytes(raw[:4096]):
                 return []
@@ -2055,9 +2257,10 @@ def anonymize_tsf(
     ``work_root/orig`` and the anonymized one at ``work_root/anon`` so the
     compare mode can run over them without re-extracting.
 
-    ``workers`` > 1 spreads the text prescan and the rewrite over processes.
-    The mapping and the output are the same whatever the count: detection
-    feeds allocation in path order, and the rewrite runs with frozen tables.
+    ``workers`` > 1 spreads the XML prescan, the text prescan and the rewrite
+    over processes. The mapping and the output are the same whatever the
+    count: detection feeds allocation in path order, and the rewrite runs
+    with frozen tables.
     """
     import shutil
 
@@ -2096,7 +2299,7 @@ def anonymize_tsf(
         shutil.copytree(orig_dir, anon_dir, symlinks=False, copy_function=_copy_one)
         progress("copy", files, files, "")
 
-        report.config_files_scanned = prescan_tree(anon_dir, anon, progress)
+        report.config_files_scanned = prescan_tree(anon_dir, anon, progress, workers=workers)
         prescan_text_identities(anon_dir, anon, progress, workers=workers)
         anon.build_patterns()
         # Every identity is now on the table; freeze them so the rewrite is a

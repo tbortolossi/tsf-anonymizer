@@ -308,7 +308,7 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
 - **An interface name is never a FQDN — interfaces are preserved everywhere,
   zone members included.** `vlan.800` and `tunnel.2` are FQDN-shaped
   (`word.word`), and a subinterface `<entry name="vlan.800">` under `<units>`
-  went through `_register_entry_name`'s FQDN branch on a real TSF: every zone
+  went through `_detect_entry_name`'s FQDN branch on a real TSF: every zone
   `<member>vlan.800</member>` came out as `<member>hostNNN.anon.internal</member>`,
   breaking the zone↔interface correlation every reader relies on. The object
   route always refused interfaces (`_is_panos_interface` in
@@ -324,6 +324,29 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
 - **The output archive is the input archive with payloads swapped.**
   `repack_archive` iterates the original `TarInfo` list; it must not re-walk
   the filesystem (`tar.add(dir)`), which loses order and metadata.
+- **isal decodes the outer `.tgz` and inner `.gz` payloads only in one
+  direction: forward.** `_tar_for_read` cannot hand `tarfile` an isal
+  `GzipFile` as its `fileobj` the way `_tar_for_write` safely hands it one
+  for writing: `extract_archive` calls `getmembers()` (a full forward scan
+  to the end of the archive) before `extractall()` restarts near the
+  beginning, and isal 1.8.0's `GzipFile.seek()` misdecodes after exactly
+  that rewind pattern (confirmed against the stdlib output on this repo's
+  mock archive: `.seek(0)` after a partial read, then a further read, comes
+  back scrambled). So reading only ever drives isal strictly forward: the
+  whole compressed archive is decompressed in one sequential pass into a
+  plain, uncompressed temp `.tar` on the same volume, and `tarfile` then
+  does its usual random-access reads against that ordinary file — the
+  extraction logic below is unchanged either way. Writing has no such
+  restriction (`tarfile` never seeks backward while it writes), so
+  `_tar_for_write` wraps isal's `GzipFile` directly as `tarfile`'s
+  `fileobj`, exactly as `tarfile.TarFile.gzopen` wraps stdlib's for
+  `mode="w:gz"`. Whichever backend compresses, only the *decompressed*
+  bytes are the invariant — compare only ever reads decompressed content,
+  and isal's encoder makes a different, and by design slightly larger,
+  compressed size for the same input (see CHANGELOG). Do not "simplify" the
+  read side back to wrapping isal's `GzipFile` as `tarfile`'s `fileobj`
+  without re-checking this against whatever isal version is then current —
+  that is precisely the design this note exists to head off.
 - **Serial regex matches 12 or 15 digits only.** 13 digits is an epoch in
   milliseconds; `\d{12,15}` turned every such timestamp into a fake serial.
 - **Never anonymize** PAN-OS interface names, `BUILTIN_OBJECTS` (`www`
@@ -346,8 +369,9 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
 - **Heavy passes are spread over processes by detect-then-freeze.**
   `compare_one` is a pure function of the sidecar, so `compare_trees` maps it
   over a `forkserver` pool (`TSF_COMPARE_WORKERS`) and collects reports back
-  in path order. The anonymize side earns the same right in two steps
-  (`TSF_ANON_WORKERS`): detection (`_detect_in_file`, stateless, parallel)
+  in path order. The anonymize side earns the same right in three steps
+  (`TSF_ANON_WORKERS`): detection — `_detect_in_config_xml` for the XML
+  prescan, `_detect_in_file` for the text one, both stateless and parallel —
   reports what each file reveals, the *parent* allocates pseudonyms in path
   order — so counters fall exactly as a sequential run's would — and the
   rewrite then runs with frozen tables, a pure lookup that `anonymize_tree`
@@ -360,6 +384,37 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   detection scans the *original* text, so an IP or serial embedded inside a
   replaced identifier can enter the mapping where the old code never saw it —
   a superset, never a miss.
+- **The XML prescan classifies in the worker and allocates in the parent —
+  the split runs between `_detect_*` and `_register_xml_findings`, and it
+  must stay there.** Everything from `_detect_entry_name` to
+  `_detect_in_config_xml` is a pure function of one file: it returns a list of
+  findings — `("fqdn", v)`, `("user", v)`, `("obj", v, category)`,
+  `("email", local, domain)`, `("serial", v)` — in *document order*, and takes
+  no `Anonymizer`. Every judgement lives there (the vocabulary heuristics,
+  `DOMAIN\user` decomposition, FQDN-vs-IP, the category an entry's parent
+  gives it, the CN and DC extractions) because none of them reads the tables;
+  only the allocation does, and it happens in `prescan_tree`'s parent process,
+  file by file in path order. Two consequences to preserve: a detection helper
+  that starts needing the `Anonymizer` has broken the split (registration
+  order, hence the mapping, would then depend on which worker got there
+  first), and a *new finding kind* must be added to `_register_xml_findings`
+  or it is silently dropped — the identifier then leaves in clear, invisible
+  to the compare, which only knows the mapping. Warnings (an unparseable
+  config, a salvage that stopped early) are returned as strings and logged by
+  the parent: a worker's log records never reach the job's captured log.
+  Measured: 1.5 s → 0.57 s on 37 MB of synthetic configs at 4 workers, and the
+  mapping is byte-identical at 1, 4 and 8 workers. Tests:
+  `TestXmlPrescanParallelism`.
+- **The compare's XML structure check reads each document once and builds no
+  DOM.** `_xml_tags` drives expat's start-element handler; the check only ever
+  needed the tag sequence, and `ET.fromstring` + `root.iter()` paid a full
+  tree plus a second traversal for it — 0.83 s and +276 MB against 0.39 s and
+  +13 MB per 22 MB pair, on every worker of the compare pool at once. Tags are
+  spelled the way `XMLParser._fixname` spells them (`ParserCreate(None, "}")`
+  plus a leading `{`), so a namespaced tag is still `{uri}local`, and expat's
+  own error is the one ElementTree would have raised — verdicts are identical
+  on comments, PIs, internal entities, encoding declarations, namespaces and
+  every unparseable shape. Test: `TestXmlStructure`.
 - **Rewritten `.gz` members are recompressed at level 6, not gzip's default
   9** — measured 12 MB/s at 9 against 38 MB/s at 6 for the same output size,
   the same trade `repack_archive` already makes for the outer archive.

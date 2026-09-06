@@ -6,6 +6,7 @@ from __future__ import annotations
 import gzip
 import json
 import tarfile
+from pathlib import Path
 
 import pytest
 from conftest import BINARY_PAYLOAD, CONFIG_XML, IDENTIFIERS, PRESERVED, read_member
@@ -315,6 +316,68 @@ class TestAnonymizeTsf:
             names = tar.getnames()
         assert names == ["system.log"]
         assert not (tmp_path.parent / "escape.log").exists()
+
+
+class TestIsalArchiveIO:
+    """python-isal (isal) accelerates the outer .tgz and inner .gz archive
+    I/O (see CHANGELOG); compressed bytes may differ from the stdlib path
+    (isal encodes differently) but decompressed bytes must not — that is the
+    hard invariant, checked here by forcing each backend in turn."""
+
+    def test_extract_and_repack_are_isal_stdlib_equivalent(self, tmp_path, tsf, monkeypatch):
+        pytest.importorskip("isal")
+        from tsf_anonymizer import core
+
+        assert core._HAS_ISAL  # meaningless if the wheel never loaded
+
+        def round_trip(has_isal: bool, tag: str) -> Path:
+            monkeypatch.setattr(core, "_HAS_ISAL", has_isal)
+            members, skipped = core.extract_archive(tsf, tmp_path / f"work-{tag}")
+            assert skipped == 0
+            out = tmp_path / f"out-{tag}.tgz"
+            core.repack_archive(members, tmp_path / f"work-{tag}", out)
+            return out
+
+        out_isal, out_std = round_trip(True, "isal"), round_trip(False, "std")
+
+        with tarfile.open(out_isal) as a, tarfile.open(out_std) as b:
+            ma, mb = a.getmembers(), b.getmembers()
+            assert [m.name for m in ma] == [m.name for m in mb]
+            for x, y in zip(ma, mb, strict=True):
+                assert (x.mode, x.uid, x.gid, x.uname, x.mtime, x.type) == \
+                       (y.mode, y.uid, y.gid, y.uname, y.mtime, y.type)
+                if not x.isfile():
+                    continue
+                fa, fb = a.extractfile(x).read(), b.extractfile(y).read()
+                if x.name.endswith(".gz"):
+                    fa, fb = gzip.decompress(fa), gzip.decompress(fb)
+                assert fa == fb, x.name
+
+    def test_anonymized_output_is_isal_stdlib_equivalent(self, tmp_path, tsf, monkeypatch):
+        """Same check end to end through `anonymize_tsf`, which also exercises
+        the inner-.gz recompression path (`process_gz_file`) isal accelerates."""
+        pytest.importorskip("isal")
+        from tsf_anonymizer import core
+
+        monkeypatch.setattr(core, "_HAS_ISAL", True)
+        out_isal = tmp_path / "isal.tgz"
+        _, mapping = anonymize_tsf(tsf, out_isal)
+
+        # Seeded with the first run's mapping so the *text* is identical too
+        # (same original -> same pseudonym) and only the gzip backend varies.
+        monkeypatch.setattr(core, "_HAS_ISAL", False)
+        out_std = tmp_path / "std.tgz"
+        anonymize_tsf(tsf, out_std, seed_mapping=mapping)
+
+        with tarfile.open(out_isal) as a, tarfile.open(out_std) as b:
+            for name in a.getnames():
+                fa, fb = a.extractfile(name), b.extractfile(name)
+                if fa is None or fb is None:  # directories
+                    continue
+                da, db = fa.read(), fb.read()
+                if name.endswith(".gz"):
+                    da, db = gzip.decompress(da), gzip.decompress(db)
+                assert da == db, name
 
 
 class TestTrieRegex:
@@ -708,6 +771,100 @@ class TestDetectThenFreeze:
         _, prescan_mapping = anonymize_tsf(tsf, None, mapping_only=True, seed_mapping=seed)
         assert prescan_mapping == full_mapping
         assert not any(f.warnings for f in report.files)
+
+
+def _xml_tree(root):
+    """A tree of several customer configs — enough files for the prescan pool
+    to have something to spread, and enough distinct names that a registration
+    out of path order would show up as a different pseudonym."""
+    (root / "opt/pancfg/mgmt/saved-configs").mkdir(parents=True)
+    (root / "opt/pancfg/mgmt/saved-configs/running-config.xml").write_text(CONFIG_XML)
+    (root / "opt/pancfg/mgmt/userinfo.xml").write_text(
+        "<config><users><entry name='acme\\jdupont'/><entry name='acme\\mmartin$'/>"
+        "</users></config>")
+    (root / "opt/pancfg/mgmt/profiles.xml").write_text(
+        "<config><shared><certificate><entry name='cert-b'>"
+        "<subject>C = FR, O = Acme, CN = vpn2.acme-corp.fr</subject></entry></certificate>"
+        "<server-profile><ldap><entry name='LDAP-Backup'><base>DC=acme-corp,DC=local</base>"
+        "</entry></ldap></server-profile></shared></config>")
+    for i in range(6):
+        (root / f"opt/pancfg/mgmt/snapshot-{i}.xml").write_text(
+            "<config><devices><entry name='localhost.localdomain'><vsys><entry name='vsys1'>"
+            "<address>" + "".join(
+                f"<entry name='SRV-{i}-{j}'><ip-netmask>10.{i}.{j}.1/32</ip-netmask></entry>"
+                for j in range(20))
+            + f"</address><zone><entry name='Zone-Snap-{i}'/></zone>"
+              "</entry></vsys></entry></devices></config>")
+    return root
+
+
+class TestXmlPrescanParallelism:
+    """The XML prescan follows the same detect-then-freeze split as the text
+    one: workers parse and report, the parent allocates in path order. The
+    mapping must therefore not depend on the worker count."""
+
+    SEED = {"ip_seed": "00" * 16}  # the seeded contract: the rest is counters
+
+    def test_mapping_is_identical_whatever_the_worker_count(self, tmp_path):
+        from tsf_anonymizer.core import prescan_tree
+        tree = _xml_tree(tmp_path)
+        seq = Anonymizer.from_mapping(self.SEED)
+        par = Anonymizer.from_mapping(self.SEED)
+        assert prescan_tree(tree, seq, workers=1) == prescan_tree(tree, par, workers=4)
+        assert seq.get_mapping() == par.get_mapping()
+
+    def test_pseudonyms_follow_path_order_not_completion_order(self, tmp_path):
+        """Counters fall in path-then-document order, which is what "same
+        original → same pseudonym" rests on. A worker that registered its own
+        findings would number them by whichever process finished first."""
+        from tsf_anonymizer.core import prescan_tree
+        tree = _xml_tree(tmp_path)
+        for workers in (1, 4):
+            anon = Anonymizer()
+            prescan_tree(tree, anon, workers=workers)
+            # running-config.xml is prescanned first, then the others in path
+            # order: snapshot-0 before snapshot-5, and each file's entries in
+            # document order.
+            zones = [anon.named_obj_map[f"Zone-Snap-{i}"] for i in range(6)]
+            assert zones == sorted(zones), workers
+            assert anon.named_obj_map["SRV-0-0"] < anon.named_obj_map["SRV-0-19"]
+            # the running config is prescanned first: its addresses get the
+            # lower counters of the same category
+            assert anon.named_obj_map["SRV-Compta-Paris"] < anon.named_obj_map["SRV-0-0"]
+            assert anon.named_obj_map["Zone-Prod-DMZ"] < anon.named_obj_map["Zone-Snap-0"]
+
+    def test_detection_reports_and_never_allocates(self, tmp_path):
+        """The worker half takes no Anonymizer at all — that is what makes it
+        safe to run in a process that will never own the mapping."""
+        from tsf_anonymizer.core import _detect_in_config_xml
+        p = tmp_path / "c.xml"
+        p.write_text(CONFIG_XML)
+        findings, warnings = _detect_in_config_xml(p)
+        assert not warnings
+        assert ("fqdn", "dc01.acme-corp.local") in findings
+        assert ("obj", "Zone-Prod-DMZ", "zone") in findings
+        assert ("serial", "001901000123") in findings
+        assert ("email", "ops", "acme-corp.fr") in findings
+        # the certificate CN goes through the same detection, not a later pass
+        assert ("fqdn", "vpn.acme-corp.fr") in findings
+        # pure: same file in, same findings out, in the same order
+        assert _detect_in_config_xml(p) == (findings, warnings)
+
+    def test_a_config_that_does_not_parse_is_salvaged_in_the_worker(self, tmp_path, caplog):
+        import logging
+
+        from tsf_anonymizer.core import prescan_tree
+        tree = _xml_tree(tmp_path)
+        (tree / "opt/pancfg/mgmt/failed_candidatecfg.xml").write_text(
+            CONFIG_XML[:CONFIG_XML.rindex("<certificate")])
+        seq = Anonymizer.from_mapping(self.SEED)
+        par = Anonymizer.from_mapping(self.SEED)
+        prescan_tree(tree, seq, workers=1)
+        with caplog.at_level(logging.WARNING):
+            prescan_tree(tree, par, workers=4)
+        assert seq.get_mapping() == par.get_mapping()
+        # the worker cannot log into the job's captured log; the parent does it
+        assert any("failed_candidatecfg.xml" in r.message for r in caplog.records)
 
 
 class TestSalvagePrescan:

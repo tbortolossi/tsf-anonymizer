@@ -174,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("-o", "--output")
     a.add_argument("--seed-mapping", help="mapping.json from a previous run (same customer)")
     a.add_argument("--workers", type=int, default=int(os.getenv("TSF_ANON_WORKERS") or 1),
-                   help="processes for the text prescan and the rewrite; the mapping "
+                   help="processes for the prescans and the rewrite; the mapping "
                         "is identical whatever the count (env TSF_ANON_WORKERS)")
     a.add_argument("--redact-binaries", action="store_true",
                    help="replace binary payloads that embed mapping identifiers with a "
@@ -194,7 +194,10 @@ def main(argv: list[str] | None = None) -> int:
     c.set_defaults(fn=cmd_compare)
 
     s = sub.add_parser("serve", help="run the web UI")
-    s.add_argument("--host", default="0.0.0.0")
+    s.add_argument("--host", default="127.0.0.1",
+                   help="bind address (default 127.0.0.1: loopback-only unless overridden; "
+                        "the container's CMD passes --host 0.0.0.0 explicitly, since the "
+                        "publish-on-loopback behaviour lives in TSF_BIND_ADDR/compose there)")
     s.add_argument("--port", type=int, default=8090)
     s.add_argument("--data-dir", default="/data")
     s.add_argument("--ssl-certfile", default=os.getenv("TSF_TLS_CERT", ""),

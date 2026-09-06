@@ -206,7 +206,7 @@ during the long phases too, not only while files are being rewritten.
 
 The service runs **several archives at once** (`TSF_WORKERS`, default `cpu/4`
 capped at 4) and spreads each job's heavy passes over worker *processes*: the
-text prescan and the rewrite (`TSF_ANON_WORKERS`) as well as the verification
+XML and text prescans and the rewrite (`TSF_ANON_WORKERS`) as well as the verification
 (`TSF_COMPARE_WORKERS`, which `TSF_ANON_WORKERS` defaults to — the two phases
 of one job never overlap, so they share the same budget). Processes, not
 threads: Python threads serialise CPU work on the GIL, which is how a
