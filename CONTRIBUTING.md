@@ -145,13 +145,21 @@ bump may change behaviour (a new identifier class, a boundary that moves),
 a patch bump fixes without changing what is mapped. The version lives in
 `pyproject.toml` only; `uv.lock` and the package read it from there.
 
+Branch protection on `master` means the release commit goes through a PR
+like any other change; only the tag is pushed directly, onto the squash
+commit the PR produced.
+
 ```bash
 git checkout master && git pull
+git checkout -b "chore/release-v-next"
 uv version --bump patch            # or minor / major — edits pyproject.toml + uv.lock
 # move the Unreleased entries of CHANGELOG.md under the new version and date
 git commit -am "chore: release v$(uv version --short)"
+git push -u origin HEAD && gh pr create --fill
+# once CI is green: squash-merge the PR, then tag the squash commit
+git checkout master && git pull
 git tag -a "v$(uv version --short)" -m "v$(uv version --short)"
-git push origin master --tags
+git push origin "v$(uv version --short)"
 ```
 
 Pushing the tag runs the release workflow: it checks the tag matches
