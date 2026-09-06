@@ -415,12 +415,15 @@ class TestRealTsfLessons:
     """Each of these was found by the compare mode on a real 155 MB TSF."""
 
     def test_object_named_like_an_xml_tag_does_not_rewrite_tags(self, anon):
-        for name in ("enabled", "bgp", "Apple", "name"):
+        # "bgp" left this list when routing-protocol names joined
+        # BUILTIN_OBJECTS; "rtcp" is another App-ID catalog name with an
+        # XML-tag shape and keeps the test's point intact.
+        for name in ("enabled", "rtcp", "Apple", "name"):
             anon.register_named_object(name, "obj")
         anon.build_patterns()
-        xml = '<bgp><enabled>yes</enabled><entry name="Apple"><member>bgp</member></entry></bgp>'
+        xml = '<rtcp><enabled>yes</enabled><entry name="Apple"><member>rtcp</member></entry></rtcp>'
         out = anon.anonymize_text(xml)
-        assert out.startswith("<bgp><enabled>yes</enabled>") and out.endswith("</entry></bgp>")
+        assert out.startswith("<rtcp><enabled>yes</enabled>") and out.endswith("</entry></rtcp>")
         assert 'name="OBJ-' in out and "<member>OBJ-" in out
 
     def test_predefined_subtree_and_content_files_are_not_prescanned(self, tmp_path):
@@ -1454,6 +1457,20 @@ class TestEnglishWordsAreNotIdentities:
             line = f"failed authentication for user '{word}'.  Reason: Invalid username/password."
             assert anon.anonymize_text(line) == line
         assert not anon.user_map
+
+    def test_a_service_named_after_a_routing_protocol_is_not_an_identity(self, anon):
+        # A real box had a service object named "bgp" (tcp/179): registering
+        # it rewrote every `> show advanced-routing bgp loc-rib-detail`
+        # command echo to `… SVC-NNNN loc-rib-detail`, and the compare's
+        # dynamic routing view found 29 fewer routes on the anonymized side.
+        for word in ("bgp", "ospf", "BGP"):
+            assert anon.register_named_object(word, "svc") == word
+        assert not anon.named_obj_map
+        anon.register_named_object("bgp-peering-lyon", "svc")  # compounds stay identities
+        assert "bgp-peering-lyon" in anon.named_obj_map
+        anon.build_patterns()
+        echo = "> show advanced-routing bgp loc-rib-detail\n> show routing protocol ospf dumplsdb"
+        assert anon.anonymize_text(echo) == echo
 
     def test_command_echoes_and_history_verbs_stay_readable(self, tmp_path):
         from tsf_anonymizer.core import prescan_text_identities

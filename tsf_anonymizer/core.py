@@ -166,6 +166,14 @@ BUILTIN_OBJECTS = {
     # replacing it rewrote http://www.w3.org in every vendor XML namespace —
     # 11 "XML tag sequence differs" errors per box on a real batch.
     "www",
+    # Routing-protocol names are PAN-OS command vocabulary before they are
+    # anybody's object name: a real box with a service named "bgp" (tcp/179)
+    # had every `> show advanced-routing bgp loc-rib-detail` echo rewritten
+    # to `… SVC-0368 loc-rib-detail`, which lost the BGP sections to any
+    # reader — caught by the compare's routing-coherence check, whose
+    # dynamic view found 29 fewer routes on the anonymized side. Such a name
+    # identifies nobody (the same trade as "lan" and the English stopwords).
+    "bgp", "ospf", "ospfv3", "rip", "bfd", "pim", "igmp", "msdp", "vrrp",
 }
 
 # Login names that are log vocabulary, not people: brute-force attempts on an
