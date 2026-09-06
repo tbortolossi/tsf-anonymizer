@@ -399,6 +399,54 @@ def test_a_seeded_job_waits_for_its_ancestor_even_when_a_worker_is_free(tmp_path
         store.shutdown()
 
 
+def test_a_lone_archive_gets_the_whole_machine(tmp_path, monkeypatch):
+    """The per-job process count is a floor, not a ceiling.
+
+    `TSF_WORKERS` x per-job processes is the machine when every archive slot
+    is busy; when fewer archives can run, the phase takes the idle share
+    instead of leaving three quarters of the cores unused.
+    """
+    monkeypatch.setattr("tsf_anonymizer.jobs.os.cpu_count", lambda: 16)
+    store = JobStore(tmp_path / "data", workers=4)
+    try:
+        assert store.anon_workers == 4 and store.compare_workers == 4
+        # Nothing running at all: the whole machine.
+        assert store._phase_workers(store.anon_workers) == 16
+        # One job running, three others queued and free to start: the share.
+        running = store.new("anonymize")
+        running.status = "running"
+        store._running.add(running.id)
+        for _ in range(3):
+            j = store.new("anonymize")
+            j.status = "queued"
+            store._pending.append(j)
+        assert store._phase_workers(store.anon_workers) == 4
+        # A chain is sequential: its queued jobs cannot run, so they do not
+        # take a share of the CPU from the one that can.
+        for j in store._pending:
+            j.seed_from = running.id
+        assert store._phase_workers(store.anon_workers) == 16
+    finally:
+        store.shutdown()
+
+
+def test_a_pinned_process_count_is_never_raised(tmp_path, monkeypatch):
+    """An explicit count is an operator pinning the load — honour it."""
+    monkeypatch.setattr("tsf_anonymizer.jobs.os.cpu_count", lambda: 16)
+    store = JobStore(tmp_path / "data", workers=4, anon_workers=2)
+    try:
+        assert store._phase_workers(store.anon_workers) == 2
+    finally:
+        store.shutdown()
+    monkeypatch.setenv("TSF_COMPARE_WORKERS", "3")
+    store = JobStore(tmp_path / "data" / "env", workers=4)
+    try:
+        assert store.compare_workers == 3
+        assert store._phase_workers(store.compare_workers) == 3
+    finally:
+        store.shutdown()
+
+
 def test_a_job_can_be_run_again_from_the_upload_on_disk(client, tmp_path):
     """A restart in the middle of a batch must not cost the uploads."""
     job = _run(client, build_tsf(tmp_path), delete_original="false")

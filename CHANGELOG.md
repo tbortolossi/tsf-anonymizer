@@ -17,6 +17,13 @@ change what is mapped, a patch bump only fixes).
   identical integrity reports on eight real archives — and text holding one
   of the three codepoints where `lower()` and `re.IGNORECASE` disagree keeps
   the flag.
+- Worker processes are now sized when each heavy phase starts, not once at
+  startup. `TSF_ANON_WORKERS` / `TSF_COMPARE_WORKERS` are floors describing a
+  machine whose every archive slot is busy; a phase that runs while fewer
+  archives can — a lone upload, or a batch of one firewall, which is a chain
+  and runs one archive at a time — takes the idle share of the cores instead,
+  up to the core count. Setting either variable pins the count as before. The
+  job log records what each phase settled on.
 - IP pseudonyms now preserve prefix structure (minor: changes what fakes
   look like). Private addresses stay inside their own RFC 1918/CGNAT class
   with the host octet kept (`10.1.2.3` → `10.x.y.3`), driven by a keyed PRF
@@ -31,6 +38,24 @@ change what is mapped, a patch bump only fixes).
   are still excluded from the leak scan and reported as collisions).
 
 ### Fixed
+- A bare common English word is no longer an identity, in any category:
+  brute-force login guesses (`failed authentication for user 'install'`,
+  `'up'`, `'inventory'`) and config entries genuinely named `data` or
+  `bytes` were pseudonymized and then replaced corpus-wide, destroying
+  command echoes (`> show chassis inventory`), status vocabulary
+  (`Connection status: up`), fixed counter text (`size (bytes)`,
+  `Resource monitoring sampling data`) and the `install` verb of
+  `opt/panrepo/logs/history.log` and of audit.log on real archives. A new
+  `_ENGLISH_STOPWORDS` guard sits on the two allocation choke points
+  (`anon_user`, `register_named_object`). Trade-off, documented in the
+  invariants: an account or object named *exactly* a bare English word stays
+  in clear — it identifies nobody, and any spelling with a digit, dot or
+  hyphen (`jmartin`, `data-01`) is unaffected.
+- PAN-OS interface names are preserved on the FQDN route too: `vlan.800` /
+  `tunnel.2` are FQDN-shaped, and a subinterface entry name registered
+  through the FQDN branch rewrote every zone `<member>` holding it into
+  `hostNNN.anon.internal` on a real TSF. `anon_fqdn` now refuses interface
+  names, as `register_named_object` always did.
 - An original address equal to an already-handed-out pseudonym is now
   mapped instead of skipped. With same-class fakes the old skip left a real
   private address in clear and outside the mapping — invisible to the leak
