@@ -773,6 +773,100 @@ class TestDetectThenFreeze:
         assert not any(f.warnings for f in report.files)
 
 
+def _xml_tree(root):
+    """A tree of several customer configs — enough files for the prescan pool
+    to have something to spread, and enough distinct names that a registration
+    out of path order would show up as a different pseudonym."""
+    (root / "opt/pancfg/mgmt/saved-configs").mkdir(parents=True)
+    (root / "opt/pancfg/mgmt/saved-configs/running-config.xml").write_text(CONFIG_XML)
+    (root / "opt/pancfg/mgmt/userinfo.xml").write_text(
+        "<config><users><entry name='acme\\jdupont'/><entry name='acme\\mmartin$'/>"
+        "</users></config>")
+    (root / "opt/pancfg/mgmt/profiles.xml").write_text(
+        "<config><shared><certificate><entry name='cert-b'>"
+        "<subject>C = FR, O = Acme, CN = vpn2.acme-corp.fr</subject></entry></certificate>"
+        "<server-profile><ldap><entry name='LDAP-Backup'><base>DC=acme-corp,DC=local</base>"
+        "</entry></ldap></server-profile></shared></config>")
+    for i in range(6):
+        (root / f"opt/pancfg/mgmt/snapshot-{i}.xml").write_text(
+            "<config><devices><entry name='localhost.localdomain'><vsys><entry name='vsys1'>"
+            "<address>" + "".join(
+                f"<entry name='SRV-{i}-{j}'><ip-netmask>10.{i}.{j}.1/32</ip-netmask></entry>"
+                for j in range(20))
+            + f"</address><zone><entry name='Zone-Snap-{i}'/></zone>"
+              "</entry></vsys></entry></devices></config>")
+    return root
+
+
+class TestXmlPrescanParallelism:
+    """The XML prescan follows the same detect-then-freeze split as the text
+    one: workers parse and report, the parent allocates in path order. The
+    mapping must therefore not depend on the worker count."""
+
+    SEED = {"ip_seed": "00" * 16}  # the seeded contract: the rest is counters
+
+    def test_mapping_is_identical_whatever_the_worker_count(self, tmp_path):
+        from tsf_anonymizer.core import prescan_tree
+        tree = _xml_tree(tmp_path)
+        seq = Anonymizer.from_mapping(self.SEED)
+        par = Anonymizer.from_mapping(self.SEED)
+        assert prescan_tree(tree, seq, workers=1) == prescan_tree(tree, par, workers=4)
+        assert seq.get_mapping() == par.get_mapping()
+
+    def test_pseudonyms_follow_path_order_not_completion_order(self, tmp_path):
+        """Counters fall in path-then-document order, which is what "same
+        original → same pseudonym" rests on. A worker that registered its own
+        findings would number them by whichever process finished first."""
+        from tsf_anonymizer.core import prescan_tree
+        tree = _xml_tree(tmp_path)
+        for workers in (1, 4):
+            anon = Anonymizer()
+            prescan_tree(tree, anon, workers=workers)
+            # running-config.xml is prescanned first, then the others in path
+            # order: snapshot-0 before snapshot-5, and each file's entries in
+            # document order.
+            zones = [anon.named_obj_map[f"Zone-Snap-{i}"] for i in range(6)]
+            assert zones == sorted(zones), workers
+            assert anon.named_obj_map["SRV-0-0"] < anon.named_obj_map["SRV-0-19"]
+            # the running config is prescanned first: its addresses get the
+            # lower counters of the same category
+            assert anon.named_obj_map["SRV-Compta-Paris"] < anon.named_obj_map["SRV-0-0"]
+            assert anon.named_obj_map["Zone-Prod-DMZ"] < anon.named_obj_map["Zone-Snap-0"]
+
+    def test_detection_reports_and_never_allocates(self, tmp_path):
+        """The worker half takes no Anonymizer at all — that is what makes it
+        safe to run in a process that will never own the mapping."""
+        from tsf_anonymizer.core import _detect_in_config_xml
+        p = tmp_path / "c.xml"
+        p.write_text(CONFIG_XML)
+        findings, warnings = _detect_in_config_xml(p)
+        assert not warnings
+        assert ("fqdn", "dc01.acme-corp.local") in findings
+        assert ("obj", "Zone-Prod-DMZ", "zone") in findings
+        assert ("serial", "001901000123") in findings
+        assert ("email", "ops", "acme-corp.fr") in findings
+        # the certificate CN goes through the same detection, not a later pass
+        assert ("fqdn", "vpn.acme-corp.fr") in findings
+        # pure: same file in, same findings out, in the same order
+        assert _detect_in_config_xml(p) == (findings, warnings)
+
+    def test_a_config_that_does_not_parse_is_salvaged_in_the_worker(self, tmp_path, caplog):
+        import logging
+
+        from tsf_anonymizer.core import prescan_tree
+        tree = _xml_tree(tmp_path)
+        (tree / "opt/pancfg/mgmt/failed_candidatecfg.xml").write_text(
+            CONFIG_XML[:CONFIG_XML.rindex("<certificate")])
+        seq = Anonymizer.from_mapping(self.SEED)
+        par = Anonymizer.from_mapping(self.SEED)
+        prescan_tree(tree, seq, workers=1)
+        with caplog.at_level(logging.WARNING):
+            prescan_tree(tree, par, workers=4)
+        assert seq.get_mapping() == par.get_mapping()
+        # the worker cannot log into the job's captured log; the parent does it
+        assert any("failed_candidatecfg.xml" in r.message for r in caplog.records)
+
+
 class TestSalvagePrescan:
     """A config that fails ET.parse used to register nothing — its identifiers
     went out un-anonymized, invisible to the compare mode. The pull-parser

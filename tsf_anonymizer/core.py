@@ -1318,15 +1318,17 @@ _EMAIL_IN_TEXT_RE = _EMAIL_RE
 _IPV4_ONLY_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
-def _extract_cert_identifiers(text: str, anon: Anonymizer) -> None:
+def _cert_identifiers(text: str) -> list[str]:
     """Only the CN, and only when it is a hostname. O/OU/L/ST are prose
     ("GeoTrust Inc.", "Network Solutions L.L.C.") — the trusted root store in
     every config carries hundreds of public CA names, none of them customer
     identifiers, and registering them as FQDNs produced nothing but noise."""
+    out = []
     for m in _CERT_CN_RE.finditer(text):
         val = m.group(1).strip().strip('"')
         if "." in val and " " not in val and not _IPV4_ONLY_RE.match(val):
-            anon.register_fqdn(val)
+            out.append(val)
+    return out
 
 
 # DN components that are plain words, not identifiers. Registering "local" as
@@ -1337,15 +1339,17 @@ _DC_STOPWORDS = {
 }
 
 
-def _extract_dn_identifiers(text: str, anon: Anonymizer) -> None:
+def _dn_identifiers(text: str) -> list[str]:
     parts = [m.group(1) for m in _DC_COMPONENT_RE.finditer(text)]
-    if parts:
-        anon.register_fqdn(".".join(parts))
-        # The last component is the TLD-ish suffix ("local", "com"): skip it.
-        for part in parts[:-1]:
-            low = part.lower()
-            if len(part) > 2 and low not in BUILTIN_OBJECTS and low not in _DC_STOPWORDS:
-                anon.register_fqdn(part)
+    if not parts:
+        return []
+    out = [".".join(parts)]
+    # The last component is the TLD-ish suffix ("local", "com"): skip it.
+    for part in parts[:-1]:
+        low = part.lower()
+        if len(part) > 2 and low not in BUILTIN_OBJECTS and low not in _DC_STOPWORDS:
+            out.append(part)
+    return out
 
 
 # Entry names that are PAN-OS vocabulary rather than customer identifiers.
@@ -1401,69 +1405,83 @@ _DOMAIN_USER_NAME_RE = re.compile(
 )
 
 
-def _register_entry_name(name_attr: str | None, parent_tag: str, anon: Anonymizer) -> None:
+# Detection below, registration further down: the XML prescan follows the
+# same detect-then-freeze split as the text prescan. Everything down to
+# `_detect_in_config_xml` is a pure function of one file — no Anonymizer, no
+# allocation — so it can run in a worker process; the parent replays the
+# findings in path order, which is what keeps the pseudonym counters (and so
+# the mapping) independent of how the work was scheduled.
+#
+# A finding is a tuple whose first item is its kind: ("fqdn", value),
+# ("user", value), ("obj", value, category), ("email", local, domain),
+# ("serial", value). The *classification* — vocabulary heuristics, DOMAIN\user
+# decomposition, FQDN-vs-IP, which category an entry's parent gives it — stays
+# with the parse, where the CPU is; only the allocation crosses back.
+
+
+def _detect_entry_name(name_attr: str | None, parent_tag: str) -> list[tuple]:
     if not (name_attr and len(name_attr) >= 2 and name_attr.lower() not in BUILTIN_OBJECTS
             and not _is_vocabulary(name_attr, parent_tag)):
-        return
+        return []
     name_attr = name_attr.strip()
     du = _DOMAIN_USER_NAME_RE.match(name_attr)
     if du:
         domain, user = du.group(1), du.group(2)
+        out: list[tuple] = []
         # A stopword domain ("corp", "local") is generic, like a zone named
         # "lan" — the user part is the identity either way.
         if domain.lower() not in _DC_STOPWORDS and domain.lower() not in BUILTIN_OBJECTS:
-            anon.register_fqdn(domain)
+            out.append(("fqdn", domain))
         # A trailing "$" is the machine-account marker, not part of the name:
         # kept in the key, the whole key never fired (an object pass had
         # already rewritten the name in front of it) — one unexplained line
         # on a real TSF, and the "$" survives in the output regardless.
-        anon.anon_user(user.rstrip("$"))
-        return
+        out.append(("user", user.rstrip("$")))
+        return out
     if _IP_LIKE_RE.match(name_attr):
-        pass  # an address object named by its IP: the IP pass owns it
-    elif _FQDN_LIKE_RE.match(name_attr) and not name_attr.lower().endswith((".log", ".xml")):
-        anon.register_fqdn(name_attr)  # one identity, one pseudonym
-    else:
-        category = "obj"
-        for obj_tag, cat in NAMED_OBJ_PATHS:
-            if parent_tag == obj_tag:
-                category = cat
-                break
-        anon.register_named_object(name_attr, category)
+        return []  # an address object named by its IP: the IP pass owns it
+    if _FQDN_LIKE_RE.match(name_attr) and not name_attr.lower().endswith((".log", ".xml")):
+        return [("fqdn", name_attr)]  # one identity, one pseudonym
+    category = "obj"
+    for obj_tag, cat in NAMED_OBJ_PATHS:
+        if parent_tag == obj_tag:
+            category = cat
+            break
+    return [("obj", name_attr, category)]
 
 
-def _register_sensitive_field(tag: str, val: str, anon: Anonymizer) -> None:
+def _detect_sensitive_field(tag: str, val: str) -> list[tuple]:
     field_type = SENSITIVE_XML_FIELDS.get(tag)
     if not field_type:
-        return
+        return []
     # _IP_LIKE_RE, not _IPV4_ONLY_RE: an <address> holding "10.18.2.254/24"
     # is the IP pass's territory too — registered as a "FQDN" it became
     # host005.anon.internal and the /24 was lost (real TSF).
     if field_type == "fqdn":
         if "." in val and not val.startswith("DC=") and not _IP_LIKE_RE.match(val):
-            anon.register_fqdn(val)
+            return [("fqdn", val)]
     elif field_type == "host":
         if len(val) > 2 and val.lower() not in BUILTIN_OBJECTS and not _IP_LIKE_RE.match(val):
-            anon.register_fqdn(val)
+            return [("fqdn", val)]
     elif field_type == "cert":
-        _extract_cert_identifiers(val, anon)
+        return [("fqdn", v) for v in _cert_identifiers(val)]
     elif field_type == "dn":
-        _extract_dn_identifiers(val, anon)
+        return [("fqdn", v) for v in _dn_identifiers(val)]
     elif field_type == "domain":
         if len(val) > 2 and val.lower() not in BUILTIN_OBJECTS:
-            anon.register_fqdn(val)
+            return [("fqdn", val)]
     elif field_type == "email":
-        for m in _EMAIL_IN_TEXT_RE.finditer(val):
-            anon.anon_email(m.group(1), m.group(2))
+        return [("email", m.group(1), m.group(2)) for m in _EMAIL_IN_TEXT_RE.finditer(val)]
     elif field_type == "serial":
         if val.isdigit() and 8 <= len(val) <= 16:
-            anon.anon_serial(val)
+            return [("serial", val)]
     elif field_type == "person":
         if len(val) > 1 and val.lower() not in BUILTIN_OBJECTS:
-            anon.register_named_object(val, "user")
+            return [("obj", val, "user")]
+    return []
 
 
-def _walk_xml(elem: ET.Element, anon: Anonymizer, parent_tag: str = "") -> None:
+def _walk_xml(elem: ET.Element, out: list[tuple], parent_tag: str = "") -> None:
     tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
     if tag in _SKIP_SUBTREES:
         return
@@ -1475,16 +1493,16 @@ def _walk_xml(elem: ET.Element, anon: Anonymizer, parent_tag: str = "") -> None:
         return
 
     if tag == "entry":
-        _register_entry_name(elem.get("name"), parent_tag, anon)
+        out.extend(_detect_entry_name(elem.get("name"), parent_tag))
 
     if elem.text and elem.text.strip():
-        _register_sensitive_field(tag, elem.text.strip(), anon)
+        out.extend(_detect_sensitive_field(tag, elem.text.strip()))
 
     for child in elem:
-        _walk_xml(child, anon, parent_tag=tag)
+        _walk_xml(child, out, parent_tag=tag)
 
 
-def _salvage_prescan_xml(xml_path: Path, anon: Anonymizer) -> None:
+def _salvage_prescan_xml(xml_path: Path, out: list[tuple], warnings: list[str]) -> None:
     """Prescan the parseable prefix of a malformed XML — most often a
     truncated or rejected candidate config (`failed_candidatecfg.xml`).
 
@@ -1521,31 +1539,65 @@ def _salvage_prescan_xml(xml_path: Path, anon: Anonymizer) -> None:
                         elif tag in _SKIP_SUBTREES or (tag == "global" and parent == "config"):
                             skip_depth = 1
                         elif tag == "entry":
-                            _register_entry_name(elem.get("name"), parent, anon)
+                            out.extend(_detect_entry_name(elem.get("name"), parent))
                     else:
                         if stack:
                             stack.pop()
                         if skip_depth:
                             skip_depth -= 1
                         elif elem.text and elem.text.strip():
-                            _register_sensitive_field(tag, elem.text.strip(), anon)
+                            out.extend(_detect_sensitive_field(tag, elem.text.strip()))
                 if stop:
                     break
     except Exception as e:  # salvage is best-effort by definition
-        logger.warning("prescan: salvage of %s stopped early: %s", xml_path.name, e)
+        warnings.append(f"prescan: salvage of {xml_path.name} stopped early: {e}")
+
+
+def _detect_in_config_xml(xml_path) -> tuple[list[tuple], list[str]]:
+    """Every identity one XML config reveals, in document order, plus the
+    lines the parent should log. Pure and stateless — it is what a prescan
+    worker process runs, and the parent registers the result."""
+    xml_path = Path(xml_path)
+    out: list[tuple] = []
+    warnings: list[str] = []
+    try:
+        tree = ET.parse(xml_path)
+        _walk_xml(tree.getroot(), out)
+    except ET.ParseError as e:
+        warnings.append(f"prescan: could not parse {xml_path.name} ({e}) — "
+                        f"salvaging the parseable prefix")
+        # ET.parse is all-or-nothing, so nothing was collected — cleared
+        # anyway, so the salvage always starts from an empty list.
+        out.clear()
+        _salvage_prescan_xml(xml_path, out, warnings)
+    return out, warnings
+
+
+def _register_xml_findings(anon: Anonymizer, findings: Iterable[tuple]) -> None:
+    """Allocate a pseudonym for each finding, in the order it was found. Runs
+    in the parent and nowhere else — see the doctrine above."""
+    for f in findings:
+        kind = f[0]
+        if kind == "fqdn":
+            anon.register_fqdn(f[1])
+        elif kind == "user":
+            anon.anon_user(f[1])
+        elif kind == "obj":
+            anon.register_named_object(f[1], f[2])
+        elif kind == "email":
+            anon.anon_email(f[1], f[2])
+        elif kind == "serial":
+            anon.anon_serial(f[1])
 
 
 def prescan_config_xml(xml_path: Path, anon: Anonymizer) -> tuple[int, int]:
     """Returns (objects added, fqdns added)."""
     before = len(anon.named_obj_map)
     before_fqdn = len(anon.fqdn_map)
-    try:
-        tree = ET.parse(xml_path)
-        _walk_xml(tree.getroot(), anon)
-    except ET.ParseError as e:
-        logger.warning("prescan: could not parse %s (%s) — salvaging the parseable prefix",
-                       xml_path.name, e)
-        _salvage_prescan_xml(xml_path, anon)
+    findings, warnings = _detect_in_config_xml(xml_path)
+    for w in warnings:
+        logger.warning("%s", w)
+    _register_xml_findings(anon, findings)
     return len(anon.named_obj_map) - before, len(anon.fqdn_map) - before_fqdn
 
 
@@ -1926,22 +1978,51 @@ def _prescan_system_info(tree: Path, anon: Anonymizer) -> int:
     return found
 
 
-def prescan_tree(tree: Path, anon: Anonymizer, progress: ProgressFn = _noop_progress) -> int:
+# A config bigger than this is not read at all: a 200 MB XML is not a
+# customer configuration, and ET.parse would hold the whole DOM in memory.
+_PRESCAN_MAX_BYTES = 200 * 1024 * 1024
+
+
+def prescan_tree(tree: Path, anon: Anonymizer, progress: ProgressFn = _noop_progress,
+                 workers: int = 1) -> int:
     """Prescan every customer-config XML in the tree. Running/candidate configs
     first so they own the categories; other XMLs then only add what they
     introduce. Vendor content (App-ID catalog, URL DB, report templates) is
-    skipped — see _is_prescan_candidate / _SKIP_SUBTREES."""
+    skipped — see _is_prescan_candidate / _SKIP_SUBTREES.
+
+    `workers` > 1 fans the *parsing* out over processes; registration always
+    happens here, in the same file order and the same document order a
+    sequential run would use, so the mapping does not depend on scheduling.
+    """
     _prescan_system_info(tree, anon)
     primary = sorted(tree.rglob("running-config.xml")) + sorted(tree.rglob("candidate-config.xml"))
     seen = set(primary)
     others = [p for p in sorted(tree.rglob("*.xml")) if p not in seen and _is_prescan_candidate(p)]
     files = primary + others
-    for i, cfg in enumerate(files, 1):
-        if cfg.stat().st_size > 200 * 1024 * 1024:
-            continue
-        added_obj, added_fqdn = prescan_config_xml(cfg, anon)
+    todo = [(i, cfg) for i, cfg in enumerate(files, 1)
+            if cfg.stat().st_size <= _PRESCAN_MAX_BYTES]
+
+    def _apply(i: int, cfg: Path, findings: list[tuple], warnings: list[str]) -> None:
+        for w in warnings:  # logged here, where a worker's records would be lost
+            logger.warning("%s", w)
+        before, before_fqdn = len(anon.named_obj_map), len(anon.fqdn_map)
+        _register_xml_findings(anon, findings)
         progress("prescan", i, len(files),
-                 f"{cfg.name}: +{added_obj} objects, +{added_fqdn} FQDNs")
+                 f"{cfg.name}: +{len(anon.named_obj_map) - before} objects, "
+                 f"+{len(anon.fqdn_map) - before_fqdn} FQDNs")
+
+    if workers > 1 and len(todo) > 1:
+        # forkserver, not fork: this runs on a worker thread of a live server,
+        # and forking a threaded process inherits locks held by other threads.
+        ctx = multiprocessing.get_context("forkserver")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
+            results = pool.map(_detect_in_config_xml, [str(cfg) for _, cfg in todo],
+                               chunksize=1)
+            for (i, cfg), (findings, warnings) in zip(todo, results, strict=True):
+                _apply(i, cfg, findings, warnings)
+    else:
+        for i, cfg in todo:
+            _apply(i, cfg, *_detect_in_config_xml(cfg))
     return len(files)
 
 
@@ -2176,9 +2257,10 @@ def anonymize_tsf(
     ``work_root/orig`` and the anonymized one at ``work_root/anon`` so the
     compare mode can run over them without re-extracting.
 
-    ``workers`` > 1 spreads the text prescan and the rewrite over processes.
-    The mapping and the output are the same whatever the count: detection
-    feeds allocation in path order, and the rewrite runs with frozen tables.
+    ``workers`` > 1 spreads the XML prescan, the text prescan and the rewrite
+    over processes. The mapping and the output are the same whatever the
+    count: detection feeds allocation in path order, and the rewrite runs
+    with frozen tables.
     """
     import shutil
 
@@ -2217,7 +2299,7 @@ def anonymize_tsf(
         shutil.copytree(orig_dir, anon_dir, symlinks=False, copy_function=_copy_one)
         progress("copy", files, files, "")
 
-        report.config_files_scanned = prescan_tree(anon_dir, anon, progress)
+        report.config_files_scanned = prescan_tree(anon_dir, anon, progress, workers=workers)
         prescan_text_identities(anon_dir, anon, progress, workers=workers)
         anon.build_patterns()
         # Every identity is now on the table; freeze them so the rewrite is a

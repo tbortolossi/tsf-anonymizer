@@ -218,7 +218,7 @@ A 300 MB TSF extracts to ~1.5 GB, kept twice while the trees are there.
 | `TSF_PORT` | `8096` | host port |
 | `TSF_TLS_CERT` / `TSF_TLS_KEY` | `/certs/server.crt` / `.key` | TLS material; a missing file stops the server; empty = plain HTTP |
 | `TSF_WORKERS` | `cpu/4`, max 4 | archives processed at once |
-| `TSF_ANON_WORKERS` | = compare workers | processes for one job's prescan and rewrite |
+| `TSF_ANON_WORKERS` | = compare workers | processes for one job's prescans (XML and text) and rewrite |
 | `TSF_COMPARE_WORKERS` | cores left over, max 4 | processes for one job's verification |
 
 The two per-job counts are floors: when fewer archives can actually run — a
