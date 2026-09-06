@@ -29,8 +29,20 @@ def test_serve_passes_the_tls_material_to_uvicorn(uvicorn_calls, tmp_path):
     key.write_text("key", encoding="utf-8")
     assert cli.main(["serve", "--data-dir", str(tmp_path),
                      "--ssl-certfile", str(cert), "--ssl-keyfile", str(key)]) == 0
-    assert uvicorn_calls[0] == {"host": "0.0.0.0", "port": 8090,
+    assert uvicorn_calls[0] == {"host": "127.0.0.1", "port": 8090,
                                 "ssl_certfile": str(cert), "ssl_keyfile": str(key)}
+
+
+def test_serve_binds_loopback_by_default(uvicorn_calls, tmp_path):
+    # Secure default: a bare `serve` must not be reachable off the box.
+    assert cli.main(["serve", "--data-dir", str(tmp_path)]) == 0
+    assert uvicorn_calls[0]["host"] == "127.0.0.1"
+
+
+def test_serve_host_can_be_overridden(uvicorn_calls, tmp_path):
+    # The container's CMD relies on this: it passes --host 0.0.0.0 explicitly.
+    assert cli.main(["serve", "--data-dir", str(tmp_path), "--host", "0.0.0.0"]) == 0
+    assert uvicorn_calls[0]["host"] == "0.0.0.0"
 
 
 def test_a_certificate_without_its_key_is_refused(uvicorn_calls, tmp_path):
