@@ -6,6 +6,7 @@ from __future__ import annotations
 import gzip
 import json
 import tarfile
+from pathlib import Path
 
 import pytest
 from conftest import BINARY_PAYLOAD, CONFIG_XML, IDENTIFIERS, PRESERVED, read_member
@@ -315,6 +316,68 @@ class TestAnonymizeTsf:
             names = tar.getnames()
         assert names == ["system.log"]
         assert not (tmp_path.parent / "escape.log").exists()
+
+
+class TestIsalArchiveIO:
+    """python-isal (isal) accelerates the outer .tgz and inner .gz archive
+    I/O (see CHANGELOG); compressed bytes may differ from the stdlib path
+    (isal encodes differently) but decompressed bytes must not — that is the
+    hard invariant, checked here by forcing each backend in turn."""
+
+    def test_extract_and_repack_are_isal_stdlib_equivalent(self, tmp_path, tsf, monkeypatch):
+        pytest.importorskip("isal")
+        from tsf_anonymizer import core
+
+        assert core._HAS_ISAL  # meaningless if the wheel never loaded
+
+        def round_trip(has_isal: bool, tag: str) -> Path:
+            monkeypatch.setattr(core, "_HAS_ISAL", has_isal)
+            members, skipped = core.extract_archive(tsf, tmp_path / f"work-{tag}")
+            assert skipped == 0
+            out = tmp_path / f"out-{tag}.tgz"
+            core.repack_archive(members, tmp_path / f"work-{tag}", out)
+            return out
+
+        out_isal, out_std = round_trip(True, "isal"), round_trip(False, "std")
+
+        with tarfile.open(out_isal) as a, tarfile.open(out_std) as b:
+            ma, mb = a.getmembers(), b.getmembers()
+            assert [m.name for m in ma] == [m.name for m in mb]
+            for x, y in zip(ma, mb, strict=True):
+                assert (x.mode, x.uid, x.gid, x.uname, x.mtime, x.type) == \
+                       (y.mode, y.uid, y.gid, y.uname, y.mtime, y.type)
+                if not x.isfile():
+                    continue
+                fa, fb = a.extractfile(x).read(), b.extractfile(y).read()
+                if x.name.endswith(".gz"):
+                    fa, fb = gzip.decompress(fa), gzip.decompress(fb)
+                assert fa == fb, x.name
+
+    def test_anonymized_output_is_isal_stdlib_equivalent(self, tmp_path, tsf, monkeypatch):
+        """Same check end to end through `anonymize_tsf`, which also exercises
+        the inner-.gz recompression path (`process_gz_file`) isal accelerates."""
+        pytest.importorskip("isal")
+        from tsf_anonymizer import core
+
+        monkeypatch.setattr(core, "_HAS_ISAL", True)
+        out_isal = tmp_path / "isal.tgz"
+        _, mapping = anonymize_tsf(tsf, out_isal)
+
+        # Seeded with the first run's mapping so the *text* is identical too
+        # (same original -> same pseudonym) and only the gzip backend varies.
+        monkeypatch.setattr(core, "_HAS_ISAL", False)
+        out_std = tmp_path / "std.tgz"
+        anonymize_tsf(tsf, out_std, seed_mapping=mapping)
+
+        with tarfile.open(out_isal) as a, tarfile.open(out_std) as b:
+            for name in a.getnames():
+                fa, fb = a.extractfile(name), b.extractfile(name)
+                if fa is None or fb is None:  # directories
+                    continue
+                da, db = fa.read(), fb.read()
+                if name.endswith(".gz"):
+                    da, db = gzip.decompress(da), gzip.decompress(db)
+                assert da == db, name
 
 
 class TestTrieRegex:

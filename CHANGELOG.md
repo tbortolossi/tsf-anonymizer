@@ -56,6 +56,30 @@ change what is mapped, a patch bump only fixes).
   a used value probes within its /24. The compare now **applies** mapping
   keys that collide with pseudonym values instead of dropping them (they
   are still excluded from the leak scan and reported as collisions).
+- Archive extract and repack are now isal-backed when the `isal` package
+  (PyPI project `python-isal`) has a wheel for the platform, falling back to
+  stdlib `gzip`/`zlib` otherwise. Measured on a real 565 MB TSF, single core:
+  extract 92s → ~35s, repack 66s → ~25s. isal's encoder only offers levels
+  0-3 (not zlib's 0-9); level 3, its slowest/best-ratio setting, is used
+  throughout, because even at level 3 isal still outruns stdlib zlib at
+  level 6 (the level this module already uses over the default 9) by 2-3x on
+  this kind of text — there is no speed left to buy by dropping a level, so
+  the ratio isn't traded away as it is for zlib's 9 → 6. The trade that *is*
+  made: isal's output runs somewhat larger than zlib's for the same content
+  (~15-20% measured on synthetic archives) — the outer `.tgz` and any
+  rewritten `.gz` member compress worse, never differently once decompressed.
+  isal's `GzipFile` cannot be trusted with the backward seek `extract_archive`
+  performs (`getmembers()` scans forward to the end, then `extractall()`
+  restarts near the beginning) — confirmed misdecoding after such a rewind
+  on isal 1.8.0 — so reading only ever drives it forward: the compressed
+  archive is decompressed in one sequential pass to a plain temp `.tar` on
+  the same volume, and ordinary (fast, unaffected) random-access tarfile
+  reading happens against that. Writing has no such restriction (`tarfile`
+  never seeks backward while it writes), so the repack path wraps isal's
+  `GzipFile` directly as `tarfile`'s own `fileobj`, exactly as `tarfile`
+  itself wraps stdlib's `GzipFile` for `mode="w:gz"`. Decompressed bytes are
+  asserted identical to the stdlib path on the synthetic mock archive,
+  outer and inner `.gz` alike.
 
 ### Fixed
 - A bare common English word is no longer an identity, in any category:

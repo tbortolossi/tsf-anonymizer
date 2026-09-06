@@ -65,7 +65,9 @@ back as bytes; `\r\n`, Latin-1 stragglers and undecodable bytes survive.
 Binary files are never rewritten (a length-prefixed format would be
 corrupted), only scanned by the compare and, on request, replaced whole by a
 marker. `.gz` members are classified on their decompressed bytes and
-recompressed at level 6. No replacement ever contains a newline, so line
+recompressed at level 6 (stdlib zlib) or its closest isal equivalent when the
+`isal` package is available — 2-3x faster on this kind of text, decompressed
+bytes identical either way. No replacement ever contains a newline, so line
 counts are invariant — the compare treats a changed line count as an error.
 
 **The output archive is the input archive with payloads swapped.**
