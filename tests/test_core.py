@@ -578,12 +578,16 @@ class TestRealTsfLessons:
         import ipaddress
         taken = anon._tree_fake(int(ipaddress.ip_address("8.8.8.8")))
         base = int(ipaddress.ip_address(taken)) & ~0xFF
-        # every host of the fake /24 is taken except .0, .255 and .37
-        # (the tree fake itself included: its host octet can be anything)
+        # Every host of the fake /24 is taken except .0, .255 and one free
+        # slot. The free slot is chosen relative to the tree fake's own host
+        # octet (which depends on the random ip_seed): picking a fixed .37
+        # failed whenever the seed made the tree fake itself land on .37 —
+        # measured 6/2000 runs, one red CI out of ~250.
+        free = 37 if (int(ipaddress.ip_address(taken)) & 0xFF) != 37 else 38
         anon._fakes.add(taken)
         anon._fakes.update(str(ipaddress.ip_address(base | h))
-                           for h in range(1, 255) if h != 37)
-        assert anon.anon_ip("8.8.8.8") == str(ipaddress.ip_address(base | 37))
+                           for h in range(1, 255) if h != free)
+        assert anon.anon_ip("8.8.8.8") == str(ipaddress.ip_address(base | free))
 
     def test_route_destination_still_contains_its_hosts(self, anon):
         import ipaddress
