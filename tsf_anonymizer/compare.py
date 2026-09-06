@@ -35,7 +35,7 @@ import re
 import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -52,6 +52,18 @@ from .core import (
     mapped_member_name,
     trie_regex,
 )
+
+try:  # optional accelerator, see _AhoPass
+    import ahocorasick
+except ImportError:  # pragma: no cover - the fallback is exercised by the tests
+    ahocorasick = None
+
+# Which scanner `MappingIndex` builds for its three passes. The trie regex is
+# the reference implementation and stays the fallback wherever the C extension
+# cannot be installed; `tests/test_compare.py` runs both over the same inputs
+# and asserts byte-identical `apply` output and identical `find_leaks`
+# findings, which is the only thing that makes the fast path admissible.
+USE_AHOCORASICK = ahocorasick is not None
 
 ProgressFn = Callable[[str, int, int, str], None]
 
@@ -75,13 +87,155 @@ _MAX_LINE_CHARS = 4000
 # Mapping lookup
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class _Boundary:
+    """One pass's boundary conditions, and what they can react to.
+
+    ``before`` / ``after`` are the assertion sources, and the single place
+    they are written: the trie-regex path splices them around the
+    alternation, the Aho-Corasick path compiles each on its own and asserts
+    it at the candidate span's edges. Both ask the same question — every
+    assertion is zero-width and reads only the text around the span, never
+    the key — so neither path can drift from the other by editing one of
+    them.
+
+    ``affects_*`` is the character class of everything the matching source
+    can react to: what it forbids, plus the first character of every literal
+    a lookaround spells out (``:`` for ``://``, ``/`` for ``</`` and ``//``).
+    A neighbouring character outside that class leaves every assertion true
+    whatever surrounds it, so the span is accepted without a regex call —
+    which is what the shape of real TSF text (a space, a quote, a comma next
+    to nearly every identifier) makes worth doing.
+    """
+
+    before: str
+    after: str
+    affects_before: str
+    affects_after: str
+
+
+def _fast_boundary_chars(affecting: str) -> frozenset[str]:
+    """ASCII neighbours a boundary can accept on sight (see `_Boundary`)."""
+    rx = re.compile(f"[{affecting}]")
+    return frozenset(c for c in map(chr, range(128)) if not rx.match(c))
+
+
+class _AhoMatch:
+    """The slice of `re.Match` the compare's scan uses, for one hit.
+
+    The key is carried rather than sliced back out of the text: the automaton
+    knows it, and for the case-insensitive pass the haystack is the lowered
+    copy, where the key is exactly what the trie regex would have grouped.
+    """
+
+    __slots__ = ("_key", "_start")
+
+    def __init__(self, key: str, start: int) -> None:
+        self._key = key
+        self._start = start
+
+    def group(self, index: int = 0) -> str:
+        if index != 0:
+            raise IndexError("no such group")
+        return self._key
+
+    def start(self) -> int:
+        return self._start
+
+    def end(self) -> int:
+        return self._start + len(self._key)
+
+    def span(self) -> tuple[int, int]:
+        return self._start, self._start + len(self._key)
+
+
+class _AhoPass:
+    """Aho-Corasick stand-in for one of the compare's compiled trie regexes.
+
+    An automaton over thousands of keys walks the text in one pass whose cost
+    is the text's length, where the trie regex pays for the alternation at
+    every position it tries: measured 3-4x on real TSF payloads, and the
+    three passes are the whole cost of `apply` and `find_leaks`.
+
+    What the automaton reports is *candidates*, not matches: it knows nothing
+    about boundaries, so `web` inside `web-server-1` comes back too. Every
+    candidate is then revalidated against the very same `_Boundary` the trie
+    regex splices inline, asserted at the span's edges — that is the design
+    the equivalence rests on, and it is sound because the assertions read
+    only the text around the span.
+
+    Longest-key-first is preserved, backtracking included. Two keys matching
+    at one position are always one a prefix of the other (they match the same
+    characters), so the keys live on a chain and "the deepest branch the trie
+    regex tries first" is simply the longest; and when the longest key's
+    trailing boundary fails, the regex falls back to the next shorter one —
+    which is why candidates are validated *independently* and the longest
+    survivor at a position wins, rather than the longest candidate being
+    validated alone. The surviving spans are then walked left to right,
+    non-overlapping, exactly as `finditer` walks them.
+    """
+
+    def __init__(self, keys: list[str], boundary: _Boundary) -> None:
+        self._before_rx = re.compile(boundary.before)
+        self._after_rx = re.compile(boundary.after)
+        self._before_fast = _fast_boundary_chars(boundary.affects_before)
+        self._after_fast = _fast_boundary_chars(boundary.affects_after)
+        automaton = ahocorasick.Automaton()
+        for key in keys:
+            automaton.add_word(key, key)
+        automaton.make_automaton()
+        self._automaton = automaton
+
+    def finditer(self, text: str) -> Iterator[_AhoMatch]:
+        before_fast, after_fast = self._before_fast, self._after_fast
+        before_rx, after_rx = self._before_rx, self._after_rx
+        # (start, -end, key): plain tuple order is leftmost first and, at one
+        # position, longest first — the trie regex's preference, sorted in C.
+        # `text[i:i + 1]` is "" at the edges of the text, which no fast set
+        # holds, so the edges are decided by the assertions themselves.
+        hits: list[tuple[int, int, str]] = []
+        add = hits.append
+        for last, key in self._automaton.iter(text):
+            end = last + 1
+            start = end - len(key)
+            if (text[start - 1:start] not in before_fast
+                    and not before_rx.match(text, start)):
+                continue
+            if text[end:end + 1] not in after_fast and not after_rx.match(text, end):
+                continue
+            add((start, -end, key))
+        hits.sort()
+        pos = 0
+        for start, neg_end, key in hits:
+            if start < pos:   # consumed by a match further left
+                continue
+            pos = -neg_end
+            yield _AhoMatch(key, start)
+
+    def sub(self, repl: Callable[[_AhoMatch], str], text: str) -> str:
+        out: list[str] = []
+        pos = 0
+        for m in self.finditer(text):
+            start = m.start()
+            out.append(text[pos:start])
+            out.append(repl(m))
+            pos = m.end()
+        if not out:
+            return text
+        out.append(text[pos:])
+        return "".join(out)
+
+
 class MappingIndex:
     """Token-level view of the mapping sidecar.
 
-    Two compiled trie regexes do the heavy lifting in C: one case-sensitive
-    over every key, one case-insensitive over the FQDN/e-mail keys. A real
-    TSF maps ~100 000 identifiers over ~1 GB of text; anything that runs a
-    Python callback per *token* (rather than per *hit*) takes tens of minutes.
+    Three passes do the heavy lifting in C — IPs and serials on digit
+    boundaries, objects and usernames on token boundaries, FQDNs and e-mail
+    domains case-insensitively — each an Aho-Corasick automaton where the
+    extension is available and the trie regex it stands in for otherwise
+    (`_AhoPass`, `USE_AHOCORASICK`). A real TSF maps ~100 000 identifiers over
+    ~1 GB of text; anything that runs a Python callback per *token* (rather
+    than per *hit*) takes tens of minutes.
     """
 
     # Same boundary conventions as the anonymizer (this is tokenisation, not
@@ -92,6 +246,29 @@ class MappingIndex:
     # "vsys<n>_" is the one underscore that separates (vsys1_<EDL>.ebl).
     _BEFORE = r"(?:(?<![\w.\-<])|(?<=vsys\d_))(?<!<\/)(?<!\/\/)"
     _AFTER = r"(?:(?![\w\-=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)"
+    _CS_BOUNDARY = _Boundary(_BEFORE, _AFTER, r"\w.\-</", r"\w\-=:")
+    # IPs and serials sit inside hyphenated/underscored tokens all the time
+    # (lr-203.0.113.184-2, PA_001901000456_dt): digit boundaries, not token
+    # boundaries, or 100 000 real-TSF lines read as unexplained.
+    _NUM_BOUNDARY = _Boundary(r"(?<![.\d])", r"(?!\d)(?!\.\d)", r"\d.", r"\d.")
+    # FQDN keys may follow a dot (*.apex, sub.apex), and "_" is a separator
+    # for them (a hostname cannot contain one; PAN-OS glues the device name
+    # with underscores in techsupport_<name>_<date>.txt) — mirrors the core's
+    # boundaries exactly.
+    _CI_BOUNDARY = _Boundary(
+        r"(?<![A-Za-z0-9<])(?<!<\/)",
+        r"(?:(?![A-Za-z0-9=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)",
+        r"A-Za-z0-9</", r"A-Za-z0-9=:")
+
+    @staticmethod
+    def _scanner(keys: list[str], boundary: _Boundary, trie: str | None = None):
+        """The pass over `keys`: an automaton, or the trie regex it replaces."""
+        if not keys:
+            return None
+        if USE_AHOCORASICK:
+            return _AhoPass(keys, boundary)
+        return re.compile(boundary.before + (trie_regex(keys) if trie is None else trie)
+                          + boundary.after)
 
     def __init__(self, mapping: dict) -> None:
         self.mapping = mapping
@@ -126,31 +303,26 @@ class MappingIndex:
         # occurrence of such a key "unexplained". Only the leak scan skips
         # them: in the *output* the same string is somebody's pseudonym.
         self._collision_keys = set(self.collisions) | {k.lower() for k in self.collisions}
-        # IPs and serials sit inside hyphenated/underscored tokens all the time
-        # (lr-203.0.113.184-2, PA_001901000456_dt): digit boundaries, not
-        # token boundaries, or 100 000 real-TSF lines read as unexplained.
         num_keys = [k for k in self.forward if self.category_of[k] in ("ip_addresses", "serial_numbers")]
         cs_keys = [k for k in self.forward
                    if k.lower() not in self.forward_ci and self.category_of[k]
                    not in ("ip_addresses", "serial_numbers")]
-        self._num_re = (re.compile(r"(?<![.\d])" + trie_regex(num_keys) + r"(?!\d)(?!\.\d)")
-                        if num_keys else None)
-        self._cs_re = (re.compile(self._BEFORE + trie_regex(cs_keys) + self._AFTER)
-                       if cs_keys else None)
-        # FQDN keys may follow a dot (*.apex, sub.apex), and "_" is a
-        # separator for them (a hostname cannot contain one; PAN-OS glues the
-        # device name with underscores in techsupport_<name>_<date>.txt) —
-        # mirrors the core's boundaries exactly.
-        # Compiled twice from one pattern: without IGNORECASE for the scan of
-        # a lowered copy of the text (the fast path — the flag costs 2.3x on a
-        # trie this size, and this is the most expensive of the three passes,
-        # run once by `apply` and once by `find_leaks`), with it for the text
-        # that scan cannot serve. `forward_ci` is keyed lowercase already.
-        ci_pattern = (r"(?<![A-Za-z0-9<])(?<!<\/)" + trie_regex(self.forward_ci)
-                      + r"(?:(?![A-Za-z0-9=])|(?=(?:19|20)\d\d-\d\d-\d\d))(?!:\/\/)"
-                      ) if self.forward_ci else ""
+        ci_keys = list(self.forward_ci)
+        self._num_re = self._scanner(num_keys, self._NUM_BOUNDARY)
+        self._cs_re = self._scanner(cs_keys, self._CS_BOUNDARY)
+        # The case-insensitive pass is the only one that needs a second
+        # engine: the scan of a *lowered copy* of the text serves it (the
+        # IGNORECASE flag costs 2.3x on a trie this size, and this pass runs
+        # once in `apply` and once in `find_leaks`), and the IGNORECASE regex
+        # is kept for the text that copy cannot serve — see
+        # `lowered_for_ci_scan`. An automaton is case-sensitive by nature, so
+        # that rare path stays a regex whichever scanner is in use.
+        # `forward_ci` is keyed lowercase already.
+        ci_trie = trie_regex(ci_keys) if ci_keys else ""
+        ci_pattern = (self._CI_BOUNDARY.before + ci_trie + self._CI_BOUNDARY.after
+                      if ci_keys else "")
         self._ci_re = re.compile(ci_pattern, re.IGNORECASE) if ci_pattern else None
-        self._ci_low_re = re.compile(ci_pattern) if ci_pattern else None
+        self._ci_low_re = self._scanner(ci_keys, self._CI_BOUNDARY, ci_trie)
         # Minimum key length that the leak scan will bother with. Below 3 the
         # false-positive rate makes the report useless.
         self.min_leak_len = 3

@@ -152,6 +152,20 @@ Errors (a leak, an unexplained line, a lost line) make the verdict fail and
 keep the original; warnings (binary files with identifiers, collisions) do
 not.
 
+Both steps 1 and 2 are the same scan — every mapping key over a whole
+archive of text — so it is where the compare spends its time. It runs as an
+**Aho-Corasick automaton** (`pyahocorasick`), one walk of the text instead of
+a trie regex trying an alternation at every position: 3-4x on real payloads,
+and ten times cheaper to build, which is paid once per worker process. The
+automaton only proposes *candidates*, though — it has no notion of a token
+boundary — so each one is revalidated against the very same `before` / `after`
+assertions the trie regex splices inline (`_Boundary`, written once and used
+by both), and the longest surviving key at a position wins, backtracking
+included. The trie regexes remain the reference implementation and the
+fallback where the C extension cannot be installed (`USE_AHOCORASICK`); a
+test forces both paths and asserts they produce byte-identical output on
+every payload of the mock archive.
+
 ## Jobs, batches, chains
 
 `jobs.py` keeps one directory per job under `$TSF_DATA_DIR/jobs/<id>/`
