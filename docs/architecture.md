@@ -151,7 +151,10 @@ transition, `output/job.log` teed from the package logger for that job's
 thread only). `TSF_WORKERS` archives run at once; each one's heavy passes
 run in `forkserver` worker processes because Python threads serialise CPU
 work on the GIL, and forkserver rather than fork because the parent is a
-threaded server.
+threaded server. How many processes is decided when each phase starts
+(`_phase_workers`): the configured count is a floor for a machine with every
+archive slot busy, and a phase running while fewer archives can — a lone
+upload, or a chain — takes the idle share up to the core count.
 
 A batch does not fan out blindly: a job that seeds from another (`seed_from`)
 waits *in the queue* until the whole chain ahead of it is finished, never
