@@ -418,6 +418,15 @@ class TestRealTsfLessons:
         assert anon.anon_serial("001901000123").startswith("9")
         assert len(anon.anon_serial("007051000012345")) == 15
 
+    def test_an_original_equal_to_a_handed_out_fake_is_still_mapped(self, anon):
+        # Real-TSF lesson: with same-class fakes, skipping such an original
+        # left a real 10.x in clear, outside the mapping — invisible to the
+        # leak scan, caught by the routing-coherence check.
+        first = anon.anon_ip("10.55.1.1")
+        fake2 = anon.anon_ip(first)            # the customer really uses that address
+        assert fake2 != first and first in anon.ip_map
+        assert anon.anonymize_text(f"peer {first} up") == f"peer {fake2} up"
+
     def test_fake_ip_never_repeats_a_value_already_used(self, anon):
         import ipaddress
         taken = anon._tree_fake(int(ipaddress.ip_address("10.7.7.7")))
@@ -1133,3 +1142,27 @@ class TestEnglishWordsAreNotIdentities:
         # the jmartin rule holds; the documented trade is the bare word only
         assert "jmartin" in anon.named_obj_map
         assert "monitor" not in anon.named_obj_map
+
+
+class TestInterfaceNamesAreNeverFqdns:
+    """A subinterface <entry name="vlan.800"> under <units> is FQDN-shaped
+    (`word.word`), and the FQDN route had no interface guard: one became
+    hostNNN.anon.internal inside zone <member> elements on a real TSF."""
+
+    def test_interface_unit_entry_names_are_not_registered_as_fqdns(self, tmp_path, anon):
+        p = tmp_path / "c.xml"
+        p.write_text("<c><devices><network><interface>"
+                     "<vlan><units><entry name='vlan.800'/></units></vlan>"
+                     "<tunnel><units><entry name='tunnel.2'/></units></tunnel>"
+                     "</interface></network></devices></c>")
+        prescan_config_xml(p, anon)
+        anon.build_patterns()
+        assert not anon.fqdn_map and not anon.named_obj_map
+        out = anon.anonymize_text("<member>vlan.800</member><member>tunnel.2</member>")
+        assert "vlan.800" in out and "tunnel.2" in out
+
+    @pytest.mark.parametrize("intf", ["tunnel.2", "vlan.800", "loopback.10", "ae1.100"])
+    def test_fqdn_route_preserves_interface_names(self, anon, intf):
+        anon.register_fqdn(intf)
+        assert anon.anon_fqdn(intf) == intf
+        assert not anon.fqdn_map

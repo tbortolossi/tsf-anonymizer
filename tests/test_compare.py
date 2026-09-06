@@ -304,6 +304,36 @@ class TestRoutingCoherence:
         assert not r["ok"] and any("prefix length" in m or "containment" in m
                                    for m in r["mismatches"])
 
+    def test_public_aggregation_divergence_is_counted_not_an_error(self, tmp_path):
+        # /24 grouping does not preserve public aggregation (documented):
+        # a public /16 containing a public /24 on the original side only is
+        # a counted divergence, not a mismatch.
+        for side, rows in (("a", ["198.18.0.0/16  198.18.0.1", "198.18.4.0/24  198.18.0.1"]),
+                           ("b", ["240.0.0.0/16   240.1.5.9", "240.1.5.0/24   240.1.5.9"])):
+            d = tmp_path / side / "tmp/cli"
+            d.mkdir(parents=True)
+            (tmp_path / side / "opt").mkdir()
+            (d.parent.parent / "running-config.xml").write_text("<config/>")
+            (d / "techsupport_x_20260101_0000.txt").write_text(
+                "> show routing route\ndestination nexthop\n" + "\n".join(rows) + "\n")
+        rep = compare_trees(tmp_path / "a", tmp_path / "b", {"ip_addresses": {}})
+        r = rep.summary["routing"]
+        assert r["checked"] and r["ok"] and r["public_divergences"] >= 1
+
+    def test_connected_networks_come_from_the_rib_too(self, tmp_path):
+        # Panorama-managed boxes ship configs with an empty <interface>
+        # section: the C-flagged RIB rows are the only source of connected
+        # networks there.
+        for side in ("a", "b"):
+            d = tmp_path / side / "tmp/cli"
+            d.mkdir(parents=True)
+            (d.parent.parent / "running-config.xml").write_text("<config/>")
+            (d / "techsupport_x_20260101_0000.txt").write_text(
+                "> show routing route\ndestination nexthop\n"
+                "10.1.0.0/24        10.1.0.1     0  A C   eth1\n")
+        rep = compare_trees(tmp_path / "a", tmp_path / "b", {"ip_addresses": {}})
+        assert rep.summary["routing"]["connected"] == 1
+
     def test_a_tree_without_config_is_not_checked(self, tmp_path):
         (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
         (tmp_path / "a/f.log").write_text("x\n"); (tmp_path / "b/f.log").write_text("x\n")

@@ -661,8 +661,15 @@ class Anonymizer:
                         fake = gen()
         except ValueError:
             return ip_str
-        if ip_str in self._fakes:
-            return ip_str
+        # NOTE: no `ip_str in self._fakes` short-circuit here. When fakes
+        # lived in 100.64/RFC 5737, an original equal to one was the rare
+        # "customer uses our range" case and skipping it was harmless. With
+        # same-class fakes it leaked: a real 10.x discovered *after* an equal
+        # pseudonym was handed out stayed in clear, outside the mapping —
+        # invisible to the leak scan, caught only by the routing-coherence
+        # check on a real TSF. The tree + /24 probe above already guarantee
+        # the new pseudonym repeats nothing. The compare reports the string
+        # ambiguity as a *collision* (a key that is also a value).
         self.ip_map[ip_str] = fake
         self._fakes.add(fake)
         return fake
@@ -698,6 +705,13 @@ class Anonymizer:
         if low in VENDOR_DOMAINS or any(low.endswith("." + d) for d in VENDOR_DOMAINS):
             return fqdn
         if low in BUILTIN_OBJECTS:
+            return fqdn
+        # An interface name is never a FQDN: `vlan.800` / `tunnel.2` are
+        # FQDN-shaped, and a subinterface <entry name="vlan.800"> under
+        # <units> became hostNNN.anon.internal inside zone <member> elements
+        # on a real TSF. The object route already refuses interfaces; every
+        # FQDN harvest route funnels through here.
+        if _is_panos_interface(low):
             return fqdn
         if low in self.fqdn_map:
             return self.fqdn_map[low]
