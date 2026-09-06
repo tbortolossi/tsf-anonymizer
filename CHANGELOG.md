@@ -8,6 +8,16 @@ change what is mapped, a patch bump only fixes).
 ## [Unreleased]
 
 ### Changed
+- `tsf-anonymizer serve` binds `127.0.0.1` by default instead of `0.0.0.0`
+  (minor: changes what a bare `serve` is reachable from). A tool that
+  handles un-anonymized archives and the mapping that reverses them should
+  not be reachable off the box until an operator asks for it with
+  `--host`; the compose default already published the container on
+  loopback (`TSF_BIND_ADDR`), so this closes the gap for anyone running the
+  CLI directly. The Dockerfile's `CMD` already passed `--host 0.0.0.0`
+  explicitly (the container binds every interface inside its own network
+  namespace; it is the host-side port publish that stays loopback-only via
+  compose), so the container's behaviour is unchanged.
 - Passes that cannot match are no longer run. The username, e-mail and
   hostname patterns are preceded by a check for the literal every one of
   their matches contains, and the frozen rewrite skips the serial *fallback*
