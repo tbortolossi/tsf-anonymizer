@@ -7,6 +7,19 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+### Fixed
+- **The free-text pass no longer stalls on the vendor UI catalog.** Real TSFs
+  ship `opt/pancfg/mgmt/tmp/ui_content/ui_predefined.js.gz` — 29 MB of
+  minified JavaScript whose strings spell `<description>` and close it
+  `<\/description>`, so 38 280 tags never close. The lazy
+  `<tag>(.*?)</tag>` used to find free-text fields rescanned the whole payload
+  for each one: ~30 minutes per pass, matching nothing. Both halves now pair
+  the delimiters in a single linear scan — 0.035 s on the same file, with
+  output asserted identical to the regex it replaces. On a two-file batch of
+  real archives this was 26 minutes of `anonymize` and 50 minutes of `compare`
+  per job, entirely wasted.
+
+
 ## [0.5.0] - 2026-09-07
 
 ### Added

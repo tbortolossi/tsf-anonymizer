@@ -105,6 +105,17 @@ PRESERVED = ["ethernet1/1", "'admin'", "1743840000123", "pid 4711", "metric 10",
 BINARY_PAYLOAD = b"\x00\x01binary Zone-Prod-DMZ 172.16.4.9 \xff\xfe"
 
 
+# The vendor UI catalog a real TSF ships under opt/pancfg/mgmt/tmp/ui_content:
+# minified JavaScript whose string literals spell `<description>` and close it
+# `<\/description>`, so the tag never closes. Vendor prose about public
+# applications — it identifies nobody and must come back byte for byte.
+UI_PREDEFINED_JS = "var predefinedApps=[" + ",".join(
+    f'{{"name":"app-{i:03d}","description":"<description>'
+    f'app {i} exchanges data over a standard port.<\\/description>",'
+    f'"comment":"<comment>catalog entry<\\/comment>"}}'
+    for i in range(200)) + "];\n"
+
+
 def build_tsf(tmp_path: Path, name: str = "in.tgz") -> Path:
     staging = tmp_path / "staging"
     (staging / "opt/pancfg/mgmt/saved-configs").mkdir(parents=True)
@@ -118,6 +129,9 @@ def build_tsf(tmp_path: Path, name: str = "in.tgz") -> Path:
     # A real TSF ships files in mode 0000 (opt/pancfg/mgmt/global/.hcr_metadata.json).
     (staging / "opt/pancfg/mgmt/global").mkdir(parents=True)
     (staging / "opt/pancfg/mgmt/global/.hcr_metadata.json").write_text('{"peer": "172.16.4.9"}\n')
+    (staging / "opt/pancfg/mgmt/tmp/ui_content").mkdir(parents=True)
+    with gzip.open(staging / "opt/pancfg/mgmt/tmp/ui_content/ui_predefined.js.gz", "wb") as f:
+        f.write(UI_PREDEFINED_JS.encode("utf-8"))
     with gzip.open(staging / "var/log/pan/system.log.1.gz", "wb") as f:
         f.write(_latin(LOG_SAMPLE))
     with gzip.open(staging / "var/log/pan/core.1.gz", "wb") as f:

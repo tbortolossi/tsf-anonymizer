@@ -791,6 +791,39 @@ class TestFreeTextRedaction:
         assert rep.summary["unexplained_lines"] == 0
         assert rep.summary["free_text_survivals"] == 0
 
+    def test_unclosed_fields_cost_one_linear_scan(self):
+        """This half re-derives the redaction with its own scan, so it owns
+        the same trap: a payload of never-closed `<description>` made the
+        compare phase rescan it once per tag. Nothing is redacted here and
+        nothing survives — the assertion is that saying so is cheap."""
+        import time
+
+        from tsf_anonymizer.compare import free_text_survivals, redacted_free_text
+        payload = "var apps=[" + ",".join(
+            f'{{"d":"<description>app {i} is a protocol<\\/description>"}}'
+            for i in range(4000)) + "];\n"
+        t0 = time.monotonic()
+        assert redacted_free_text(payload) == payload
+        assert free_text_survivals(payload) == 0
+        assert time.monotonic() - t0 < 2.0
+
+    def test_an_unclosed_field_does_not_swallow_the_next_one(self):
+        from tsf_anonymizer.compare import redacted_free_text
+        text = ("<a><description>dangling\n"
+                "<comment>Opened by an operator</comment></a>\n")
+        out = redacted_free_text(text)
+        assert "Opened by an operator" not in out
+        assert "dangling" in out
+        assert out.count("\n") == text.count("\n")
+
+    def test_the_vendor_ui_catalog_is_identical_not_a_survival(self, anonymized):
+        _, _, mapping, work = anonymized
+        rep = compare_trees(work / "orig", work / "anon", mapping)
+        cat = next(f for f in rep.files if f.path.endswith("ui_predefined.js.gz"))
+        assert cat.changed_lines == 0
+        assert cat.free_text_survived == 0
+        assert rep.summary["free_text_survivals"] == 0
+
     def test_without_the_flag_the_same_change_is_unexplained(self, anonymized):
         """The sidecar is what the two halves share: drop the flag and the
         compare has no reason to expect a placeholder — it says so instead of

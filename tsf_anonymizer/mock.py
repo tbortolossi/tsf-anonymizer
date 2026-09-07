@@ -343,6 +343,32 @@ def techsupport_name(device: str = DEVICE) -> str:
 MTIME = 1775548800  # 2026-04-07 10:00:00 UTC — every timestamp the archive carries
 
 
+def render_ui_predefined() -> str:
+    """The vendor App-ID catalog the management UI ships, in the shape that
+    broke the free-text pass: one enormous line of minified JavaScript whose
+    string literals spell `<description>` but close it as `<\\/description>`,
+    so the tag never closes. It is Palo Alto's own prose about public
+    applications — nothing here identifies the device or its operator, which
+    is the point: the anonymizer must spend no time on it and change nothing.
+    """
+    apps = ("web-browsing", "ssl", "dns-base", "ntp-base", "ldap", "ms-update",
+            "google-base", "sip", "ftp", "ssh", "smtp", "snmp-base")
+    prose = ("is a protocol used to exchange data between hosts.",
+             "is a widely deployed service on the public internet.",
+             "is used by clients to reach a well-known server port.",
+             "carries application data over a standard transport.")
+    entries = []
+    for i in range(360):
+        app = apps[i % len(apps)]
+        entries.append(
+            f'{{"name":"{app}-{i:03d}","category":"general-internet",'
+            f'"description":"<description>{app} {prose[i % len(prose)]}'
+            '<\\/description>",'
+            '"comment":"<comment>catalog entry<\\/comment>"}')
+    return ("var predefinedApps=[" + ",".join(entries) + "];\n"
+            "var predefinedThreats={};\n")
+
+
 def build_mock_tsf(output: Path, *, lines: int = 400, seed: int = 7) -> Path:
     """Write the synthetic archive to ``output`` and return its path.
 
@@ -371,6 +397,11 @@ def build_mock_tsf(output: Path, *, lines: int = 400, seed: int = 7) -> Path:
         older = render_logs(random.Random(seed + 1), max(10, lines // 4))[path]
         for n in (1, 2):
             add(f"{path}.{n}.gz", gzip.compress(older.encode("utf-8"), compresslevel=6, mtime=MTIME))
+    # The vendor UI catalog: a .gz whose decompressed payload is minified JS
+    # carrying hundreds of never-closed `<description>` tags. A lazy
+    # `<tag>(.*?)</tag>` rescans the whole payload for each one.
+    add("opt/pancfg/mgmt/tmp/ui_content/ui_predefined.js.gz",
+        gzip.compress(render_ui_predefined().encode("utf-8"), compresslevel=6, mtime=MTIME))
     # A file real TSFs ship in mode 0000 (the archive must keep that mode).
     add("opt/pancfg/mgmt/global/.hcr_metadata.json", f'{{"peer": "{MGMT_IP}", "serial": "{SERIAL}"}}\n', 0o000)
     add("var/log/pan/rule-hit-count-db.txt",

@@ -1655,8 +1655,16 @@ FREE_TEXT_PLACEHOLDER = "REDACTED-FREE-TEXT"
 # Element content that is free text, in any config file (running, merged,
 # archived, candidate, audit). `<location>` is the SNMP system location — the
 # site name — and is spelled nowhere else in the corpus this was measured on.
-_FREE_TEXT_XML_RE = re.compile(
-    r"<(description|comments|comment|login-banner|location)>(.*?)</\1>", re.S)
+# Found by pairing delimiters in one pass, not with
+# `<(tag)>(.*?)</\1>`. The two mean the same thing — an opening tag, the
+# nearest following closer of the same name — but the lazy form pays for that
+# meaning at every opening tag that has *no* closer: it rescans to the end of
+# the document, then gives up. A real `ui_predefined.js.gz` (29 MB of minified
+# JS, one line of 12.6 M characters, 38 280 `<description>` written `<\/…>`
+# for JavaScript and therefore never closed) cost ~30 minutes per pass and
+# matched nothing at all. The pairing scan is 0.04 s on the same payload.
+_FREE_TEXT_TAG_RE = re.compile(
+    r"</?(description|comments|comment|login-banner|location)>")
 _FREE_TEXT_LITERALS = ("<description>", "<comments>", "<comment>",
                        "<login-banner>", "<location>")
 
@@ -1754,6 +1762,39 @@ def _placeholder_for(content: str) -> str:
                      for line in content.split("\n"))
 
 
+def free_text_fields(text: str):
+    """Yield `(tag, tag start, content start, content end)` for every
+    `<tag>…</tag>` free-text field, in document order.
+
+    Exactly the spans `<(tag)>(.*?)</\1>` matches, at linear cost: one pass
+    collects the delimiters, then each opening tag takes the nearest closer of
+    its own name that follows it, and the scan resumes after that closer. An
+    opening tag that never gets one is skipped — the lazy regex gives up on it
+    too, only after rescanning the whole document first.
+    """
+    openings: list[tuple[str, int, int]] = []
+    closers: dict[str, list[tuple[int, int]]] = {}
+    for m in _FREE_TEXT_TAG_RE.finditer(text):
+        tag = m.group(1)
+        if m.group(0)[1] == "/":
+            closers.setdefault(tag, []).append((m.start(), m.end()))
+        else:
+            openings.append((tag, m.start(), m.end()))
+    resume = 0
+    for tag, start, content_start in openings:
+        if start < resume:
+            continue  # inside a field already yielded: it is content
+        ends = closers.get(tag)
+        if not ends:
+            continue
+        i = bisect.bisect_left(ends, (content_start,))
+        if i >= len(ends):
+            continue
+        close_start, close_end = ends[i]
+        yield tag, start, content_start, close_start
+        resume = close_end
+
+
 def redact_free_text(text: str) -> tuple[str, int]:
     """Replace the content of every free-text field with the placeholder.
 
@@ -1764,19 +1805,21 @@ def redact_free_text(text: str) -> tuple[str, int]:
     if any(lit in text for lit in _FREE_TEXT_LITERALS):
         spans = vendor_spans(text)
         starts = [s for s, _ in spans]
-
-        def xml_repl(m: re.Match) -> str:
-            nonlocal count
-            content = m.group(2)
-            if not content.strip() or in_spans(spans, starts, m.start()):
-                return m.group(0)
+        out, last = [], 0
+        for _, start, c_start, c_end in free_text_fields(text):
+            content = text[c_start:c_end]
+            if not content.strip() or in_spans(spans, starts, start):
+                continue
             new = _placeholder_for(content)
             if new == content:
-                return m.group(0)
+                continue
+            out.append(text[last:c_start])
+            out.append(new)
+            last = c_end
             count += 1
-            return f"<{m.group(1)}>{new}</{m.group(1)}>"
-
-        text = _FREE_TEXT_XML_RE.sub(xml_repl, text)
+        if out:
+            out.append(text[last:])
+            text = "".join(out)
     out, last = [], 0
     for _, v_start, v_end, _ in set_format_fields(text):
         if text[v_start:v_end] == FREE_TEXT_PLACEHOLDER:
