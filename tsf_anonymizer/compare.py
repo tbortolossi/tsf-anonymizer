@@ -41,6 +41,7 @@ import re
 import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
+from bisect import bisect_left as _bisect_left
 from bisect import bisect_right as _bisect_right
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
@@ -499,8 +500,13 @@ def _changed_spans(a: str, b: str) -> list[tuple[int, int, int, int]]:
 # field the anonymizer failed to redact surfaces here as a survival, and a
 # field it redacted where this side would not is still explained line by line
 # (the plain mapping path below covers it).
-_FT_XML_RE = re.compile(
-    r"<(description|comments|comment|login-banner|location)>(.*?)</\1>", re.S)
+# Delimiters, paired in one pass — see `_ft_pairs`. `<(tag)>(.*?)</\1>` says
+# the same thing and rescans the whole payload for every opening tag left
+# unclosed, which on the vendor UI catalog a TSF ships (29 MB of minified JS
+# holding 38 280 unclosed `<description>`) took ~50 minutes of the compare
+# phase and reported nothing.
+_FT_TAG_RE = re.compile(
+    r"</?(description|comments|comment|login-banner|location)>")
 _FT_XML_LITERALS = ("<description>", "<comments>", "<comment>",
                     "<login-banner>", "<location>")
 _FT_SET_KEYWORDS = ("description", "comment", "login-banner", "location")
@@ -566,6 +572,39 @@ def _ft_set_fields(text: str):
         yield i, m.start("val"), m.end("val"), m.end()
 
 
+def _ft_pairs(text: str):
+    """Every `<tag>…</tag>` free-text field as `(tag, start, value start,
+    value end, end)`, in document order.
+
+    The compare's own pairing, deliberately not the anonymizer's: one pass
+    over the delimiters, then each opening tag claims the nearest later closer
+    of its name and the walk resumes past it. Openings with no closer are
+    dropped — which is what the lazy regex this replaces also concluded, at
+    quadratic cost.
+    """
+    opens: list[tuple[str, int, int]] = []
+    shuts: dict[str, list[tuple[int, int]]] = {}
+    for m in _FT_TAG_RE.finditer(text):
+        tag = m.group(1)
+        if m.group(0).startswith("</"):
+            shuts.setdefault(tag, []).append((m.start(), m.end()))
+        else:
+            opens.append((tag, m.start(), m.end()))
+    after = 0
+    for tag, start, val_start in opens:
+        if start < after:
+            continue
+        found = shuts.get(tag)
+        if not found:
+            continue
+        k = _bisect_left(found, (val_start,))
+        if k == len(found):
+            continue
+        val_end, end = found[k]
+        yield tag, start, val_start, val_end, end
+        after = end
+
+
 def _ft_is_redacted(content: str) -> bool:
     """Content that is nothing but the placeholder, one per line."""
     return all(line.strip() in ("", FREE_TEXT_PLACEHOLDER) for line in content.split("\n"))
@@ -577,16 +616,18 @@ def redacted_free_text(text: str) -> str:
     untouched. Returns the argument itself when nothing matched."""
     if any(lit in text for lit in _FT_XML_LITERALS):
         spans, starts = _ft_vendor_spans(text)
-
-        def xml_repl(m: re.Match) -> str:
-            content = m.group(2)
-            if not content.strip() or _ft_inside(spans, starts, m.start()):
-                return m.group(0)
-            new = "\n".join(FREE_TEXT_PLACEHOLDER if ln.strip() else ln
-                            for ln in content.split("\n"))
-            return f"<{m.group(1)}>{new}</{m.group(1)}>"
-
-        text = _FT_XML_RE.sub(xml_repl, text)
+        parts, done = [], 0
+        for _, start, val_start, val_end, _end in _ft_pairs(text):
+            content = text[val_start:val_end]
+            if not content.strip() or _ft_inside(spans, starts, start):
+                continue
+            parts.append(text[done:val_start])
+            parts.append("\n".join(FREE_TEXT_PLACEHOLDER if ln.strip() else ln
+                                   for ln in content.split("\n")))
+            done = val_end
+        if parts:
+            parts.append(text[done:])
+            text = "".join(parts)
     out, last = [], 0
     for _, v_start, v_end, _ in _ft_set_fields(text):
         out.append(text[last:v_start])
@@ -605,10 +646,11 @@ def free_text_survivals(text: str) -> int:
     n = 0
     if any(lit in text for lit in _FT_XML_LITERALS):
         spans, starts = _ft_vendor_spans(text)
-        for m in _FT_XML_RE.finditer(text):
-            if not m.group(2).strip() or _ft_inside(spans, starts, m.start()):
+        for _, start, val_start, val_end, _end in _ft_pairs(text):
+            content = text[val_start:val_end]
+            if not content.strip() or _ft_inside(spans, starts, start):
                 continue
-            if not _ft_is_redacted(m.group(2)):
+            if not _ft_is_redacted(content):
                 n += 1
     n += sum(1 for _, v_start, v_end, _ in _ft_set_fields(text)
              if text[v_start:v_end] != FREE_TEXT_PLACEHOLDER)

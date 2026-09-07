@@ -514,6 +514,38 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   3.8 GB of one real tree's text in 13.7 s, 276 MB/s). Tests:
   `TestFreeTextRedaction` in `tests/test_core.py` and `tests/test_compare.py`
   (the two halves are asserted byte-identical on real fixtures).
+- **A free-text field is found by pairing delimiters, never by
+  `<(tag)>(.*?)</\1>`.** The two say the same thing — an opening tag and the
+  nearest following closer of the same name — but the lazy form pays for that
+  meaning at every opening tag that has *no* closer: it rescans to the end of
+  the document before giving up. Real TSFs ship exactly that payload:
+  `opt/pancfg/mgmt/tmp/ui_content/ui_predefined.js.gz`, the vendor App-ID
+  catalog the management UI loads, is 29 MB of minified JavaScript on 14 lines
+  (one of 12.6 M characters) whose string literals spell `<description>` and
+  close it `<\/description>` — 38 280 openings, not one closer. Measured on
+  that file: 0.94 s over the first 1 M characters, 5.4 s over 2 M, 23.9 s over
+  4 M, 111 s over 8 M (~n^2.2), extrapolating to ~30 minutes for the whole
+  file **and zero matches**. Two jobs of a real batch spent 26 minutes each in
+  `anonymize` and 50 minutes each in `compare` — the compare's duplicated
+  implementation carried the same regex, and scans the original twice. Both
+  halves now collect the delimiters in one pass (`core.free_text_fields`,
+  `compare._ft_pairs`), give each opening the nearest later closer of its name
+  by bisection and resume past it: 0.035 s on the same 29 MB, and identical
+  output — the pairing is what the lazy regex *means*, asserted against it on
+  11 adversarial documents and 4 000 random tag sequences. Two traps the
+  rewrite must not fall into: an opening with no closer may not swallow the
+  rest of the document (the regex retries at the next opening, so the field
+  *after* a dangling one is still redacted), and an opening inside a field
+  already emitted is content, not a field. A survey of three real trees found
+  the divergence set is exactly those unclosed tags — 113 158 of them, all
+  with no closer anywhere, against 714 976 fields where both agree — which is
+  why bounding the content to `[^<]*` would also have worked here and was
+  still rejected: it silently stops redacting a field whose prose contains a
+  raw `<`, and a `<login-banner>` in an RCS audit file (`.xml,v`) already
+  interleaves control lines with the banner text. Tests:
+  `test_unclosed_fields_cost_one_linear_scan` and
+  `test_an_unclosed_field_does_not_swallow_the_next_one` in both test files,
+  plus the catalog member the mock and the test fixture now ship.
 - **Rewritten `.gz` members are recompressed at level 6, not gzip's default
   9** — measured 12 MB/s at 9 against 38 MB/s at 6 for the same output size,
   the same trade `repack_archive` already makes for the outer archive.

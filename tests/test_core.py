@@ -277,11 +277,11 @@ class TestAnonymizeTsf:
 
     def test_report_counts(self, output):
         _, report, _ = output
-        assert report.files_total == 8
+        assert report.files_total == 9
         assert report.modified == 5          # log, gz log, config, mode-0000 json, techsupport txt
         assert report.members_renamed == 1   # techsupport_<devicename>_<date>.txt
         assert report.binary == 2            # .bin + core.gz
-        assert report.unchanged == 1
+        assert report.unchanged == 2         # untouched.txt + the vendor UI catalog
         assert report.errors == 0
         assert report.replacements["ip_addresses"] > 0
 
@@ -1611,6 +1611,48 @@ class TestFreeTextRedaction:
         assert out.count("\n") == text.count("\n")
         assert out.splitlines()[0] == "<config><description>REDACTED-FREE-TEXT"
         assert "first line" not in out and "two" not in out
+
+    def test_unclosed_fields_cost_one_linear_scan(self):
+        """The vendor UI catalog a TSF ships is minified JavaScript whose
+        strings spell `<description>` and close it `<\\/description>`: the tag
+        never closes. `<tag>(.*?)</tag>` rescans the whole payload for every
+        one of them — ~30 minutes and no match on a real 29 MB file. Nothing
+        matches here either; what this asserts is the price of finding out."""
+        import time
+
+        from tsf_anonymizer.core import redact_free_text
+        payload = "var apps=[" + ",".join(
+            f'{{"d":"<description>app {i} is a protocol<\\/description>"}}'
+            for i in range(4000)) + "];\n"
+        t0 = time.monotonic()
+        out, n = redact_free_text(payload)
+        assert time.monotonic() - t0 < 2.0
+        assert (out, n) == (payload, 0)
+
+    def test_an_unclosed_field_does_not_swallow_the_next_one(self):
+        """Giving up on an opening tag with no closer must not give up on the
+        document: the field after it is still customer prose."""
+        from tsf_anonymizer.core import redact_free_text
+        text = ("<a><description>dangling\n"
+                "<comment>Opened by an operator</comment></a>\n")
+        out, n = redact_free_text(text)
+        assert n == 1
+        assert "Opened by an operator" not in out
+        assert "dangling" in out
+        assert out.count("\n") == text.count("\n")
+
+    def test_the_vendor_ui_catalog_leaves_the_archive_untouched(self, tmp_path, tsf):
+        """End to end on the mock: the catalog member is text, it is scanned,
+        and not one byte of it changes."""
+        out = tmp_path / "out.tgz"
+        anonymize_tsf(tsf, out)
+        name = "./opt/pancfg/mgmt/tmp/ui_content/ui_predefined.js.gz"
+
+        def member(archive):
+            with tarfile.open(archive, "r:gz") as tar:
+                return gzip.decompress(tar.extractfile(name).read())
+
+        assert member(out) == member(tsf)
 
     def test_a_replacement_never_contains_a_newline(self):
         from tsf_anonymizer.core import FREE_TEXT_PLACEHOLDER
