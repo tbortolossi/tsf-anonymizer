@@ -7,6 +7,8 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-07
+
 ### Added
 - **Free text is removed by default.** The content of `<description>`,
   `<comments>`, `<comment>`, `<login-banner>` and the SNMP `<location>` — in
@@ -378,7 +380,8 @@ change what is mapped, a patch bump only fixes).
   anonymize, compare, web UI, Docker image; the first twelve real-TSF
   invariants recorded in CLAUDE.md.
 
-[Unreleased]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.2.2...v0.2.3
