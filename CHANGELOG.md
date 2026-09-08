@@ -7,6 +7,8 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-08
+
 ### Fixed
 - **The free-text pass no longer stalls on the vendor UI catalog.** Real TSFs
   ship `opt/pancfg/mgmt/tmp/ui_content/ui_predefined.js.gz` — 29 MB of
@@ -18,7 +20,6 @@ change what is mapped, a patch bump only fixes).
   output asserted identical to the regex it replaces. On a two-file batch of
   real archives this was 26 minutes of `anonymize` and 50 minutes of `compare`
   per job, entirely wasted.
-
 
 ## [0.5.0] - 2026-09-07
 
@@ -393,7 +394,8 @@ change what is mapped, a patch bump only fixes).
   anonymize, compare, web UI, Docker image; the first twelve real-TSF
   invariants recorded in CLAUDE.md.
 
-[Unreleased]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.2.3...v0.3.0
