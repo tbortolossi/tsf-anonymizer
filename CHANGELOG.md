@@ -7,6 +7,8 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-08
+
 ### Fixed
 - **A directory member is never renamed.** The rule that member names are
   rewritten on their last segment only — so a user named `cli` cannot turn
@@ -404,7 +406,8 @@ change what is mapped, a patch bump only fixes).
   anonymize, compare, web UI, Docker image; the first twelve real-TSF
   invariants recorded in CLAUDE.md.
 
-[Unreleased]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.3.0...v0.4.0
