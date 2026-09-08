@@ -2084,12 +2084,13 @@ def extract_archive(archive: Path, work_dir: Path, *,
 
 def repack_archive(members: Iterable[tarfile.TarInfo], tree: Path, output: Path, *,
                    progress: ProgressFn = _noop_progress,
-                   rename: Callable[[str], str] | None = None) -> int:
+                   rename: Callable[[str, bool], str] | None = None) -> int:
     """Write `output` with the same member order and metadata as the input,
     swapping in the payload found under `tree`. Returns members written.
 
-    `rename` maps a member name to the name it gets in the output — member
-    names carry identifiers too (techsupport_<devicename>_<date>.txt). The
+    `rename` maps a member name and whether it is a directory to the name it
+    gets in the output — member names carry identifiers too
+    (techsupport_<devicename>_<date>.txt), but a directory keeps its own. The
     payload is still read under the *original* name on disk."""
     members = list(members)
     total, written = len(members), 0
@@ -2106,7 +2107,8 @@ def repack_archive(members: Iterable[tarfile.TarInfo], tree: Path, output: Path,
                 progress("repack", written, total, output.name)
             if m.name == ".":
                 continue
-            info = tarfile.TarInfo(rename(m.name) if rename else m.name)
+            info = tarfile.TarInfo(
+                rename(m.name, m.isdir()) if rename else m.name)
             info.mode, info.uid, info.gid = m.mode, m.uid, m.gid
             info.uname, info.gname, info.mtime = m.uname, m.gname, m.mtime
             info.type = m.type
@@ -2560,8 +2562,8 @@ def anonymize_tsf(
             output_tgz.parent.mkdir(parents=True, exist_ok=True)
             renamed = [0]
 
-            def _rename(name: str) -> str:
-                new = mapped_member_name(anon.anonymize_text, name)
+            def _rename(name: str, is_dir: bool) -> str:
+                new = mapped_member_name(anon.anonymize_text, name, is_dir=is_dir)
                 if new != name:
                     renamed[0] += 1
                 return new
@@ -2585,7 +2587,8 @@ def anonymize_tsf(
     return report, anon.get_mapping()
 
 
-def mapped_member_name(rewrite: Callable[[str], str], name: str) -> str:
+def mapped_member_name(rewrite: Callable[[str], str], name: str, *,
+                       is_dir: bool = False) -> str:
     """A member's name with `rewrite` applied to its *file name only*.
 
     Directories in a TSF are PAN-OS layout (tmp/cli, opt/var/s8/cp/log/pan),
@@ -2593,9 +2596,15 @@ def mapped_member_name(rewrite: Callable[[str], str], name: str) -> str:
     `tmp/user83115/` on a real run and moved 347 members out of the layout
     every reader relies on. The same rule serves the compare, which pairs
     files and members by the mapped name.
+
+    `is_dir` extends that rule to the member that *is* the directory: its last
+    segment is its own name, so the rewrite reached it anyway. `var/log/sa` —
+    the sysstat directory — became `var/log/user001` because `sa` is a real
+    PAN-OS account, while the 34 files under it kept `var/log/sa/…`: the
+    archive lost the directory entry its own contents live in.
     """
     head, sep, base = name.rpartition("/")
-    if not base or base in (".", ".."):
+    if is_dir or not base or base in (".", ".."):
         return name
     return head + sep + rewrite(base)
 

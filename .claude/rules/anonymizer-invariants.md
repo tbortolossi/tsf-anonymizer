@@ -317,6 +317,19 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   members. The compare pairs files and members by the same mapped name, so
   "output = input with payloads swapped" holds through the mapping, not
   literally.
+  The rule was stated for parents and implemented for the last segment,
+  which left the member that *is* the directory: its last segment is its own
+  name, so the rewrite reached it anyway. On a real PA-440, `var/log/sa` —
+  the sysstat directory — came out as `var/log/user001` because `sa` is a
+  genuine PAN-OS account, while the 34 files under it kept `var/log/sa/…`:
+  the archive declared a directory nothing lived in and dropped the one that
+  held the files. `mapped_member_name` takes `is_dir` and returns the name
+  untouched for a directory; `repack_archive` passes `m.isdir()`, and the
+  compare passes it when it pairs archive members. Note this is the one place
+  the compare *imports* from `core` on purpose — pairing paths is not
+  deciding whether a change is legitimate. Tests:
+  `test_member_renaming_never_touches_directories` and
+  `test_a_directory_named_after_a_user_keeps_its_name`.
 - **A FQDN registers its parent domains** down to the registrable one, and
   the FQDN regex allows a dot before: `https://apex/` and `*.apex` survived a
   raw grep of the anonymized real TSF while the compare reported 0 leaks,

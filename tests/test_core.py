@@ -252,7 +252,8 @@ class TestAnonymizeTsf:
         # Names are preserved *through the mapping*: a member named after the
         # device comes out renamed, exactly as the text would.
         from tsf_anonymizer.core import mapped_member_name
-        assert [mapped_member_name(idx.apply, m.name) for m in ma] == [m.name for m in mb]
+        assert [mapped_member_name(idx.apply, m.name, is_dir=m.isdir()) for m in ma] \
+            == [m.name for m in mb]
         for x, y in zip(ma, mb, strict=True):
             assert (x.mode, x.uid, x.gid, x.uname, x.mtime, x.type) == (y.mode, y.uid, y.gid, y.uname, y.mtime, y.type)
 
@@ -1445,6 +1446,34 @@ def test_member_renaming_never_touches_directories(tmp_path, tsf):
         == "./tmp/cli/user001_netstat.txt"
     assert mapped_member_name(lambda s: "X", ".") == "."
     assert mapped_member_name(lambda s: "X", "./tmp/cli") == "./tmp/X"   # only the last component
+    # ...unless the member *is* the directory: its last segment is its own
+    # name. `var/log/sa` is the sysstat directory and `sa` a real PAN-OS
+    # account — renaming it to `var/log/user001` left the 34 files under it
+    # pointing at a directory the archive no longer declares.
+    assert mapped_member_name(lambda s: "X", "./var/log/sa", is_dir=True) == "./var/log/sa"
+    assert mapped_member_name(lambda s: "X", "./var/log/sa/sa21", is_dir=False) \
+        == "./var/log/sa/X"
+
+
+def test_a_directory_named_after_a_user_keeps_its_name(tmp_path):
+    """End to end: the directory member survives and still holds its files."""
+    staging = tmp_path / "s"
+    (staging / "var/log/sa").mkdir(parents=True)
+    (staging / "var/log/sa/sa21").write_text("sysstat sample for user sa\n")
+    src = tmp_path / "in.tgz"
+    with tarfile.open(src, "w:gz") as tar:
+        tar.add(staging / "var", arcname="./var")
+    out = tmp_path / "out.tgz"
+    _, mapping = anonymize_tsf(src, out, seed_mapping={"usernames": {"sa": "user001"}})
+    assert mapping["usernames"] == {"sa": "user001"}
+    with tarfile.open(out) as tar:
+        names = [m.name for m in tar.getmembers()]
+        payload = tar.extractfile("./var/log/sa/sa21").read()
+    # not vacuous: the name *is* mapped, it just does not reach the directory
+    assert b"user001" in payload and b"user sa" not in payload
+    assert "./var/log/sa" in names, names
+    assert "./var/log/user001" not in names, names
+    assert "./var/log/sa/sa21" in names, names
 
 
 class TestEnglishWordsAreNotIdentities:
