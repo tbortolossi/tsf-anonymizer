@@ -7,6 +7,8 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-08
+
 ### Fixed
 - **A seeded run no longer re-issues a pseudonym the seed already spent.**
   `Anonymizer.from_mapping` resumed each counter at the size of the mapping
@@ -418,7 +420,8 @@ change what is mapped, a patch bump only fixes).
   anonymize, compare, web UI, Docker image; the first twelve real-TSF
   invariants recorded in CLAUDE.md.
 
-[Unreleased]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/tbortolossi/tsf-anonymizer/compare/v0.4.0...v0.5.0
