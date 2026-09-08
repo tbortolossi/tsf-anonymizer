@@ -1315,7 +1315,8 @@ def compare_members(orig_tgz: Path, anon_tgz: Path,
     progress("verify", 2, 2, "")
     index = MappingIndex(mapping or {})
     mismatches: list[str] = []
-    o_names = [mapped_member_name(index.apply, m.name.lstrip("/")) for m in o]
+    o_names = [mapped_member_name(index.apply, m.name.lstrip("/"), is_dir=m.isdir())
+               for m in o]
     a_names = [m.name.lstrip("/") for m in a]
     if o_names != a_names:
         missing = sorted(set(o_names) - set(a_names))

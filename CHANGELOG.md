@@ -7,6 +7,16 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+### Fixed
+- **A directory member is never renamed.** The rule that member names are
+  rewritten on their last segment only — so a user named `cli` cannot turn
+  `tmp/cli/` into `tmp/user83115/` — did not cover the member that *is* the
+  directory, whose last segment is its own name. On a real PA-440,
+  `var/log/sa` (the sysstat directory) came out as `var/log/user001` because
+  `sa` is a genuine PAN-OS account, while the 34 files under it kept
+  `var/log/sa/…`: the archive declared an empty directory and no longer
+  declared the one holding the files.
+
 ## [0.5.1] - 2026-09-08
 
 ### Fixed
