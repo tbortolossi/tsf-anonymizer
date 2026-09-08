@@ -289,7 +289,7 @@ tsf-anonymizer serve --data-dir ./data
 
 ## Measured on a real TSF
 
-PA-440, PAN-OS 12.1, 156 MB archive, 562 members, 1.25 GB extracted, 508 files
+PA-440, PAN-OS 12.1, 156 MB archive, 563 members, 1.25 GB extracted, 508 files
 (2026-09-08, v0.5.1, one core):
 
 | | |
@@ -301,7 +301,7 @@ PA-440, PAN-OS 12.1, 156 MB archive, 562 members, 1.25 GB extracted, 508 files
 | free-text fields left | **0** — content removed, one placeholder per line |
 | binary files | 42, all byte-identical; 36 embed identifiers (`rule-hit-count.bin`, `wtmp`, `sa*`, `sslvpn-task.log`) |
 | routing | 30 routes re-derived, 14 connected — no mismatch, no public-address divergence |
-| archive | same 562 members, same order, same metadata |
+| archive | 562 members — every one but the `.` root entry, dropped by the repack on purpose — same order, same metadata |
 
 The same archive on the same single core read ~10 min on 2026-08-30, before
 free text was removed at all: this run does strictly more work in less time.
