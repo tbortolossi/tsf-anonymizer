@@ -157,6 +157,28 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   distinct attack sources merged on the copy, invisible to a compare that
   never checked value uniqueness. `MappingIndex.duplicate_pseudonyms` now
   reports a non-injective mapping in the summary and the UI.
+- **A seeded run resumes each counter past the highest number *issued*, not
+  past the table's size** (`_resume_counter`). The counters advance for names
+  that are never stored — `register_named_object` increments before the early
+  return for a name that already *is* a pseudonym — so a mapping holding 814
+  objects can carry `OBJ-0822`. `from_mapping` used to restart at
+  `len(table)`, which handed numbers the seed had already spent to different
+  originals: on a real Active-Active pair (`--seed-mapping` from the first
+  member), the second member's new objects got `OBJ-0817`, a pseudonym the
+  first member already used for another object. Two reals sharing one
+  pseudonym across a seeded pair is the exact failure seeding exists to
+  prevent, and it is worse than no correlation: an analyst reading both
+  copies merges two distinct objects instead of merely missing a link. The
+  same `len()` shortcut seeded the user, serial, FQDN and e-mail counters, so
+  all five were latent; only objects had spent enough numbers to bite. The
+  resume never returns less than `len(table)`, so a value no pattern
+  recognises (a name mapped by another category, an older sidecar) can only
+  make a run skip numbers, never re-issue one. The IP counters are not
+  concerned: the tree allocator's anti-reuse probe keeps the union injective.
+  The compare caught this on its own as `mapping_duplicate_pseudonyms` —
+  which is what that check is for. Tests:
+  `test_a_seeded_run_resumes_past_the_highest_pseudonym` and
+  `test_a_pseudonym_is_never_issued_twice_across_a_seeded_pair`.
 - **IP pseudonyms preserve prefix structure** (`_tree_fake`): same real
   prefix → same fake prefix, so subnets, route destinations — static or
   learned mid-log by OSPF/BGP — LSDB entries and nexthops stay mutually

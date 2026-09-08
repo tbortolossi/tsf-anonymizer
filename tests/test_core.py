@@ -286,6 +286,53 @@ class TestAnonymizeTsf:
         assert report.errors == 0
         assert report.replacements["ip_addresses"] > 0
 
+    def test_a_seeded_run_resumes_past_the_highest_pseudonym(self):
+        """Counters advance for names that are never stored — a mapping of one
+        object can already hold `OBJ-0822`. Resuming at `len(table)` re-issued
+        a number the seed had spent: on a real Active-Active pair, `OBJ-0817`
+        came to designate two different objects across the two copies, which
+        is precisely what seeding exists to prevent."""
+        from tsf_anonymizer.core import Anonymizer
+        seed = {
+            "named_objects": {"Real-Object": "OBJ-0822"},
+            "usernames": {"someone": "user007"},
+            "serial_numbers": {"001901000123": "900000000009"},
+            "fqdns": {"fw.example.test": "host012.anon.internal"},
+            "emails": {"a@example.test": "user031@host012.anon.internal"},
+        }
+        anon = Anonymizer.from_mapping(seed)
+        assert anon.register_named_object("Another-Object") == "OBJ-0823"
+        assert anon.anon_user("newcomer") == "user008"
+        assert anon.anon_fqdn("other.example.test").startswith("host013")
+        assert anon.anon_email("bob", "example.test").startswith("user032@")
+        assert anon.anon_serial("001901000456") == "900000000010"
+
+    def test_a_pseudonym_is_never_issued_twice_across_a_seeded_pair(self):
+        """The property the counters serve: seed a second run from the first
+        mapping and no pseudonym may designate two different originals."""
+        from tsf_anonymizer.core import Anonymizer
+        first = Anonymizer()
+        for i in range(10):
+            first.register_named_object(f"Site-Object-{i:02d}")
+        # a name that *is* already a pseudonym: the counter is spent and
+        # nothing is stored. It has to land *between* two stored entries —
+        # that is what pushes the highest number issued above len(table).
+        first.register_named_object(first.named_obj_map["Site-Object-00"])
+        for i in range(10, 20):
+            first.register_named_object(f"Site-Object-{i:02d}")
+        mapping = first.get_mapping()
+        second = Anonymizer.from_mapping(mapping)
+        for i in range(20, 30):
+            second.register_named_object(f"Site-Object-{i:02d}")
+        taken = mapping["named_objects"]
+        inverse = {}
+        for original, pseudo in second.named_obj_map.items():
+            inverse.setdefault(pseudo, set()).add(original)
+        for original, pseudo in taken.items():
+            inverse.setdefault(pseudo, set()).add(original)
+        clashes = {p: o for p, o in inverse.items() if len(o) > 1}
+        assert not clashes, clashes
+
     def test_mapping_only_writes_no_archive(self, tmp_path, tsf):
         out = tmp_path / "m.tgz"
         _, mapping = anonymize_tsf(tsf, out, mapping_only=True)

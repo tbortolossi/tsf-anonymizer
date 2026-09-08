@@ -7,6 +7,18 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+### Fixed
+- **A seeded run no longer re-issues a pseudonym the seed already spent.**
+  `Anonymizer.from_mapping` resumed each counter at the size of the mapping
+  table, but the counters also advance for names that are never stored, so a
+  mapping of 814 objects can hold `OBJ-0822`. Anonymizing the second member
+  of an Active-Active pair with `--seed-mapping` therefore gave its new
+  objects numbers the first member had used — `OBJ-0817` designated two
+  different objects across the two copies, so correlating them merged two
+  distinct objects rather than merely missing a link. The user, serial, FQDN
+  and e-mail counters carried the same shortcut. Counters now resume past the
+  highest number actually issued.
+
 ## [0.5.2] - 2026-09-08
 
 ### Fixed

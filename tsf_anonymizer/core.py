@@ -598,6 +598,35 @@ _TREE_CLASSES = tuple(
 # Anonymizer state
 # ---------------------------------------------------------------------------
 
+# Where a seeded run resumes each counter. Not `len(table)`: a counter also
+# advances for a name that ends up unstored — `register_named_object`
+# increments before the early return for a name that is already a pseudonym —
+# so a mapping of 814 objects can hold `OBJ-0822`. Resuming at 814 handed
+# `OBJ-0817` to a *different* object of the next archive: two reals sharing
+# one pseudonym across a seeded pair, the very thing seeding exists to
+# prevent (the compare caught it as `mapping_duplicate_pseudonyms`).
+_RESUME_USER_RE = re.compile(r"user(\d+)$")
+_RESUME_SERIAL_RE = re.compile(r"9(\d+)$")
+_RESUME_OBJ_RE = re.compile(r"[A-Z]+-(\d+)$")
+_RESUME_FQDN_RE = re.compile(r"host(\d+)(?:\.|$)")
+_RESUME_EMAIL_RE = re.compile(r"user(\d+)@")
+
+
+def _resume_counter(table: dict[str, str], pattern: re.Pattern[str]) -> int:
+    """The highest number already issued in `table`, never below its size.
+
+    A value the pattern does not recognise (a name mapped by another
+    category, an older sidecar) leaves the size as the floor, so a seeded run
+    can only ever skip numbers — never re-issue one.
+    """
+    highest = 0
+    for value in table.values():
+        m = pattern.match(value)
+        if m:
+            highest = max(highest, int(m.group(1)))
+    return max(len(table), highest)
+
+
 class Anonymizer:
     """Consistent pseudonymizer. Call ``build_patterns()`` after the prescan."""
 
@@ -1300,11 +1329,11 @@ class Anonymizer:
         # use the tree (the anti-reuse probe keeps the union injective).
         anon._priv_counter = sum(1 for v in anon.ip_map.values() if v.startswith("100."))
         anon._pub_counter = len(anon.ip_map) - anon._priv_counter
-        anon._user_counter = len(anon.user_map)
-        anon._serial_counter = len(anon.serial_map)
-        anon._obj_counter = len(anon.named_obj_map)
-        anon._fqdn_counter = len(anon.fqdn_map)
-        anon._email_counter = len(anon.email_map)
+        anon._user_counter = _resume_counter(anon.user_map, _RESUME_USER_RE)
+        anon._serial_counter = _resume_counter(anon.serial_map, _RESUME_SERIAL_RE)
+        anon._obj_counter = _resume_counter(anon.named_obj_map, _RESUME_OBJ_RE)
+        anon._fqdn_counter = _resume_counter(anon.fqdn_map, _RESUME_FQDN_RE)
+        anon._email_counter = _resume_counter(anon.email_map, _RESUME_EMAIL_RE)
         for table in (anon.ip_map, anon.user_map, anon.fqdn_map, anon.email_map,
                       anon.named_obj_map, anon.serial_map):
             anon._fakes.update(table.values())
