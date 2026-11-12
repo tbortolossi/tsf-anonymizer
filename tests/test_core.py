@@ -872,7 +872,7 @@ class TestDetectThenFreeze:
                     try:
                         p1, p2 = gzip.decompress(p1), gzip.decompress(p2)
                     except OSError:
-                        pass
+                        pass  # not gzip after all: compare the raw bytes
                 assert p1 == p2, name
 
     def test_rewrite_allocates_nothing_after_the_prescan(self, tmp_path, tsf):
@@ -1165,7 +1165,7 @@ class TestBatchErrorFixes:
         anon.register_named_object("GW-Paris", "gw")
         anon.build_patterns()
         out = anon.anonymize_text("see http://GW-Paris.acme.example/ and gateway GW-Paris up")
-        assert "http://GW-Paris.acme.example/" in out       # URL host: not an object
+        assert out.startswith("see http://GW-Paris.acme.example/ ")  # URL host: not an object
         assert "gateway GW-Paris up" not in out              # standalone: replaced
 
     def test_bruteforce_login_vocabulary_is_not_a_username(self, anon):
@@ -1173,6 +1173,16 @@ class TestBatchErrorFixes:
             line = f"failed authentication for user '{word}'.  Reason: Invalid username/password."
             assert anon.anonymize_text(line) == line
         assert not anon.user_map
+
+    def test_user_phrase_is_linear_on_a_long_whitespace_run(self, anon):
+        # `user\s*[=:,\s]+` let two quantifiers share every blank: a line of
+        # "user" and 50 000 tabs took minutes. The pattern now has one.
+        import time
+        t0 = time.perf_counter()
+        anon.anonymize_text("user" + "\t" * 50_000 + "x")
+        assert time.perf_counter() - t0 < 2
+        out = anon.anonymize_text("username = 'jdupont' logged in")
+        assert "jdupont" not in out
 
     def test_username_glued_to_a_timestamp_is_still_replaced(self, anon):
         anon.anon_user("jdupont")

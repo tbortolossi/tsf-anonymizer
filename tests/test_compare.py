@@ -244,6 +244,12 @@ class TestFileDiff:
         _, _, mapping, work = anonymized
         assert "error" in file_diff(work / "orig", work / "anon", "nope", mapping)
 
+    def test_path_outside_the_tree_is_refused(self, anonymized):
+        _, _, mapping, work = anonymized
+        for rel in ("../anon/var/log/pan/system.log", "/etc/passwd"):
+            d = file_diff(work / "orig", work / "anon", rel, mapping)
+            assert d["error"] == "path outside the archive"
+
     def test_max_hunks_truncation_is_declared(self, tmp_path):
         (tmp_path / "o").mkdir(); (tmp_path / "a").mkdir()
         (tmp_path / "o/f").write_text("\n".join(f"peer 10.0.0.{i%250+1} x" if i % 2 else "same" for i in range(50)))

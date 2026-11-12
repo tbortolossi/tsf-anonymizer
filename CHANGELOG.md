@@ -8,6 +8,15 @@ change what is mapped, a patch bump only fixes).
 ## [Unreleased]
 
 ### Security
+- **The username phrase pattern no longer backtracks quadratically.**
+  `user\s*[=:,\s]+` let two quantifiers share every blank, so a log line of
+  `user` followed by a long whitespace run took seconds to minutes (CodeQL
+  `py/polynomial-redos`). Same matches, one quantifier.
+- **The diff view refuses a path outside the extracted tree** in
+  `file_diff` itself, not only in the web route; job deletion builds its
+  directory from the stored job id; the UI encodes the job id in every URL
+  and `esc()` also escapes `'`. Plus CodeQL cleanups (empty `except`
+  comments, an unused regex, test assertions).
 - **Development dependencies raised past their advisories.** `certifi`
   2026.10.23 (critical: distrusted emSign roots), `filelock` 4.2.10 and
   `virtualenv` 21.15.6 (lock-file and symlink races). All three come only

@@ -115,3 +115,13 @@ here with its test and a CHANGELOG line, never only fixed.
   that fails one run in ten.
 - **A capped list says it is capped** (`truncated` in diff hunks, `total` in
   the report endpoint, top-50 leaks per file with a total count).
+
+- **A path built from a request is checked where it is used, not only in
+  the route.** `file_diff` resolves `root / rel` and refuses anything that
+  lands outside `root` (`..`, absolute, an outward symlink), even though the
+  `/diff` route already rejects `..` — the CLI and future callers do not go
+  through the route. `JobStore.delete`/`purge_trees` build the directory
+  from the stored `Job.id`, never from the id the request carried. In
+  `app.js` every job id goes through `encodeURIComponent` before it enters
+  a URL.
+
