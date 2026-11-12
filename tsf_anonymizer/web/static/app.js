@@ -116,13 +116,26 @@
 
   function renderPicked() {
     const perDevice = seedPolicy() === "device";
-    $("#file-list").innerHTML = picked.map((p, i) =>
-      `<li><span class="mono">${esc(p.f.name)}</span>${perDevice ? `
-       <input class="dev" type="text" data-dev="${i}" maxlength="40" placeholder="firewall"
-              value="${esc(p.device)}" title="archives carrying the same name share one mapping">` : ""}
-       <span class="opt">${fmtBytes(p.f.size)}</span>
-       <button type="button" class="link" data-drop="${i}" title="remove">✕</button></li>`).join("")
-      + (picked.length > 1 ? `<li class="notes" id="picked-summary">${esc(pickedSummary())}</li>` : "");
+    // Built node by node: file and device names never pass through innerHTML.
+    const el = (tag, props = {}) => Object.assign(document.createElement(tag), props);
+    const rows = picked.map((p, i) => {
+      const parts = [el("span", { className: "mono", textContent: p.f.name })];
+      if (perDevice) {
+        const inp = el("input", { className: "dev", type: "text", maxLength: 40, placeholder: "firewall",
+          value: p.device ?? "", title: "archives carrying the same name share one mapping" });
+        inp.dataset.dev = i;
+        parts.push(inp);
+      }
+      parts.push(el("span", { className: "opt", textContent: fmtBytes(p.f.size) }));
+      const drop = el("button", { type: "button", className: "link", title: "remove", textContent: "✕" });
+      drop.dataset.drop = i;
+      parts.push(drop);
+      const li = el("li");
+      parts.forEach((n, k) => { if (k) li.append(" "); li.append(n); });
+      return li;
+    });
+    if (picked.length > 1) rows.push(el("li", { className: "notes", id: "picked-summary", textContent: pickedSummary() }));
+    $("#file-list").replaceChildren(...rows);
     $$("[data-drop]").forEach((b) => b.addEventListener("click", () => {
       picked.splice(Number(b.dataset.drop), 1); renderPicked();
     }));
@@ -252,7 +265,7 @@
     $$("[data-del]", tb).forEach((b) => b.addEventListener("click", async (e) => {
       e.stopPropagation();
       if (!confirm("Delete this job and every file it holds (input, output, extracted trees)?")) return;
-      await fetch(`/api/jobs/${b.dataset.del}`, { method: "DELETE" });
+      await fetch(`/api/jobs/${encodeURIComponent(b.dataset.del)}`, { method: "DELETE" });
       loadJobs();
     }));
     $$("tr.clickable", tb).forEach((tr) => tr.addEventListener("click", () => openJob(tr.dataset.id)));

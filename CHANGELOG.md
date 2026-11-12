@@ -17,6 +17,8 @@ change what is mapped, a patch bump only fixes).
   directory from the stored job id; the UI encodes the job id in every URL
   and `esc()` also escapes `'`. Plus CodeQL cleanups (empty `except`
   comments, an unused regex, test assertions).
+- **The upload list is built with DOM nodes**, so file and device names never
+  pass through `innerHTML`; the job-delete request encodes its id too.
 - **Development dependencies raised past their advisories.** `certifi`
   2026.10.23 (critical: distrusted emSign roots), `filelock` 4.2.10 and
   `virtualenv` 21.15.6 (lock-file and symlink races). All three come only
