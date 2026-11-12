@@ -121,13 +121,15 @@ has its own rate column). `> show system resources` is **not** in the dump
 (checked on ten TSFs, 10.2 to 12.1): management-plane CPU and memory history
 is `mp-monitor.log` (§4).
 
-Packet-buffer cases (verified on eight real PBP-case TSFs, 10.2 → 11.2):
+Packet-buffer cases (verified on ten real PBP-case TSFs, 10.2 → 11.1,
+including a PA-5430 Active/Active pair):
 `Packet buffer congestion (utilization) is X/Y` lines in
 `tmp/cli/logs/show_log_system.txt` are the per-minute, weeks-long,
-reboot-surviving buffer history — Y is the measured pool total (the software
-buffer pool on 1400/3400/5400; the on-chip `PKI POOL DFLT` on
-3200/5200/7000, where `debug dataplane pool statistics` has **no** `Packet
-Buffers` row). Buffer average high while sessions idle = leak (resets only
+reboot-surviving buffer history — Y is the measured pool total (on a PA-5430
+the `Pow Atomic Memory Pools` `[ 0] Packet Buffers` total of `debug dataplane
+pool statistics`; the on-chip `PKI POOL DFLT` on 3200/5200/7000, where that
+command has **no** `Packet Buffers` row — match the number to a pool rather
+than assuming from the family). Buffer average high while sessions idle = leak (resets only
 at reboot); maxima spiking with recovery between = burst — the hour/day/week
 resource-monitor blocks (newest-first) and the pool table embedded in every
 `dp-monitor.log` snapshot decide between them. PBP counters on 10.2/11.x are
@@ -136,7 +138,15 @@ not only `pkt_buf_protect_*`; no TSF in the corpus carries `show session
 packet-buffer-protection`, `ingress-backlogs` or threat logs — blocked-host
 identity is unrecoverable after the fact. Details and the L2-storm /
 fragmentation / proxy-retransmit counter signatures: SKILL.md, buffers
-section.
+section. Three more from the PA-5430 pair, all detailed there: PBP set to
+`monitor-only` holds every PBP counter at zero while the buffer sits at 98 %
+(read the flags in `.merged-running-config.xml`, not the counters, and not
+`running-config.xml` on a Panorama-managed box); the offender is found in
+`show running application statistics` — a couple of never-closing GRE/ERSPAN
+sessions carrying 90 % of the firewall's bytes — never in `show session all`,
+which the dump caps at ~1024 sessions; and in Active/Active the feed belongs
+to one member for its whole life, so the peer only congests during that
+member's reboot minutes.
 
 ## 4. Daemon logs — which file for which problem
 
