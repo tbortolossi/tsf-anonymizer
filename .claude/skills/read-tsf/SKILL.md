@@ -78,7 +78,10 @@ says so as plainly.
    `/opt/panlogs/cores/` and `/var/cores/` as seen on the box) and
    `opt/panrepo/logs/reboot.log` (reason + timestamp per reboot — `SYSTEM
    REBOOT [CLI Initiated at …]`, `[external power cycle …]`, `[md initiated
-   dataplane restarts exhausted …]`; absent on one 10.2 PA-7050). `bios.log`,
+   dataplane restarts exhausted …]`, `[md initiated routed restarts
+   exhausted …]` — the same watchdog for any daemon, so read the process
+   name in the reason and go count that daemon's cores; absent on one 10.2
+   PA-7050). `bios.log`,
    `history.log` and `swm.log` (software manager) sit next to it.
 3. `tmp/cli/logs/show_log_system.txt` around the failure minute — the
    cross-daemon timeline. When you don't know where to look, this names the
@@ -357,10 +360,15 @@ when the day/week buckets were reset by a reboot:
   `tmp/cli/logs/show_log_system.txt` — one per minute above the alert
   threshold, spanning weeks, surviving reboots, present even when PBP is
   monitor-only (when threat logs and PBP counters are all zero). **The
-  denominator Y names the measured pool** and is platform-dependent:
-  the software packet-buffer pool total on single-chip x86 families
-  (1400/3400/5400), the on-chip `PKI POOL DFLT` total on ASIC families
-  (3200/5200/7000). An hour-of-day histogram of these lines
+  denominator Y names the measured pool** and is platform-dependent: on a
+  PA-5430 (family `5400f`, 11.1) it is the **`Pow Atomic Memory Pools`
+  `[ 0] Packet Buffers` total** of `> debug dataplane pool statistics`
+  (`.../278216`), not a `software packet buffer N` row — match the number
+  before naming the pool; the on-chip `PKI POOL DFLT` total on ASIC families
+  (3200/5200/7000). Read the distribution, not the count: pipe the `(P%)`
+  values through `sort -n` — a median at 97 % with 90 % of the minutes at or
+  above the **Activate** threshold is a firewall that has been asking for
+  mitigation for weeks. An hour-of-day histogram of these lines
   (`awk '{print substr($2,1,2)}' | sort | uniq -c`) that clusters in one
   clock window across days = a scheduled job (backups), not an attack.
 - `dp-monitor.log*` snapshots: each embeds the pool-statistics table
@@ -368,7 +376,10 @@ when the day/week buckets were reset by a reboot:
   timestamped free-count series every ~10 min), and each `--- panio` section
   embeds a **full resource-monitor dump** including per-second
   `packet buffer` / `packet descriptor (on-chip)` rows — the pre-reboot
-  history.
+  history. That series samples every ~10 min, so it *undercounts*: on a
+  PA-5430 with 19 congested minutes in the day it caught 3. Use it to prove
+  an event lasted (a 10-min sampler landing on 98 % means seconds-to-minutes,
+  not a microburst) and `show_log_system.txt` to count them.
 
 **Packet Buffer Protection (PBP)** — two phases, three counters — but the
 counter *names* below exist on some releases only: on 10.2 and 11.x (and
@@ -406,6 +417,72 @@ class); max and avg rising together = burst.
   are not exported, and `debug dataplane show dos block-table` is momentary:
   a TSF taken between bursts cannot say *which* hosts PBP blocked. Only a
   live capture during the incident can.
+
+**PBP in monitor-only mode — the reason every PBP counter is zero at 98 %.**
+Before writing "PBP never fired", read the config flags, not the counters:
+`packet-buffer-protection-monitor-only` set to `yes` under
+`deviceconfig/setting/session` means PBP measures, logs the
+`Packet buffer congestion` lines, and **drops nothing** — `flow_dos_pbp_*`
+and `pkt_buf_protect_*` stay at zero for months while the buffer sits above
+Activate. Seen on both members of a real PA-5430 A/A pair. On a
+**Panorama-managed** firewall those flags are only in
+`saved-configs/.merged-running-config.xml`, carrying a `ptpl="<template>"`
+attribute — `running-config.xml` (~20 KB there) has none of them, and a
+grep of the wrong file reports "PBP not configured". Expect the set to be
+**incomplete**: a device can inherit `-enable`/`-monitor-only` from its
+template while `-alert`/`-activate`/`-block-countdown` come from a stack the
+peer has and it does not, in which case the factory 50/80/80 are what is in
+force. Alongside it, `> show zone-protection` answering
+`Number of zones with protection profile: 0` means the box has no flood
+mitigation at all — PBP monitor-only plus no zone protection is the
+"nothing was ever going to stop this" configuration.
+
+**Find the offending session through the application table, not the session
+table.** `> show session all` in the command dump is **capped at ~1024
+sessions** (2 lines each) — on a firewall holding 40 k sessions it lists 2 %
+of them and the offender is almost never in it, so an empty
+`grep "/47 "` there says nothing. `> show running application statistics` is
+the one section with per-application byte and packet totals since boot:
+sort it by bytes and read the `sessions` column. **A handful of sessions
+holding most of the bytes is the whole finding** — a real PA-5430 read
+`gre 2 580472156 561719594115` beside a `Total` of 634 M packets: two
+never-closing GRE sessions carrying 91 % of the packets and 90 % of the
+bytes of the entire firewall. Mirror feeds (ERSPAN is GRE), backup
+replication and tunnel transit all show this shape; ordinary traffic never
+does.
+
+**The one-way-feed signature in `> show counter interface all`.** Fold the
+per-interface counters into a table (`awk '/^Interface: /{i=$2} /^rx-bytes/
+{rb=$2} /^tx-bytes/{print i, rb, $2}'`) and compare rx-bytes with tx-bytes
+per port. A **ratio of 40:1 or more on the ingress port, mirrored on the
+egress port**, is traffic that enters and never answers — a mirror/ERSPAN/tap
+feed crossing the firewall, not a client-server flow. On the PA-5430 pair the
+two 100 G uplinks read 35 TB in / 0.8 TB out in 21 h (3.6 Gbps, 394 kpps)
+against 34.7 TB out on the LACP bundle; that sum matching
+`> show session info`'s `Throughput` and `Packet rate` is what proves those
+ports carry the whole load. Beware the HA ports (`show interface all` marks
+their zone `ha`): on the secondary of an A/A pair the HA2 data link can be
+the busiest port on the box and is not customer traffic.
+
+**Active/Active: attribute the buffer to the session owner, and read both
+members.** In A/A the owner is chosen on the first packet, so a long-lived
+feed lives on **one** member for its whole life: that member peaks at 97 %
+every hour while the peer idles at its 7 % baseline, and no single TSF shows
+the pair. The proof of causation is a failover: on the peer, the handful of
+`Packet buffer congestion` lines are dated to the minute of the owner's
+reboot in its `opt/panrepo/logs/reboot.log` — the feed moved, the buffer
+saturated within 12 s, and it recovered when the owner came back. Do not
+read the non-owner's `show counter global` as traffic: its top counters are
+HA plumbing (`ha_msg_recv`, `ha_session_update_msg_recv`,
+`flow_fpga_rcv_ha`, `pkt_recv_qos_2`), and a `session_allocated` in the tens
+of billions on a box holding 391 live sessions is the phantom churn of
+`ha_update_no_session` → `ha_update_to_setup` → `ha_update_to_setup_err`,
+not sessions. That A/A error family — `ha_err_msg_payload`,
+`ha_egress_intf_err`, `ha_err_session_update`, plus
+`flow_fpga_rcv_igr_INTFNF` / `flow_fpga_ingress_exception_err` and
+`flow_rcv_dot1q_tag_err` — is its own finding (HA3/HA2 forwarding cannot
+resolve the egress interface or its 802.1q tag) and deserves a separate
+line in the report; it is not the buffer cause.
 
 Buffer-exhaustion counters when PBP is off or overwhelmed:
 `pkt_alloc_fail*`, `buf_alloc_fail`, `hw_buf_alloc_fail`, `flow_rcv_err_pkt`,
