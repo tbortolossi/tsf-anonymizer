@@ -297,14 +297,14 @@ class JobStore:
             job = self._jobs.pop(job_id, None)
         if job is None:
             return False
-        shutil.rmtree(self.job_dir(job_id), ignore_errors=True)
+        shutil.rmtree(self.job_dir(job.id), ignore_errors=True)  # the stored id, not the request's
         return True
 
     def purge_trees(self, job_id: str) -> bool:
         job = self.get(job_id)
         if job is None:
             return False
-        shutil.rmtree(self.job_dir(job_id) / "work", ignore_errors=True)
+        shutil.rmtree(self.job_dir(job.id) / "work", ignore_errors=True)
         job.trees_kept = False
         self._save(job)
         return True

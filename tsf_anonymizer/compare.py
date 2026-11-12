@@ -37,6 +37,7 @@ import difflib
 import gzip
 import ipaddress
 import multiprocessing
+import os
 import re
 import tarfile
 import tempfile
@@ -81,7 +82,6 @@ def _noop(phase: str, done: int, total: int, message: str) -> None:
     pass
 
 
-_TOKEN_RE = re.compile(r"[\w][\w.\-@]*")
 _TIMESTAMP_RE = re.compile(
     r"\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2}"
     r"|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +\d{1,2} \d{2}:\d{2}:\d{2}\b"
@@ -1008,7 +1008,7 @@ def _routing_view(tree: Path) -> dict | None:
                     try:
                         connected.append(ipaddress.ip_network(name, strict=False))
                     except ValueError:
-                        pass
+                        pass  # not an address (a variable or a typo): no route
     routes: list = []  # (network, nexthop | None)
     for sr in root.iter("static-route"):
         for e in sr.findall(".//entry"):
@@ -1064,7 +1064,7 @@ def _routing_view(tree: Path) -> dict | None:
                     try:
                         nh = ipaddress.ip_address(pm.group("nh"))
                     except ValueError:
-                        pass
+                        pass  # an interface name in the next-hop column
             if net is not None:
                 routes.append((net, nh, raw_net))
         # OSPF LSDB: a type-3 (Summary) row's LS ID column is the network
@@ -1374,6 +1374,17 @@ def compare_archives(orig_tgz: Path, anon_tgz: Path, mapping: dict,
 # Diff view for the UI
 # ---------------------------------------------------------------------------
 
+def _contained(root: Path, rel: str) -> Path | None:
+    """``root / rel`` resolved, or None when it escapes ``root`` (``..``, an
+    absolute path, a symlink pointing out). The web route already rejects
+    the first two; this is the check for every other caller."""
+    base = os.path.realpath(root)
+    full = os.path.realpath(os.path.join(base, rel))
+    if not full.startswith(base + os.sep):
+        return None
+    return Path(full)
+
+
 def file_diff(orig_dir: Path, anon_dir: Path, rel: str, mapping: dict,
               context: int = 3, max_hunks: int = 200, start_line: int = 1,
               window: int = 0) -> dict:
@@ -1382,9 +1393,12 @@ def file_diff(orig_dir: Path, anon_dir: Path, rel: str, mapping: dict,
     With ``window`` > 0 the raw side-by-side lines from ``start_line`` are
     returned instead of hunks (for a "browse the whole file" view).
     """
-    o_path, a_path = orig_dir / rel, anon_dir / rel
-    if not a_path.is_file():
-        a_path = anon_dir / mapped_member_name(MappingIndex(mapping).apply, rel)  # renamed
+    o_path = _contained(orig_dir, rel)
+    a_path = _contained(anon_dir, rel)
+    if a_path is not None and not a_path.is_file():
+        a_path = _contained(anon_dir, mapped_member_name(MappingIndex(mapping).apply, rel))  # renamed
+    if o_path is None or a_path is None:
+        return {"path": rel, "error": "path outside the archive"}
     if not o_path.is_file() or not a_path.is_file():
         return {"path": rel, "error": "file missing on one side"}
     o_raw, o_kind = _read_payload(o_path)

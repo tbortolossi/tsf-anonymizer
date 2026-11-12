@@ -35,6 +35,12 @@ test in `tests/` and a line under *Unreleased* in CHANGELOG.md.
   sound — the literal is part of every *match*, not merely mentioned in the
   pattern — and a test asserts it. A pattern that gains an alternative
   without its literal must leave the table.
+- **No two adjacent quantifiers may share a character.** `_USER_PHRASE_RE`
+  had `user(?:name)?\s*[=:,\s]+`: both runs accept a blank, so a line of
+  `user` and a long whitespace run backtracks quadratically (20 000 tabs:
+  2 s; a log line is attacker-written text). `[=:,\s]+` alone matches the
+  same strings. Any new phrase pattern collapses such pairs into one class;
+  a timing test with a 50 000-blank line guards this one.
 - **The serial fallback is discovery, and a frozen rewrite has none left.**
   `prescan_text_identities` runs `_SERIAL_FALLBACK_RE` over the original of
   every text file, so by rewrite time the known-serial trie (same boundaries,

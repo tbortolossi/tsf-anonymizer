@@ -2,7 +2,7 @@
 (() => {
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
-  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const fmtBytes = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : b < 1073741824 ? `${(b / 1048576).toFixed(1)} MB` : `${(b / 1073741824).toFixed(2)} GB`;
   const fmtDate = (t) => new Date(t * 1000).toLocaleString("en-GB");
   const fmtDur = (s) => s < 60 ? `${Math.round(s)}s`
@@ -314,7 +314,7 @@
   }
 
   async function pollJob() {
-    const r = await fetch(`/api/jobs/${state.jobId}`);
+    const r = await fetch(`/api/jobs/${encodeURIComponent(state.jobId)}`);
     if (!r.ok) { $("#job-header").innerHTML = `<p>job not found</p>`; return; }
     const job = await r.json();
     renderHeader(job);
@@ -557,7 +557,7 @@
     const params = new URLSearchParams({ limit: 2000 });
     if (state.filter) params.set("status", state.filter);
     if (state.q) params.set("q", state.q);
-    const r = await fetch(`/api/jobs/${state.jobId}/report?${params}`);
+    const r = await fetch(`/api/jobs/${encodeURIComponent(state.jobId)}/report?${params}`);
     if (!r.ok) return;
     const data = await r.json();
     $("#file-count").textContent = `${data.files.length} of ${data.total} shown`;
@@ -599,7 +599,7 @@
   async function openDiff(path) {
     state.diffPath = path;
     const ctx = $("#diff-context").value || 3;
-    const r = await fetch(`/api/jobs/${state.jobId}/diff?path=${encodeURIComponent(path)}&context=${ctx}`);
+    const r = await fetch(`/api/jobs/${encodeURIComponent(state.jobId)}/diff?path=${encodeURIComponent(path)}&context=${ctx}`);
     const body = $("#diff-body");
     $("#diff-title").textContent = path;
     $("#diff-view").hidden = false;
@@ -626,7 +626,7 @@
     $("#diff-view").scrollIntoView({ behavior: "smooth", block: "start" });
   }
   async function browse(path, start) {
-    const r = await fetch(`/api/jobs/${state.jobId}/diff?path=${encodeURIComponent(path)}&window=200&start_line=${start}`);
+    const r = await fetch(`/api/jobs/${encodeURIComponent(state.jobId)}/diff?path=${encodeURIComponent(path)}&window=200&start_line=${start}`);
     const d = await r.json();
     const end = d.start_line + d.rows.length - 1;
     $("#diff-body").innerHTML = `<p class="notes">lines ${d.start_line}–${end} of ${d.total_lines}

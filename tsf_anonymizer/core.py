@@ -484,7 +484,7 @@ _IP_RE = re.compile(
 _USER_PHRASE_RE = re.compile(
     r"(?:authenticated\s+for\s+user\s+['\"]"
     r"|for\s+user\s+['\"]"
-    r"|(?:non-admin\s+)?user(?:name)?\s*[=:,\s]+['\"]"
+    r"|(?:non-admin\s+)?user(?:name)?[=:,\s]+['\"]"
     r"|user\s+thru\s+\S+\s+['\"]"
     r")([a-zA-Z][a-zA-Z0-9._@-]{1,})['\"]?"
 )

@@ -90,7 +90,8 @@ def test_anonymize_job_end_to_end(client, tmp_path):
 
     # listing + delete
     assert [j["id"] for j in client.get("/api/jobs").json()] == [job["id"]]
-    assert client.delete(f"/api/jobs/{job['id']}").status_code == 200
+    deleted = client.delete(f"/api/jobs/{job['id']}")
+    assert deleted.status_code == 200
     assert client.get(f"/api/jobs/{job['id']}").status_code == 404
 
 
