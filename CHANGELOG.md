@@ -7,6 +7,14 @@ change what is mapped, a patch bump only fixes).
 
 ## [Unreleased]
 
+### Security
+- **Development dependencies raised past their advisories.** `certifi`
+  2026.10.23 (critical: distrusted emSign roots), `filelock` 4.2.10 and
+  `virtualenv` 21.15.6 (lock-file and symlink races). All three come only
+  through the dev group (`httpx` for the tests, `pre-commit`); the Docker
+  image, built `--no-dev`, never contained them. Also carries Dependabot's
+  python-group bumps (fastapi 0.162.0, isal 1.9.1, ruff 0.17.4, …).
+
 ## [0.5.3] - 2026-09-08
 
 ### Fixed
